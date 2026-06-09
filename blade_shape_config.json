@@ -37,16 +37,16 @@
     "duplicate_distance_norm": 0.02
   },
   "variables": [
-    {"name": "hub_beta_0_deg_offset", "lower": -6.0, "upper": 6.0},
-    {"name": "hub_beta_1_deg_offset", "lower": -6.0, "upper": 6.0},
-    {"name": "hub_beta_2_deg_offset", "lower": -6.0, "upper": 6.0},
-    {"name": "hub_beta_3_deg_offset", "lower": -6.0, "upper": 6.0},
-    {"name": "hub_beta_4_deg_offset", "lower": -6.0, "upper": 6.0},
-    {"name": "shroud_beta_0_deg_offset", "lower": -6.0, "upper": 6.0},
-    {"name": "shroud_beta_1_deg_offset", "lower": -6.0, "upper": 6.0},
-    {"name": "shroud_beta_2_deg_offset", "lower": -6.0, "upper": 6.0},
-    {"name": "shroud_beta_3_deg_offset", "lower": -6.0, "upper": 6.0},
-    {"name": "shroud_beta_4_deg_offset", "lower": -6.0, "upper": 6.0},
+    {"name": "hub_beta_0_deg_offset", "lower": -4.0, "upper": 4.0},
+    {"name": "hub_beta_1_deg_offset", "lower": -5.0, "upper": 5.0},
+    {"name": "hub_beta_2_deg_offset", "lower": -5.0, "upper": 5.0},
+    {"name": "hub_beta_3_deg_offset", "lower": -5.0, "upper": 2.5},
+    {"name": "hub_beta_4_deg_offset", "lower": -2.5, "upper": 5.0},
+    {"name": "shroud_beta_0_deg_offset", "lower": -4.0, "upper": 4.0},
+    {"name": "shroud_beta_1_deg_offset", "lower": -4.0, "upper": 4.0},
+    {"name": "shroud_beta_2_deg_offset", "lower": -5.0, "upper": 5.0},
+    {"name": "shroud_beta_3_deg_offset", "lower": -5.0, "upper": 5.0},
+    {"name": "shroud_beta_4_deg_offset", "lower": -5.0, "upper": 5.0},
     {"name": "hub_theta_deg_offset", "lower": -2.0, "upper": 2.0},
     {"name": "shroud_theta_deg_offset", "lower": -2.0, "upper": 2.0}
   ]

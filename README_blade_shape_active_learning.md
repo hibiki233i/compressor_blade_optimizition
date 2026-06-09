@@ -35,6 +35,11 @@ The beta offsets map to the five hub and five shroud mean-line beta control
 values. The theta offsets map to the two stacking angles. End-point beta values
 are synchronized with `Beta1` and `Beta2` in the CFturbo batch file.
 
+Initial beta bounds are intentionally narrower than the literature hard limit of
+10 degrees because the current `0908-2.cft` hub outlet segment is already steep.
+The asymmetric `hub_beta_3` / `hub_beta_4` bounds avoid worsening that outlet
+gradient while still allowing changes that relax it.
+
 ## Run
 
 Static check:
