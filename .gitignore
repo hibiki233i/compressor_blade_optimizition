@@ -1,0 +1,41 @@
+# Python caches
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Local active-learning / CFD run outputs
+blade_al_runs/
+ansys_work/
+
+# CFD / turbomachinery generated artifacts
+*.res
+*.def
+*.gtm
+*.out
+*.trn
+*.bak
+*.tmp
+*.log
+*.cft-res
+*_Mesh.gtm
+CFX_Results.txt
+
+# Generated CFturbo / TurboGrid case files
+run_cfturbo.cft-batch
+run_turbogrid.tst
+run_turbogrid.tse
+input_model.cft
+0908-2.cft
+0908-2_modified.cft
+Impeller_hub.curve
+Impeller_shroud.curve
+Impeller_profile.curve
+
+# Extracted/reference scratch files
+ekradi_madadi_2020.txt
+
+# Office/temp files
+~$*
+*.tmp
+*.bak
+*.docx

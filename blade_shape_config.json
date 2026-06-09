@@ -1,0 +1,53 @@
+{
+  "paths": {
+    "powershell_exe": "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+    "geometry_script_path": "D:\\blade optizamation\\Run-BladeShapeGeometryMeshing.ps1",
+    "cfturbo_exe": "C:\\Program Files\\CFturbo 2025.2.2\\CFturbo.exe",
+    "turbogrid_exe": "D:\\ANSYS Inc\\v251\\TurboGrid\\bin\\cfxtg.exe",
+    "cfx_bin_dir": "D:\\ANSYS Inc\\v251\\CFX\\bin",
+    "template_dir": "F:\\optimazition\\Templates",
+    "base_cft": "F:\\optimazition\\Templates\\0908-2.cft",
+    "cft_batch_template": "F:\\optimazition\\Templates\\BaseModel.cft-batch",
+    "turbogrid_template": "F:\\optimazition\\Templates\\BaseMeshing.tst",
+    "template_cfx": "F:\\optimazition\\Templates\\BaseModel.cfx",
+    "template_cse": "F:\\optimazition\\Templates\\Extract_Results.cse",
+    "output_dir": "D:\\blade optizamation\\blade_al_runs"
+  },
+  "runtime": {
+    "cfx_cores": 8,
+    "n_blades": 10,
+    "p_out_pa": 10.0,
+    "rpm": 10000.0,
+    "mass_flow": 0.0036,
+    "alpha0": 0.0,
+    "initial_samples": 6,
+    "iterations": 2,
+    "batch_size": 2,
+    "candidate_pool_size": 600,
+    "nsga2_pop_size": 80,
+    "nsga2_generations": 50,
+    "seed": 42,
+    "max_new_cfd": 10
+  },
+  "constraints": {
+    "max_beta_offset_deg": 10.0,
+    "max_theta_offset_deg": 2.0,
+    "max_generated_beta_step_deg": 6.0,
+    "baseline_step_margin_deg": 0.5,
+    "duplicate_distance_norm": 0.02
+  },
+  "variables": [
+    {"name": "hub_beta_0_deg_offset", "lower": -6.0, "upper": 6.0},
+    {"name": "hub_beta_1_deg_offset", "lower": -6.0, "upper": 6.0},
+    {"name": "hub_beta_2_deg_offset", "lower": -6.0, "upper": 6.0},
+    {"name": "hub_beta_3_deg_offset", "lower": -6.0, "upper": 6.0},
+    {"name": "hub_beta_4_deg_offset", "lower": -6.0, "upper": 6.0},
+    {"name": "shroud_beta_0_deg_offset", "lower": -6.0, "upper": 6.0},
+    {"name": "shroud_beta_1_deg_offset", "lower": -6.0, "upper": 6.0},
+    {"name": "shroud_beta_2_deg_offset", "lower": -6.0, "upper": 6.0},
+    {"name": "shroud_beta_3_deg_offset", "lower": -6.0, "upper": 6.0},
+    {"name": "shroud_beta_4_deg_offset", "lower": -6.0, "upper": 6.0},
+    {"name": "hub_theta_deg_offset", "lower": -2.0, "upper": 2.0},
+    {"name": "shroud_theta_deg_offset", "lower": -2.0, "upper": 2.0}
+  ]
+}
