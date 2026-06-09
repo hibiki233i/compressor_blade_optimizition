@@ -29,6 +29,12 @@
     "seed": 42,
     "max_new_cfd": 10
   },
+  "surrogate": {
+    "model": "gp",
+    "fallback_model": "rbf_ridge_ensemble",
+    "ehvi_y_samples": 32,
+    "ehvi_hv_points": 2048
+  },
   "constraints": {
     "max_beta_offset_deg": 10.0,
     "max_theta_offset_deg": 2.0,

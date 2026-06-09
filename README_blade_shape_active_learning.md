@@ -9,8 +9,9 @@ from successful CFD evaluations.
 
 ## Files
 
-- `blade_shape_active_learning.py` runs DOE, surrogate fitting, NSGA-II-style
-  candidate search, acquisition, CFD execution, and Pareto export.
+- `blade_shape_active_learning.py` runs DOE, GP/Kriging surrogate fitting,
+  NSGA-II-style candidate search, EGO/MOEGO acquisition, CFD execution, and
+  Pareto export.
 - `Run-BladeShapeGeometryMeshing.ps1` writes the 12 blade-shape variables into
   the CFturbo batch XML and runs CFturbo and TurboGrid.
 - `blade_shape_cfx_runner.py` imports the generated `Impeller_Mesh.gtm` into the
@@ -81,7 +82,10 @@ All outputs are under `blade_al_runs` by default:
 
 - `Power` is retained in `training_data.csv` for engineering review, but it is
   not an objective and is not used as a penalty.
-- The first version uses a local RBF-ridge ensemble implemented with NumPy so it
-  does not require `sklearn`, `torch`, or `pymoo`.
+- The preferred surrogate is Gaussian Process/Kriging via
+  `sklearn.gaussian_process.GaussianProcessRegressor` with a Matern 5/2 ARD
+  kernel. Acquisition uses a Monte-Carlo approximation of expected hypervolume
+  improvement, so this is an EGO/MOEGO-style loop. If `sklearn` is unavailable,
+  the code falls back to the local RBF-ridge ensemble.
 - A future 28-variable splitter-blade version needs a CFturbo baseline with
   splitter geometry enabled and visible in the XML.

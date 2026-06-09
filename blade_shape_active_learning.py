@@ -21,6 +21,15 @@ try:
 except Exception:  # pragma: no cover
     qmc = None
 
+try:
+    from sklearn.gaussian_process import GaussianProcessRegressor
+    from sklearn.gaussian_process.kernels import ConstantKernel, Matern, WhiteKernel
+except Exception:  # pragma: no cover
+    GaussianProcessRegressor = None
+    ConstantKernel = None
+    Matern = None
+    WhiteKernel = None
+
 
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 OBJECTIVE_COLUMNS = ["Efficiency", "PressureRatio", "MassFlow"]
@@ -340,6 +349,63 @@ class RbfRidgeEnsemble:
         return stack.mean(axis=0), stack.std(axis=0)
 
 
+class GpKrigingSurrogate:
+    """Independent-output Gaussian-process surrogate for EGO/MOEGO sampling."""
+
+    def __init__(self, config: dict[str, Any], seed: int = 42):
+        if GaussianProcessRegressor is None:
+            raise RuntimeError("scikit-learn is not available.")
+        self.config = config
+        self.seed = seed
+        self.models: list[Any] = []
+        self.y_mean: np.ndarray | None = None
+        self.y_std: np.ndarray | None = None
+
+    def fit(self, x_raw: np.ndarray, y_raw: np.ndarray) -> "GpKrigingSurrogate":
+        x = normalize_x(self.config, x_raw)
+        self.y_mean = y_raw.mean(axis=0)
+        self.y_std = y_raw.std(axis=0)
+        self.y_std[self.y_std < 1e-9] = 1.0
+        y = (y_raw - self.y_mean) / self.y_std
+        self.models.clear()
+        for target_idx in range(y.shape[1]):
+            kernel = (
+                ConstantKernel(1.0, (1e-3, 1e3))
+                * Matern(length_scale=np.ones(x.shape[1]), length_scale_bounds=(1e-2, 1e2), nu=2.5)
+                + WhiteKernel(noise_level=1e-5, noise_level_bounds=(1e-8, 1e-1))
+            )
+            model = GaussianProcessRegressor(
+                kernel=kernel,
+                normalize_y=False,
+                n_restarts_optimizer=3,
+                random_state=self.seed + target_idx,
+            )
+            model.fit(x, y[:, target_idx])
+            self.models.append(model)
+        return self
+
+    def predict(self, x_raw: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        if self.y_mean is None or self.y_std is None or not self.models:
+            raise RuntimeError("Surrogate has not been fitted.")
+        x = normalize_x(self.config, x_raw)
+        means = []
+        stds = []
+        for model_idx, model in enumerate(self.models):
+            mean, std = model.predict(x, return_std=True)
+            means.append(mean * self.y_std[model_idx] + self.y_mean[model_idx])
+            stds.append(np.maximum(std * self.y_std[model_idx], 1e-12))
+        return np.column_stack(means), np.column_stack(stds)
+
+
+def fit_surrogate(config: dict[str, Any], x_train: np.ndarray, y_train: np.ndarray, seed: int) -> Any:
+    requested = str(config.get("surrogate", {}).get("model", "gp")).lower()
+    if requested in {"gp", "kriging", "gaussian_process"} and GaussianProcessRegressor is not None and len(x_train) >= 3:
+        return GpKrigingSurrogate(config, seed=seed).fit(x_train, y_train)
+    if requested in {"gp", "kriging", "gaussian_process"} and GaussianProcessRegressor is None:
+        print("[surrogate] scikit-learn is unavailable; falling back to RBF-ridge ensemble.")
+    return RbfRidgeEnsemble(config, seed=seed).fit(x_train, y_train)
+
+
 def pairwise_distances(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     diff = a[:, None, :] - b[None, :, :]
     return np.sqrt(np.sum(diff * diff, axis=2))
@@ -412,7 +478,7 @@ def crowding_distance(objectives: np.ndarray, front: list[int]) -> dict[int, flo
 def nsga2_candidates(
     config: dict[str, Any],
     baseline: BaselineShape,
-    surrogate: RbfRidgeEnsemble,
+    surrogate: Any,
     existing: np.ndarray,
     seed: int,
 ) -> np.ndarray:
@@ -481,22 +547,21 @@ def select_acquisition(
     config: dict[str, Any],
     baseline: BaselineShape,
     candidates: np.ndarray,
-    surrogate: RbfRidgeEnsemble,
+    surrogate: Any,
     existing: np.ndarray,
+    observed_objectives: np.ndarray,
     count: int,
 ) -> list[np.ndarray]:
     if len(candidates) == 0:
         return []
     mean, std = surrogate.predict(candidates)
-    obj_norm = normalize_objectives(mean)
-    uncertainty = normalize_objectives(std).mean(axis=1)
-    predicted_pareto = pareto_mask(mean).astype(float)
+    ehvi = approximate_expected_hvi(config, observed_objectives, mean, std)
     if existing.size:
         dist = pairwise_distances(normalize_x(config, candidates), normalize_x(config, existing)).min(axis=1)
     else:
         dist = np.ones(len(candidates))
     dist_norm = dist / max(float(np.max(dist)), 1e-12)
-    score = 2.0 * predicted_pareto + obj_norm.mean(axis=1) + 0.75 * uncertainty + 0.5 * dist_norm
+    score = normalize_vector(ehvi) + 0.15 * dist_norm
     order = np.argsort(score)[::-1]
     selected: list[np.ndarray] = []
     selected_existing = existing.copy()
@@ -513,10 +578,74 @@ def select_acquisition(
     return selected
 
 
+def normalize_vector(values: np.ndarray) -> np.ndarray:
+    lo = float(np.min(values))
+    hi = float(np.max(values))
+    return (values - lo) / max(hi - lo, 1e-12)
+
+
 def normalize_objectives(values: np.ndarray) -> np.ndarray:
     lo = values.min(axis=0)
     hi = values.max(axis=0)
     return (values - lo) / np.maximum(hi - lo, 1e-12)
+
+
+def approximate_expected_hvi(
+    config: dict[str, Any],
+    observed_objectives: np.ndarray,
+    mean: np.ndarray,
+    std: np.ndarray,
+) -> np.ndarray:
+    """Monte-Carlo approximation of expected hypervolume improvement.
+
+    Objectives are maximized. This is intentionally approximate but preserves
+    EGO behavior: candidates score highly only when sampled GP outcomes expand
+    the currently observed CFD Pareto dominated volume.
+    """
+    if len(mean) == 0:
+        return np.array([])
+    if observed_objectives.size == 0:
+        return normalize_objectives(mean).mean(axis=1)
+
+    settings = config.get("surrogate", {})
+    n_y_samples = int(settings.get("ehvi_y_samples", 32))
+    n_hv_points = int(settings.get("ehvi_hv_points", 2048))
+    seed = int(config["runtime"].get("seed", 42)) + 707
+    rng = np.random.default_rng(seed)
+
+    pareto = observed_objectives[pareto_mask(observed_objectives)]
+    combined_hi = np.maximum(np.max(observed_objectives, axis=0), np.max(mean + 2.0 * std, axis=0))
+    combined_lo = np.min(observed_objectives, axis=0)
+    span = np.maximum(combined_hi - combined_lo, 1e-9)
+    reference = combined_lo - 0.05 * span
+    upper = combined_hi + 0.05 * span
+    volume = float(np.prod(np.maximum(upper - reference, 1e-12)))
+    points = reference + rng.random((n_hv_points, mean.shape[1])) * (upper - reference)
+
+    current_dominated = dominated_by_any(points, pareto)
+    improvement_region = ~current_dominated
+    if not np.any(improvement_region):
+        improvement_region = np.ones(len(points), dtype=bool)
+
+    scores = np.zeros(len(mean), dtype=float)
+    safe_std = np.maximum(std, 1e-12)
+    for i in range(len(mean)):
+        sampled_y = rng.normal(mean[i], safe_std[i], size=(n_y_samples, mean.shape[1]))
+        gains = []
+        for y in sampled_y:
+            dominates = np.all(points <= y, axis=1)
+            gains.append(float(np.mean(dominates & improvement_region)) * volume)
+        scores[i] = float(np.mean(gains))
+    return scores
+
+
+def dominated_by_any(points: np.ndarray, pareto: np.ndarray) -> np.ndarray:
+    if pareto.size == 0:
+        return np.zeros(len(points), dtype=bool)
+    dominated = np.zeros(len(points), dtype=bool)
+    for y in pareto:
+        dominated |= np.all(points <= y, axis=1)
+    return dominated
 
 
 def next_case_index(config: dict[str, Any], df: pd.DataFrame) -> int:
@@ -721,11 +850,11 @@ def run_loop(args: argparse.Namespace) -> None:
         if len(success) >= 4:
             x_train = success[variable_names(config)].astype(float).to_numpy()
             y_train = success[OBJECTIVE_COLUMNS].astype(float).to_numpy()
-            surrogate = RbfRidgeEnsemble(config, seed=seed + iteration).fit(x_train, y_train)
+            surrogate = fit_surrogate(config, x_train, y_train, seed + iteration)
             nsga = nsga2_candidates(config, baseline, surrogate, existing, seed + iteration * 17)
             random_pool = np.array(valid_random_samples(config, baseline, int(runtime["candidate_pool_size"]), seed + iteration * 31, existing))
             candidates = np.vstack([nsga, random_pool]) if len(random_pool) else nsga
-            selected = select_acquisition(config, baseline, candidates, surrogate, existing, batch_size)
+            selected = select_acquisition(config, baseline, candidates, surrogate, existing, y_train, batch_size)
             if len(selected) < batch_size:
                 selected.extend(valid_random_samples(config, baseline, batch_size - len(selected), seed + iteration * 97, existing))
         else:
