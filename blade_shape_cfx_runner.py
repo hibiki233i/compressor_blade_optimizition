@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import argparse
 import glob
+import json
 import os
 import subprocess
 import time
@@ -21,6 +23,10 @@ class CfxResult:
 
 def _as_posix(path: str | Path) -> str:
     return str(path).replace("\\", "/")
+
+
+def _cfx_path(path: str | Path) -> str:
+    return _as_posix(path)
 
 
 def _run_logged(cmd: list[str], cwd: Path, log_path: Path) -> int:
@@ -53,6 +59,58 @@ def _parse_results(output_txt: Path, n_blades: int) -> dict[str, float]:
     }
 
 
+def write_cfx_pre_inputs(
+    working_dir: str | Path,
+    *,
+    p_out_pa: float,
+    template_cfx: str | Path,
+) -> dict[str, Path]:
+    work = Path(working_dir)
+    gtm_file = work / "Impeller_Mesh.gtm"
+    def_file = work / "Impeller.def"
+    pre_script = work / "Update_Mesh.pre"
+    ccl_file = work / "update_bc.ccl"
+
+    ccl_file.write_text(
+        "\n".join(
+            [
+                "LIBRARY:",
+                "  CEL:",
+                "    EXPRESSIONS:",
+                f"      MyBackPressure = {p_out_pa} [Pa]",
+                "    END",
+                "  END",
+                "END",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    pre_script.write_text(
+        f"""COMMAND FILE:
+  CFX Pre Version = 25.1
+END
+>load filename={_cfx_path(template_cfx)}
+>update
+>gtmImport filename={_cfx_path(gtm_file)}, type=GTM, \
+units=m, nameStrategy=Assembly
+>update
+>writeCaseFile filename={_cfx_path(def_file)}, operation=\
+write def file
+>update
+>quit
+""",
+        encoding="utf-8",
+    )
+    return {
+        "gtm_file": gtm_file,
+        "def_file": def_file,
+        "pre_script": pre_script,
+        "ccl_file": ccl_file,
+    }
+
+
 def run_cfx_pipeline(
     working_dir: str | Path,
     run_id: str,
@@ -68,8 +126,6 @@ def run_cfx_pipeline(
     work = Path(working_dir)
     gtm_file = work / "Impeller_Mesh.gtm"
     def_file = work / "Impeller.def"
-    pre_script = work / "Update_Mesh.pre"
-    ccl_file = work / "update_bc.ccl"
     output_txt = work / "CFX_Results.txt"
 
     if output_txt.exists():
@@ -89,42 +145,18 @@ def run_cfx_pipeline(
         if not exe.exists():
             return CfxResult(False, {}, f"Missing CFX executable: {exe}", "environment")
 
-    ccl_file.write_text(
-        "\n".join(
-            [
-                "LIBRARY:",
-                "  CEL:",
-                "    EXPRESSIONS:",
-                f"      MyBackPressure = {p_out_pa} [Pa]",
-                "    END",
-                "  END",
-                "END",
-                "",
-            ]
-        ),
-        encoding="utf-8",
+    paths = write_cfx_pre_inputs(
+        work,
+        p_out_pa=p_out_pa,
+        template_cfx=template_cfx,
     )
+    pre_script = paths["pre_script"]
+    ccl_file = paths["ccl_file"]
 
     existing_res = sorted(glob.glob(str(work / "*.res")), key=os.path.getmtime)
     if existing_res:
         res_file = Path(existing_res[-1])
     else:
-        pre_script.write_text(
-            f"""COMMAND FILE:
-  CFX Pre Version = 25.1
-END
->load filename={_as_posix(template_cfx)}
->update
-> gtmImport filename={_as_posix(gtm_file)}, type=GTM, \
-units=m, nameStrategy= Assembly
->update
->writeCaseFile filename={_as_posix(def_file)}, operation=\
-write def file
->update
->quit
-""",
-            encoding="utf-8",
-        )
         pre_ret = _run_logged([str(cfx5pre), "-batch", str(pre_script)], work, work / "cfx_pre.log")
         if pre_ret != 0 or not def_file.exists():
             return CfxResult(False, {}, f"CFX-Pre failed with exit code {pre_ret}", "pre")
@@ -159,3 +191,65 @@ write def file
         return CfxResult(True, _parse_results(output_txt, n_blades), "Success")
     except Exception as exc:
         return CfxResult(False, {}, f"CFX result parsing failed: {exc}", "post")
+
+
+def _load_config(path: str | Path) -> dict[str, object]:
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def check_cfx_pre_inputs(config_path: str | Path, working_dir: str | Path) -> int:
+    config = _load_config(config_path)
+    paths = config["paths"]
+    runtime = config["runtime"]
+    work = Path(working_dir)
+    generated = write_cfx_pre_inputs(
+        work,
+        p_out_pa=float(runtime["p_out_pa"]),
+        template_cfx=paths["template_cfx"],
+    )
+    cfx_bin = Path(paths["cfx_bin_dir"])
+    required = [
+        Path(paths["template_cfx"]),
+        Path(paths["template_cse"]),
+        cfx_bin / "cfx5pre.exe",
+        cfx_bin / "cfx5solve.exe",
+        cfx_bin / "cfx5post.exe",
+    ]
+    missing = [str(item) for item in required if not item.exists()]
+    text = generated["pre_script"].read_text(encoding="utf-8", errors="ignore")
+    stale_tokens = [
+        "F:/optimazition",
+        "F:\\optimazition",
+        "compressor blade optimazition",
+        "{",
+        "}",
+    ]
+    stale = [token for token in stale_tokens if token in text]
+    print(f"Update_Mesh.pre: {generated['pre_script']}")
+    print(f"update_bc.ccl: {generated['ccl_file']}")
+    print(f"Expected mesh: {generated['gtm_file']} ({'exists' if generated['gtm_file'].exists() else 'missing'})")
+    print(f"Expected def: {generated['def_file']}")
+    if missing:
+        print("Missing required files/executables:")
+        for item in missing:
+            print(f"  - {item}")
+    if stale:
+        print("Stale tokens found in generated CFX-Pre file:")
+        for token in stale:
+            print(f"  - {token}")
+    return 1 if missing or stale else 0
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="CFX runner utilities for blade-shape active learning.")
+    sub = parser.add_subparsers(dest="command", required=True)
+    check = sub.add_parser("check-pre", help="Generate and check CFX-Pre input files without running CFX.")
+    check.add_argument("--config", default="blade_shape_config.json")
+    check.add_argument("--working-dir", required=True)
+    args = parser.parse_args()
+    if args.command == "check-pre":
+        raise SystemExit(check_cfx_pre_inputs(args.config, args.working_dir))
+
+
+if __name__ == "__main__":
+    main()

@@ -3,9 +3,9 @@ param (
     [string]$WorkingDir = "",
     [string]$CFturboExe = "C:\Program Files\CFturbo 2025.2.2\CFturbo.exe",
     [string]$TurboGridExe = "D:\ANSYS Inc\v251\TurboGrid\bin\cfxtg.exe",
-    [string]$CftBatchTemplate = "F:\optimazition\Templates\BaseModel.cft-batch",
-    [string]$BaseCft = "F:\optimazition\Templates\0908-2.cft",
-    [string]$TurboGridTemplate = "F:\optimazition\Templates\BaseMeshing.tst",
+    [string]$CftBatchTemplate = "D:\blade optizamation\Templates\BaseModel.cft-batch",
+    [string]$BaseCft = "D:\blade optizamation\Templates\0908-2.cft",
+    [string]$TurboGridTemplate = "D:\blade optizamation\Templates\BaseMeshing.tst",
     [switch]$DryRun
 )
 
@@ -120,6 +120,49 @@ function Test-CurveExport {
     return ((Test-Path $Hub) -and (Test-Path $Shroud) -and (Test-Path $Profile))
 }
 
+function Write-TurboGridFiles {
+    param(
+        [string]$TurboGridTemplate,
+        [string]$CurrentTgs,
+        [string]$CurrentTse,
+        [string]$HubCurve,
+        [string]$ShroudCurve,
+        [string]$ProfileCurve,
+        [string]$OutputMesh,
+        [int]$BladeCount = 10,
+        [double]$TipClearance = 0.0013
+    )
+    $tgsContent = Get-Content -Path $TurboGridTemplate -Raw
+    $periodicAngle = 360.0 / [double]$BladeCount
+    $tgsContent = $tgsContent -replace "\{BLADE_COUNT\}", $BladeCount.ToString([System.Globalization.CultureInfo]::InvariantCulture)
+    $tgsContent = $tgsContent -replace "\{HUB_CURVE\}", ($HubCurve -replace "\\", "/")
+    $tgsContent = $tgsContent -replace "\{SHROUD_CURVE\}", ($ShroudCurve -replace "\\", "/")
+    $tgsContent = $tgsContent -replace "\{PROFILE_CURVE\}", ($ProfileCurve -replace "\\", "/")
+    $tgsContent = $tgsContent -replace "\{OUTPUT_MESH\}", ($OutputMesh -replace "\\", "/")
+    $tgsContent = $tgsContent -replace "\{PERIODIC_ANGLE\}", $periodicAngle.ToString("F5", [System.Globalization.CultureInfo]::InvariantCulture)
+    $tgsContent = $tgsContent -replace "\{TIP_CLEARANCE\}", $TipClearance.ToString("F6", [System.Globalization.CultureInfo]::InvariantCulture)
+    $tgsContent = [regex]::Replace(
+        $tgsContent,
+        "(?m)^(\s*State Filename\s*=\s*).+$",
+        '${1}' + ($CurrentTgs -replace "\\", "/")
+    )
+    Set-Content -Path $CurrentTgs -Value $tgsContent -Encoding UTF8
+
+    $tgsPath = $CurrentTgs -replace "\\", "/"
+    $gtmPath = $OutputMesh -replace "\\", "/"
+    $tseContent = @"
+> um object=/TOPOLOGY SET, mode=normal, update=off
+>readstate filename=$tgsPath, mode = \
+append, load = false
+> update
+>savemesh filename=$gtmPath, coorddata=Off, \
+onedomain=true, single=Off, units=m, solver=cfx5
+> update
+>quit
+"@
+    Set-Content -Path $CurrentTse -Value $tseContent -Encoding UTF8
+}
+
 function Set-MeanLineShape {
     param(
         [xml]$Xml,
@@ -205,7 +248,15 @@ Ensure-TurboGridExportAction -Xml $xml -ExportDir $WorkingDir
 $xml.Save($Current_CFT)
 
 if ($DryRun) {
-    Write-Host "Dry-run complete. Wrote $Current_CFT and $Input_CFT_Model"
+    Write-TurboGridFiles `
+        -TurboGridTemplate $TurboGridTemplate `
+        -CurrentTgs $Current_TGS `
+        -CurrentTse $Current_TSE `
+        -HubCurve $Export_Hub `
+        -ShroudCurve $Export_Shroud `
+        -ProfileCurve $Export_Profile `
+        -OutputMesh $Export_Mesh
+    Write-Host "Dry-run complete. Wrote $Current_CFT, $Input_CFT_Model, $Current_TGS, and $Current_TSE"
     exit 0
 }
 
@@ -248,31 +299,14 @@ foreach ($keyword in $fatalKeywords) {
     }
 }
 
-$tgsContent = Get-Content -Path $TurboGridTemplate -Raw
-$periodicAngle = 360.0 / 10.0
-$tipClearance = 0.0013
-$tgsContent = $tgsContent -replace "\{BLADE_COUNT\}", "10"
-$tgsContent = $tgsContent -replace "\{HUB_CURVE\}", ($Export_Hub -replace "\\", "/")
-$tgsContent = $tgsContent -replace "\{SHROUD_CURVE\}", ($Export_Shroud -replace "\\", "/")
-$tgsContent = $tgsContent -replace "\{PROFILE_CURVE\}", ($Export_Profile -replace "\\", "/")
-$tgsContent = $tgsContent -replace "\{OUTPUT_MESH\}", ($Export_Mesh -replace "\\", "/")
-$tgsContent = $tgsContent -replace "\{PERIODIC_ANGLE\}", $periodicAngle.ToString("F5", [System.Globalization.CultureInfo]::InvariantCulture)
-$tgsContent = $tgsContent -replace "\{TIP_CLEARANCE\}", $tipClearance.ToString("F6", [System.Globalization.CultureInfo]::InvariantCulture)
-Set-Content -Path $Current_TGS -Value $tgsContent -Encoding UTF8
-
-$tgsPath = $Current_TGS -replace "\\", "/"
-$gtmPath = $Export_Mesh -replace "\\", "/"
-$tseContent = @"
-> um object=/TOPOLOGY SET, mode=normal, update=off
->readstate filename=$tgsPath, mode = \
-append, load = false
-> update
->savemesh filename=$gtmPath, coorddata=Off, \
-onedomain=true, single=Off, units=m, solver=cfx5
-> update
->quit
-"@
-Set-Content -Path $Current_TSE -Value $tseContent -Encoding UTF8
+Write-TurboGridFiles `
+    -TurboGridTemplate $TurboGridTemplate `
+    -CurrentTgs $Current_TGS `
+    -CurrentTse $Current_TSE `
+    -HubCurve $Export_Hub `
+    -ShroudCurve $Export_Shroud `
+    -ProfileCurve $Export_Profile `
+    -OutputMesh $Export_Mesh
 
 $tgProcess = Start-Process -FilePath $TurboGridExe -ArgumentList "-batch `"$Current_TSE`"" -WorkingDirectory $WorkingDir -Wait -PassThru -NoNewWindow
 if ($tgProcess.ExitCode -ne 0) {

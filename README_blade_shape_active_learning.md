@@ -21,7 +21,7 @@ from successful CFD evaluations.
 
 ## Variables
 
-The current `F:\optimazition\Templates\0908-2.cft` template has
+The current `D:\blade optizamation\Templates\0908-2.cft` template has
 `SplitterBlades=False`, so this first version optimizes the actual available
 main-blade mean-line shape instead of inventing splitter variables.
 
@@ -53,6 +53,12 @@ Write one candidate and validate XML generation without starting CFturbo:
 
 ```powershell
 python blade_shape_active_learning.py write-candidate --index 0 --dry-run
+```
+
+Check the CFX-Pre layer without starting the solver:
+
+```powershell
+python blade_shape_cfx_runner.py check-pre --working-dir "D:\blade optizamation\blade_al_runs\cases\dry_candidate_000"
 ```
 
 Run a one-case real geometry and CFD smoke test:

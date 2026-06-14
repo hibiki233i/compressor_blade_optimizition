@@ -6,6 +6,7 @@ __pycache__/
 # Local active-learning / CFD run outputs
 blade_al_runs/
 ansys_work/
+Templates/
 
 # CFD / turbomachinery generated artifacts
 *.res
