@@ -32,8 +32,16 @@ except Exception:  # pragma: no cover
 
 
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
-OBJECTIVE_COLUMNS = ["Efficiency", "PressureRatio", "MassFlow"]
+OBJECTIVE_COLUMNS = ["Efficiency", "MassFlow"]
 RESULT_COLUMNS = ["Efficiency", "PressureRatio", "MassFlow", "Power", "totalpressureratio"]
+SAMPLE_COLUMNS = [
+    "sample_phase",
+    "doe_index",
+    "al_iteration",
+    "batch_index",
+    "selection_rank",
+    "selection_source",
+]
 STATUS_COLUMNS = ["status", "failure_stage", "message", "case_dir", "run_id"]
 
 
@@ -51,6 +59,18 @@ class BaselineShape:
 class CaseResult:
     row: dict[str, Any]
     success: bool
+
+
+@dataclass
+class SelectedCandidate:
+    x: np.ndarray
+    selection_rank: int
+    selection_source: str
+    acquisition_score: float = np.nan
+    ehvi: float = np.nan
+    distance_to_existing: float = np.nan
+    pred_mean: np.ndarray | None = None
+    pred_std: np.ndarray | None = None
 
 
 def load_config(path: str | Path) -> dict[str, Any]:
@@ -199,21 +219,148 @@ def training_csv_path(config: dict[str, Any]) -> Path:
     return output_dir(config) / "training_data.csv"
 
 
+def diagnostics_csv_path(config: dict[str, Any]) -> Path:
+    return output_dir(config) / "active_learning_diagnostics.csv"
+
+
 def all_columns(config: dict[str, Any]) -> list[str]:
-    return variable_names(config) + RESULT_COLUMNS + STATUS_COLUMNS
+    return variable_names(config) + RESULT_COLUMNS + SAMPLE_COLUMNS + STATUS_COLUMNS
+
+
+def diagnostic_columns(config: dict[str, Any]) -> list[str]:
+    columns = [
+        "iteration",
+        "run_id",
+        "status",
+        "selection_rank",
+        "selection_source",
+        "acquisition_score",
+        "ehvi",
+        "distance_to_existing",
+        "pareto_rows_before",
+        "pareto_rows_after",
+        "case_dir",
+        "failure_stage",
+        "message",
+    ]
+    for objective in OBJECTIVE_COLUMNS:
+        columns.extend([f"pred_{objective}", f"std_{objective}", f"true_{objective}", f"prediction_error_{objective}"])
+    return columns
 
 
 def load_training(config: dict[str, Any]) -> pd.DataFrame:
     path = training_csv_path(config)
     if not path.exists():
         return pd.DataFrame(columns=all_columns(config))
-    return pd.read_csv(path)
+    return normalize_training_frame(config, pd.read_csv(path))
+
+
+def normalize_training_frame(config: dict[str, Any], frame: pd.DataFrame) -> pd.DataFrame:
+    columns = all_columns(config)
+    if frame.empty:
+        return pd.DataFrame(columns=columns)
+
+    diagnostics = load_existing_diagnostics(config)
+    initial_samples = int(config.get("runtime", {}).get("initial_samples", 0))
+    batch_size = max(1, int(config.get("runtime", {}).get("batch_size", 1)))
+
+    for column in columns:
+        if column not in frame.columns:
+            frame[column] = np.nan
+    for column in ["sample_phase", "selection_source", "failure_stage", "message", "case_dir", "run_id"]:
+        if column in frame.columns:
+            frame[column] = frame[column].astype("object")
+
+    for idx, row in frame.iterrows():
+        run_number = parse_case_number(row.get("run_id", ""))
+        diag = diagnostics.get(str(row.get("run_id", "")))
+        if diag:
+            inferred_phase = "active_learning"
+        elif run_number is not None and run_number < initial_samples:
+            inferred_phase = "doe"
+        else:
+            inferred_phase = "active_learning"
+
+        if (
+            pd.isna(frame.at[idx, "sample_phase"])
+            or str(frame.at[idx, "sample_phase"]).strip() == ""
+            or str(frame.at[idx, "sample_phase"]) != inferred_phase
+        ):
+            frame.at[idx, "sample_phase"] = inferred_phase
+        if frame.at[idx, "sample_phase"] == "doe":
+            if pd.isna(frame.at[idx, "doe_index"]) and run_number is not None:
+                frame.at[idx, "doe_index"] = run_number
+            frame.at[idx, "al_iteration"] = np.nan
+            frame.at[idx, "batch_index"] = np.nan
+            frame.at[idx, "selection_rank"] = np.nan
+            frame.at[idx, "selection_source"] = ""
+        else:
+            frame.at[idx, "doe_index"] = np.nan
+            al_offset = None if run_number is None else max(0, run_number - initial_samples)
+            if pd.isna(frame.at[idx, "al_iteration"]):
+                if diag and str(diag.get("iteration", "")).strip() != "":
+                    frame.at[idx, "al_iteration"] = diag.get("iteration")
+                elif al_offset is not None:
+                    frame.at[idx, "al_iteration"] = al_offset // batch_size
+            if pd.isna(frame.at[idx, "batch_index"]):
+                if diag and str(diag.get("selection_rank", "")).strip() != "":
+                    frame.at[idx, "batch_index"] = diag.get("selection_rank")
+                elif al_offset is not None:
+                    frame.at[idx, "batch_index"] = al_offset % batch_size + 1
+            if pd.isna(frame.at[idx, "selection_rank"]):
+                if diag and str(diag.get("selection_rank", "")).strip() != "":
+                    frame.at[idx, "selection_rank"] = diag.get("selection_rank")
+                elif not pd.isna(frame.at[idx, "batch_index"]):
+                    frame.at[idx, "selection_rank"] = frame.at[idx, "batch_index"]
+            if pd.isna(frame.at[idx, "selection_source"]) or str(frame.at[idx, "selection_source"]).strip() == "":
+                frame.at[idx, "selection_source"] = diag.get("selection_source", "unknown_active_learning") if diag else "unknown_active_learning"
+
+    return frame[columns]
+
+
+def parse_case_number(run_id: Any) -> int | None:
+    text = str(run_id)
+    if not text.startswith("case_"):
+        return None
+    try:
+        return int(text.split("_", 1)[1])
+    except Exception:
+        return None
+
+
+def load_existing_diagnostics(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    path = diagnostics_csv_path(config)
+    if not path.exists():
+        return {}
+    try:
+        frame = pd.read_csv(path)
+    except Exception:
+        return {}
+    if "run_id" not in frame.columns:
+        return {}
+    return {str(row["run_id"]): row.to_dict() for _, row in frame.iterrows()}
+
+
+def ensure_training_schema(config: dict[str, Any]) -> None:
+    path = training_csv_path(config)
+    if not path.exists():
+        return
+    frame = normalize_training_frame(config, pd.read_csv(path))
+    frame.to_csv(path, index=False)
 
 
 def append_row(config: dict[str, Any], row: dict[str, Any]) -> None:
     path = training_csv_path(config)
     path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_training_schema(config)
     frame = pd.DataFrame([row], columns=all_columns(config))
+    frame.to_csv(path, mode="a", header=not path.exists(), index=False)
+
+
+def append_diagnostic_row(config: dict[str, Any], row: dict[str, Any]) -> None:
+    path = diagnostics_csv_path(config)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    frame = pd.DataFrame([row], columns=diagnostic_columns(config))
     frame.to_csv(path, mode="a", header=not path.exists(), index=False)
 
 
@@ -227,14 +374,20 @@ def write_pareto(config: dict[str, Any], df: pd.DataFrame) -> pd.DataFrame:
     success = df[df["status"] == "success"].copy()
     if success.empty:
         pareto = pd.DataFrame(columns=df.columns)
+        strict_pareto = pd.DataFrame(columns=df.columns)
     else:
         y = success[OBJECTIVE_COLUMNS].astype(float).to_numpy()
-        mask = pareto_mask(y)
+        strict_mask = pareto_mask(y)
+        strict_pareto = success.loc[strict_mask].copy()
+        mask = pareto_mask(y, objective_tolerances(config))
         pareto = success.loc[mask].copy()
-        pareto = pareto.sort_values(["Efficiency", "PressureRatio", "MassFlow"], ascending=False)
+        pareto = pareto.sort_values(OBJECTIVE_COLUMNS, ascending=False)
+        strict_pareto = strict_pareto.sort_values(OBJECTIVE_COLUMNS, ascending=False)
     pareto_path = output_dir(config) / "pareto_front.csv"
+    strict_pareto_path = output_dir(config) / "pareto_front_strict.csv"
     pareto_path.parent.mkdir(parents=True, exist_ok=True)
     pareto.to_csv(pareto_path, index=False)
+    strict_pareto.to_csv(strict_pareto_path, index=False)
     return pareto
 
 
@@ -417,13 +570,25 @@ def rbf_features(x: np.ndarray, centers: np.ndarray, sigma: float) -> np.ndarray
     return np.column_stack([np.ones(len(x)), phi])
 
 
-def pareto_mask(objectives: np.ndarray) -> np.ndarray:
+def objective_tolerances(config: dict[str, Any]) -> np.ndarray:
+    pareto_settings = config.get("pareto", {})
+    if not bool(pareto_settings.get("use_engineering_tolerance", False)):
+        return np.zeros(len(OBJECTIVE_COLUMNS), dtype=float)
+    values = pareto_settings.get("tolerances", {})
+    return np.array([float(values.get(name, 0.0)) for name in OBJECTIVE_COLUMNS], dtype=float)
+
+
+def pareto_mask(objectives: np.ndarray, eps: np.ndarray | None = None) -> np.ndarray:
     n = len(objectives)
     mask = np.ones(n, dtype=bool)
+    tolerance = np.zeros(objectives.shape[1], dtype=float) if eps is None else np.array(eps, dtype=float)
     for i in range(n):
         if not mask[i]:
             continue
-        dominates_i = np.all(objectives >= objectives[i], axis=1) & np.any(objectives > objectives[i], axis=1)
+        dominates_i = np.all(objectives >= objectives[i] - tolerance, axis=1) & np.any(
+            objectives > objectives[i] + tolerance, axis=1
+        )
+        dominates_i[i] = False
         if np.any(dominates_i):
             mask[i] = False
     return mask
@@ -547,13 +712,16 @@ def select_acquisition(
     config: dict[str, Any],
     baseline: BaselineShape,
     candidates: np.ndarray,
+    candidate_sources: list[str],
     surrogate: Any,
     existing: np.ndarray,
     observed_objectives: np.ndarray,
     count: int,
-) -> list[np.ndarray]:
+) -> list[SelectedCandidate]:
     if len(candidates) == 0:
         return []
+    if len(candidate_sources) != len(candidates):
+        raise ValueError("candidate_sources must have the same length as candidates.")
     mean, std = surrogate.predict(candidates)
     ehvi = approximate_expected_hvi(config, observed_objectives, mean, std)
     if existing.size:
@@ -563,7 +731,7 @@ def select_acquisition(
     dist_norm = dist / max(float(np.max(dist)), 1e-12)
     score = normalize_vector(ehvi) + 0.15 * dist_norm
     order = np.argsort(score)[::-1]
-    selected: list[np.ndarray] = []
+    selected: list[SelectedCandidate] = []
     selected_existing = existing.copy()
     for idx in order:
         x = candidates[idx]
@@ -571,7 +739,18 @@ def select_acquisition(
             continue
         if not is_far_enough(config, x, selected_existing):
             continue
-        selected.append(x)
+        selected.append(
+            SelectedCandidate(
+                x=x,
+                selection_rank=len(selected) + 1,
+                selection_source=candidate_sources[idx],
+                acquisition_score=float(score[idx]),
+                ehvi=float(ehvi[idx]),
+                distance_to_existing=float(dist[idx]),
+                pred_mean=mean[idx].copy(),
+                pred_std=std[idx].copy(),
+            )
+        )
         selected_existing = np.vstack([selected_existing, x[None, :]]) if selected_existing.size else x[None, :]
         if len(selected) >= count:
             break
@@ -646,6 +825,48 @@ def dominated_by_any(points: np.ndarray, pareto: np.ndarray) -> np.ndarray:
     for y in pareto:
         dominated |= np.all(points <= y, axis=1)
     return dominated
+
+
+def fallback_selections(samples: list[np.ndarray], source: str, start_rank: int = 1) -> list[SelectedCandidate]:
+    return [
+        SelectedCandidate(x=x, selection_rank=start_rank + idx, selection_source=source)
+        for idx, x in enumerate(samples)
+    ]
+
+
+def build_diagnostic_row(
+    config: dict[str, Any],
+    *,
+    iteration: int,
+    selected: SelectedCandidate,
+    result: CaseResult,
+    pareto_rows_before: int,
+    pareto_rows_after: int,
+) -> dict[str, Any]:
+    row: dict[str, Any] = {
+        "iteration": iteration,
+        "run_id": result.row.get("run_id", ""),
+        "status": result.row.get("status", ""),
+        "selection_rank": selected.selection_rank,
+        "selection_source": selected.selection_source,
+        "acquisition_score": selected.acquisition_score,
+        "ehvi": selected.ehvi,
+        "distance_to_existing": selected.distance_to_existing,
+        "pareto_rows_before": pareto_rows_before,
+        "pareto_rows_after": pareto_rows_after,
+        "case_dir": result.row.get("case_dir", ""),
+        "failure_stage": result.row.get("failure_stage", ""),
+        "message": result.row.get("message", ""),
+    }
+    for idx, objective in enumerate(OBJECTIVE_COLUMNS):
+        pred = float(selected.pred_mean[idx]) if selected.pred_mean is not None else np.nan
+        std = float(selected.pred_std[idx]) if selected.pred_std is not None else np.nan
+        true = float(result.row.get(objective, np.nan))
+        row[f"pred_{objective}"] = pred
+        row[f"std_{objective}"] = std
+        row[f"true_{objective}"] = true
+        row[f"prediction_error_{objective}"] = true - pred if np.isfinite(true) and np.isfinite(pred) else np.nan
+    return row
 
 
 def next_case_index(config: dict[str, Any], df: pd.DataFrame) -> int:
@@ -737,11 +958,32 @@ def evaluate_true_cfd(
     baseline: BaselineShape,
     x: np.ndarray,
     case_index: int,
+    *,
+    sample_phase: str,
+    doe_index: int | float = np.nan,
+    al_iteration: int | float = np.nan,
+    batch_index: int | float = np.nan,
+    selection_rank: int | float = np.nan,
+    selection_source: str = "",
 ) -> CaseResult:
     run_id = f"case_{case_index:06d}"
     sample = vector_to_sample(config, x)
     row: dict[str, Any] = {**sample, **{col: np.nan for col in RESULT_COLUMNS}}
-    row.update({"status": "failed", "failure_stage": "", "message": "", "case_dir": "", "run_id": run_id})
+    row.update(
+        {
+            "sample_phase": sample_phase,
+            "doe_index": doe_index,
+            "al_iteration": al_iteration,
+            "batch_index": batch_index,
+            "selection_rank": selection_rank,
+            "selection_source": selection_source,
+            "status": "failed",
+            "failure_stage": "",
+            "message": "",
+            "case_dir": "",
+            "run_id": run_id,
+        }
+    )
 
     violations = constraint_violations(config, baseline, x)
     if violations:
@@ -833,11 +1075,26 @@ def run_loop(args: argparse.Namespace) -> None:
             if used_new >= max_new:
                 break
             print(f"[CFD] initial {case_idx:06d}")
-            result = evaluate_true_cfd(config, baseline, x, case_idx)
+            result = evaluate_true_cfd(
+                config,
+                baseline,
+                x,
+                case_idx,
+                sample_phase="doe",
+                doe_index=case_idx,
+            )
             used_new += 1
             case_idx += 1
             df = load_training(config)
-            summary_rows.append({"iteration": -1, "run_id": result.row["run_id"], "status": result.row["status"]})
+            summary_rows.append(
+                {
+                    "sample_phase": "doe",
+                    "iteration": -1,
+                    "batch_index": "",
+                    "run_id": result.row["run_id"],
+                    "status": result.row["status"],
+                }
+            )
             write_pareto(config, df)
 
     for iteration in range(int(runtime["iterations"])):
@@ -847,27 +1104,72 @@ def run_loop(args: argparse.Namespace) -> None:
         success = df[df["status"] == "success"].copy()
         existing = existing_vectors(config, df)
         batch_size = min(int(runtime["batch_size"]), max_new - used_new)
+        pareto_rows_before = len(write_pareto(config, df))
         if len(success) >= 4:
             x_train = success[variable_names(config)].astype(float).to_numpy()
             y_train = success[OBJECTIVE_COLUMNS].astype(float).to_numpy()
             surrogate = fit_surrogate(config, x_train, y_train, seed + iteration)
             nsga = nsga2_candidates(config, baseline, surrogate, existing, seed + iteration * 17)
-            random_pool = np.array(valid_random_samples(config, baseline, int(runtime["candidate_pool_size"]), seed + iteration * 31, existing))
+            random_pool = np.array(
+                valid_random_samples(config, baseline, int(runtime["candidate_pool_size"]), seed + iteration * 31, existing)
+            )
             candidates = np.vstack([nsga, random_pool]) if len(random_pool) else nsga
-            selected = select_acquisition(config, baseline, candidates, surrogate, existing, y_train, batch_size)
+            candidate_sources = ["nsga"] * len(nsga) + ["random_pool"] * len(random_pool)
+            selected = select_acquisition(
+                config,
+                baseline,
+                candidates,
+                candidate_sources,
+                surrogate,
+                existing,
+                y_train,
+                batch_size,
+            )
             if len(selected) < batch_size:
-                selected.extend(valid_random_samples(config, baseline, batch_size - len(selected), seed + iteration * 97, existing))
+                fallback = valid_random_samples(config, baseline, batch_size - len(selected), seed + iteration * 97, existing)
+                selected.extend(fallback_selections(fallback, "fallback_random", len(selected) + 1))
         else:
-            selected = valid_random_samples(config, baseline, batch_size, seed + iteration * 97, existing)
+            fallback = valid_random_samples(config, baseline, batch_size, seed + iteration * 97, existing)
+            selected = fallback_selections(fallback, "fallback_random")
 
-        for x in selected[:batch_size]:
+        for selected_candidate in selected[:batch_size]:
+            x = selected_candidate.x
             print(f"[CFD] iteration {iteration} case {case_idx:06d}")
-            result = evaluate_true_cfd(config, baseline, x, case_idx)
+            result = evaluate_true_cfd(
+                config,
+                baseline,
+                x,
+                case_idx,
+                sample_phase="active_learning",
+                al_iteration=iteration,
+                batch_index=selected_candidate.selection_rank,
+                selection_rank=selected_candidate.selection_rank,
+                selection_source=selected_candidate.selection_source,
+            )
             used_new += 1
             case_idx += 1
             df = load_training(config)
-            summary_rows.append({"iteration": iteration, "run_id": result.row["run_id"], "status": result.row["status"]})
-            write_pareto(config, df)
+            summary_rows.append(
+                {
+                    "sample_phase": "active_learning",
+                    "iteration": iteration,
+                    "batch_index": selected_candidate.selection_rank,
+                    "run_id": result.row["run_id"],
+                    "status": result.row["status"],
+                }
+            )
+            pareto_rows_after = len(write_pareto(config, df))
+            append_diagnostic_row(
+                config,
+                build_diagnostic_row(
+                    config,
+                    iteration=iteration,
+                    selected=selected_candidate,
+                    result=result,
+                    pareto_rows_before=pareto_rows_before,
+                    pareto_rows_after=pareto_rows_after,
+                ),
+            )
             if used_new >= max_new:
                 break
 

@@ -77,10 +77,23 @@ python blade_shape_active_learning.py run --initial-samples 6 --iterations 2 --b
 
 All outputs are under `blade_al_runs` by default:
 
-- `training_data.csv`: variables, CFD metrics, status, failure stage, case path.
-- `pareto_front.csv`: non-dominated successful CFD rows for Efficiency,
-  PressureRatio, and MassFlow.
+- `training_data.csv`: variables, CFD metrics, sample phase, status, failure
+  stage, and case path. `sample_phase` is `doe` for initial design-of-
+  experiments rows and `active_learning` for EGO/MOEGO-selected rows. Active
+  learning rows also carry `al_iteration`, `batch_index`, `selection_rank`, and
+  `selection_source`.
+- `pareto_front.csv`: engineering-tolerance non-dominated successful CFD rows
+  for Efficiency and MassFlow. The default tolerances are `0.0003` and `0.006`,
+  respectively. Pressure ratio and total pressure ratio are recorded for review
+  but are not optimization objectives under the current fixed-static-pressure
+  operating condition.
+- `pareto_front_strict.csv`: strict mathematical Pareto rows without engineering
+  tolerance, kept for audit and comparison.
 - `iteration_summary.csv`: per-attempt status log.
+- `active_learning_diagnostics.csv`: active-learning-only selection diagnostics,
+  including acquisition score, approximate EHVI, distance to existing samples,
+  surrogate predictions, prediction standard deviations, true CFD objectives,
+  prediction errors, and Pareto row counts before/after each selected CFD case.
 - `cases/case_XXXXXX`: candidate JSON, generated CFturbo/TurboGrid/CFX files,
   and command logs.
 

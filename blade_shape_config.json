@@ -20,9 +20,9 @@
     "rpm": 10000.0,
     "mass_flow": 0.0036,
     "alpha0": 0.0,
-    "initial_samples": 6,
+    "initial_samples": 48,
     "iterations": 2,
-    "batch_size": 2,
+    "batch_size": 3,
     "candidate_pool_size": 600,
     "nsga2_pop_size": 80,
     "nsga2_generations": 50,
@@ -34,6 +34,13 @@
     "fallback_model": "rbf_ridge_ensemble",
     "ehvi_y_samples": 32,
     "ehvi_hv_points": 2048
+  },
+  "pareto": {
+    "use_engineering_tolerance": true,
+    "tolerances": {
+      "Efficiency": 0.0003,
+      "MassFlow": 0.006
+    }
   },
   "constraints": {
     "max_beta_offset_deg": 6.0,
