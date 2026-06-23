@@ -3,6 +3,9 @@ __pycache__/
 *.py[cod]
 *.pyo
 
+# Local Git worktrees
+.worktrees/
+
 # Local active-learning / CFD run outputs
 blade_al_runs/
 ansys_work/
