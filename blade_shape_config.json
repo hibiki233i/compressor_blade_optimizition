@@ -32,8 +32,8 @@
   "surrogate": {
     "model": "gp",
     "fallback_model": "rbf_ridge_ensemble",
-    "ehvi_y_samples": 32,
-    "ehvi_hv_points": 2048
+    "ehvi_y_samples": 256,
+    "ehvi_validation_samples": 1024
   },
   "pareto": {
     "use_engineering_tolerance": true,
@@ -62,5 +62,76 @@
     {"name": "shroud_beta_4_deg_offset", "lower": -4.5, "upper": 2.0},
     {"name": "hub_theta_deg_offset", "lower": -1.5, "upper": 1.5},
     {"name": "shroud_theta_deg_offset", "lower": -1.5, "upper": 1.5}
-  ]
+  ],
+  "search": {
+    "active_variables": [
+      "hub_beta_0_deg_offset",
+      "hub_beta_3_deg_offset",
+      "hub_beta_4_deg_offset",
+      "shroud_beta_0_deg_offset",
+      "shroud_beta_2_deg_offset",
+      "shroud_beta_3_deg_offset",
+      "hub_theta_deg_offset"
+    ],
+    "fixed_variables": {
+      "hub_beta_1_deg_offset": -0.7976745133188405,
+      "hub_beta_2_deg_offset": -3.0395772286388123,
+      "shroud_beta_1_deg_offset": -2.5264409987376446,
+      "shroud_beta_4_deg_offset": 1.9412121516791416,
+      "shroud_theta_deg_offset": -0.6344325595115534
+    },
+    "slice_tolerance_norm": 1e-08
+  },
+  "refinement": {
+    "challenger_min_samples": 12,
+    "diagnostic_min_points": 6,
+    "diagnostic_window": 18,
+    "candidate_roles": [
+      "ehvi",
+      "uncertainty",
+      "diversity"
+    ],
+    "boundary_variables": [
+      "hub_beta_4_deg_offset",
+      "shroud_beta_0_deg_offset",
+      "hub_beta_0_deg_offset",
+      "hub_theta_deg_offset"
+    ],
+    "extension": {
+      "variable": "hub_beta_4_deg_offset",
+      "value": 5.0
+    },
+    "boundary_levels": {
+      "hub_beta_4_deg_offset": {
+        "step_deg": 0.5,
+        "min_step_deg": 0.1,
+        "max_step_deg": 1.0
+      },
+      "shroud_beta_0_deg_offset": {
+        "step_deg": 0.5,
+        "min_step_deg": 0.1,
+        "max_step_deg": 1.0
+      },
+      "hub_beta_0_deg_offset": {
+        "step_deg": 0.5,
+        "min_step_deg": 0.1,
+        "max_step_deg": 1.0
+      },
+      "hub_theta_deg_offset": {
+        "step_deg": 0.25,
+        "min_step_deg": 0.05,
+        "max_step_deg": 0.5
+      }
+    },
+    "local_search": {
+      "enabled": true,
+      "fraction": 0.7,
+      "initial_radius_norm": 0.15,
+      "min_radius_norm": 0.05,
+      "max_radius_norm": 0.3,
+      "successes_to_expand": 3,
+      "failures_to_shrink": 3,
+      "min_relative_hv_gain": 0.0001
+    }
+  }
 }

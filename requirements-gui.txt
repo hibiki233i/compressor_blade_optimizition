@@ -1,0 +1,6 @@
+# Desktop GUI dependencies for blade_gui.
+#
+# The optimizer itself needs only NumPy/Pandas plus optional SciPy/scikit-learn.
+# The GUI adds Qt (PySide6 6.11 ships a cp310-abi3 wheel, so it installs on
+# Python 3.10+ including 3.14).
+PySide6>=6.6

@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<!-- SYNTHETIC UNIT-TEST GEOMETRY ONLY. Not a real CFturbo project or engineering template. -->
+<CFturboBatchProject><Updates>
+<BladePropsML Name="Main blade">
+<Beta1><Value Index="0">1.0</Value><Value Index="1">1.0</Value></Beta1>
+<Beta2><Value Index="0">1.0</Value><Value Index="1">1.0</Value></Beta2>
+</BladePropsML>
+<TMeanLine Index="0"><InnerProgPoints>
+<Value Index="0"><x>0.25</x><y>1.0</y></Value>
+<Value Index="1"><x>0.5</x><y>1.0</y></Value>
+<Value Index="2"><x>0.75</x><y>1.0</y></Value>
+</InnerProgPoints><lePos>0.0</lePos></TMeanLine>
+<TMeanLine Index="1"><InnerProgPoints>
+<Value Index="0"><x>0.25</x><y>1.0</y></Value>
+<Value Index="1"><x>0.5</x><y>1.0</y></Value>
+<Value Index="2"><x>0.75</x><y>1.0</y></Value>
+</InnerProgPoints><lePos>0.0</lePos></TMeanLine>
+</Updates></CFturboBatchProject>

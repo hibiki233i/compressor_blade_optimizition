@@ -6,7 +6,7 @@ import json
 import math
 import os
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 import xml.etree.ElementTree as ET
@@ -15,6 +15,10 @@ import numpy as np
 import pandas as pd
 
 from blade_shape_cfx_runner import run_cfx_pipeline
+import blade_shape_refinement as refinement
+from blade_shape_acquisition import expected_hvi
+import blade_shape_pending as pending
+from blade_shape_runtime import output_lock, file_identity, atomic_json, case_reservations
 
 try:
     from scipy.stats import qmc
@@ -41,6 +45,8 @@ SAMPLE_COLUMNS = [
     "batch_index",
     "selection_rank",
     "selection_source",
+    "experiment_id",
+    "design_role",
 ]
 STATUS_COLUMNS = ["status", "failure_stage", "message", "case_dir", "run_id"]
 
@@ -71,12 +77,15 @@ class SelectedCandidate:
     distance_to_existing: float = np.nan
     pred_mean: np.ndarray | None = None
     pred_std: np.ndarray | None = None
+    candidate_role: str = "ehvi"
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 def load_config(path: str | Path) -> dict[str, Any]:
     config_path = Path(path)
     payload = json.loads(config_path.read_text(encoding="utf-8"))
     payload["_config_path"] = str(config_path.resolve())
+    refinement.active_indices(payload)
     return payload
 
 
@@ -182,6 +191,9 @@ def _interp_beta(xs: np.ndarray, ys: np.ndarray) -> np.ndarray:
 
 
 def constraint_violations(config: dict[str, Any], baseline: BaselineShape, x: np.ndarray) -> list[str]:
+    x = np.asarray(x, dtype=float)
+    if x.shape != (len(config['variables']),) or not np.isfinite(x).all():
+        return ['invalid_vector']
     constraints = config["constraints"]
     geom = candidate_geometry(config, baseline, x)
     hub = np.array(geom["hub_beta_rad"], dtype=float)
@@ -189,6 +201,10 @@ def constraint_violations(config: dict[str, Any], baseline: BaselineShape, x: np
     max_beta_offset = float(constraints["max_beta_offset_deg"])
     max_theta_offset = float(constraints["max_theta_offset_deg"])
     violations: list[str] = []
+    if np.any(x < lower_bounds(config)-1e-10) or np.any(x > upper_bounds(config)+1e-10):
+        violations.append('variable_bounds')
+    if not refinement.same_slice_mask(config,x)[0]:
+        violations.append('fixed_variables')
     if np.max(np.abs(np.rad2deg(hub - baseline.hub_beta_rad))) > max_beta_offset + 1e-9:
         violations.append("hub_beta_offset")
     if np.max(np.abs(np.rad2deg(shroud - baseline.shroud_beta_rad))) > max_beta_offset + 1e-9:
@@ -234,6 +250,11 @@ def diagnostic_columns(config: dict[str, Any]) -> list[str]:
         "status",
         "selection_rank",
         "selection_source",
+        "candidate_role", "slice_id", "candidate_on_slice", "inactive_distance_norm",
+        "surrogate_model", "history_train_count", "slice_train_count", "calibration_count", "challenger_status",
+        "hv_before", "hv_after", "hv_gain", "engineering_nondominated",
+        "ehvi_samples", "ehvi_base_samples", "ehvi_base_estimate", "ehvi_sampling_change",
+        "local_region_count", "local_radius_norm",
         "acquisition_score",
         "ehvi",
         "distance_to_existing",
@@ -244,7 +265,9 @@ def diagnostic_columns(config: dict[str, Any]) -> list[str]:
         "message",
     ]
     for objective in OBJECTIVE_COLUMNS:
-        columns.extend([f"pred_{objective}", f"std_{objective}", f"true_{objective}", f"prediction_error_{objective}"])
+        columns.extend([f"pred_{objective}", f"raw_std_{objective}", f"std_{objective}",
+                        f"calibration_scale_{objective}", f"true_{objective}", f"prediction_error_{objective}",
+                        f"challenger_pred_{objective}", f"challenger_std_{objective}", f"delta_best_{objective}"])
     return columns
 
 
@@ -256,7 +279,7 @@ def load_training(config: dict[str, Any]) -> pd.DataFrame:
 
 
 def normalize_training_frame(config: dict[str, Any], frame: pd.DataFrame) -> pd.DataFrame:
-    columns = all_columns(config)
+    columns = list(dict.fromkeys(all_columns(config) + list(frame.columns)))
     if frame.empty:
         return pd.DataFrame(columns=columns)
 
@@ -272,6 +295,8 @@ def normalize_training_frame(config: dict[str, Any], frame: pd.DataFrame) -> pd.
             frame[column] = frame[column].astype("object")
 
     for idx, row in frame.iterrows():
+        if row.get('sample_phase') == 'boundary':
+            continue
         run_number = parse_case_number(row.get("run_id", ""))
         diag = diagnostics.get(str(row.get("run_id", "")))
         if diag:
@@ -284,7 +309,6 @@ def normalize_training_frame(config: dict[str, Any], frame: pd.DataFrame) -> pd.
         if (
             pd.isna(frame.at[idx, "sample_phase"])
             or str(frame.at[idx, "sample_phase"]).strip() == ""
-            or str(frame.at[idx, "sample_phase"]) != inferred_phase
         ):
             frame.at[idx, "sample_phase"] = inferred_phase
         if frame.at[idx, "sample_phase"] == "doe":
@@ -349,19 +373,26 @@ def ensure_training_schema(config: dict[str, Any]) -> None:
     frame.to_csv(path, index=False)
 
 
-def append_row(config: dict[str, Any], row: dict[str, Any]) -> None:
-    path = training_csv_path(config)
+def append_compatible_csv(path: Path, row: dict[str, Any], columns: list[str],
+                          normalizer: Any = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    ensure_training_schema(config)
-    frame = pd.DataFrame([row], columns=all_columns(config))
-    frame.to_csv(path, mode="a", header=not path.exists(), index=False)
+    existing = pd.read_csv(path) if path.exists() else pd.DataFrame()
+    if normalizer is not None and not existing.empty:
+        existing = normalizer(existing)
+    order = list(dict.fromkeys(list(existing.columns) + columns + list(row)))
+    frame = pd.concat([existing.reindex(columns=order), pd.DataFrame([row]).reindex(columns=order)], ignore_index=True)
+    temp = path.with_suffix(path.suffix + '.tmp')
+    frame.to_csv(temp, index=False)
+    temp.replace(path)
+
+
+def append_row(config: dict[str, Any], row: dict[str, Any]) -> None:
+    append_compatible_csv(training_csv_path(config), row, all_columns(config),
+                          lambda df: normalize_training_frame(config, df))
 
 
 def append_diagnostic_row(config: dict[str, Any], row: dict[str, Any]) -> None:
-    path = diagnostics_csv_path(config)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    frame = pd.DataFrame([row], columns=diagnostic_columns(config))
-    frame.to_csv(path, mode="a", header=not path.exists(), index=False)
+    append_compatible_csv(diagnostics_csv_path(config), row, diagnostic_columns(config))
 
 
 def write_iteration_summary(config: dict[str, Any], rows: list[dict[str, Any]]) -> None:
@@ -402,7 +433,7 @@ def lhs_samples(config: dict[str, Any], count: int, seed: int) -> np.ndarray:
     else:
         rng = np.random.default_rng(seed)
         unit = rng.random((count, len(lb)))
-    return lb + unit * (ub - lb)
+    return refinement.enforce_fixed(config, lb + unit * (ub - lb))
 
 
 def normalize_x(config: dict[str, Any], x: np.ndarray) -> np.ndarray:
@@ -425,9 +456,7 @@ def is_far_enough(config: dict[str, Any], x: np.ndarray, existing: np.ndarray) -
     if existing.size == 0:
         return True
     distance_limit = float(config["constraints"].get("duplicate_distance_norm", 0.02))
-    xn = normalize_x(config, x[None, :])[0]
-    en = normalize_x(config, existing)
-    return float(np.min(np.linalg.norm(en - xn, axis=1))) >= distance_limit
+    return float(refinement.active_distances(config, x[None, :], existing)[0]) >= distance_limit
 
 
 def valid_random_samples(
@@ -444,7 +473,7 @@ def valid_random_samples(
     attempts = 0
     while len(out) < count and attempts < count * 500:
         attempts += 1
-        x = lb + rng.random(len(lb)) * (ub - lb)
+        x = refinement.enforce_fixed(config, lb + rng.random(len(lb)) * (ub - lb))
         if constraint_violations(config, baseline, x):
             continue
         if not is_far_enough(config, x, existing):
@@ -646,16 +675,19 @@ def nsga2_candidates(
     surrogate: Any,
     existing: np.ndarray,
     seed: int,
+    regions: list[dict[str, Any]] | None = None,
 ) -> np.ndarray:
     rng = np.random.default_rng(seed)
     lb = lower_bounds(config)
     ub = upper_bounds(config)
     pop_size = int(config["runtime"]["nsga2_pop_size"])
     generations = int(config["runtime"]["nsga2_generations"])
-    pop = np.array(valid_random_samples(config, baseline, pop_size, seed, existing))
+    pop = np.array(refinement.local_samples(config,baseline,pop_size,seed,existing,regions) if regions
+                   else valid_random_samples(config, baseline, pop_size, seed, existing))
     if len(pop) < pop_size:
-        extra = lb + rng.random((pop_size - len(pop), len(lb))) * (ub - lb)
-        pop = np.vstack([pop, extra]) if len(pop) else extra
+        if not len(pop):
+            return np.empty((0, len(lb)))
+        pop_size = len(pop)
 
     for _ in range(generations):
         mean, _ = surrogate.predict(pop)
@@ -669,7 +701,9 @@ def nsga2_candidates(
                 crowd[idx] = value
 
         children = []
-        while len(children) < pop_size:
+        attempts = 0
+        while len(children) < pop_size and attempts < pop_size * 100:
+            attempts += 1
             p1 = tournament(pop, rank, crowd, rng)
             p2 = tournament(pop, rank, crowd, rng)
             alpha = rng.random(len(lb))
@@ -678,11 +712,18 @@ def nsga2_candidates(
             for child in [c1, c2]:
                 mutation = rng.normal(0.0, 0.08, size=len(lb)) * (ub - lb)
                 mask = rng.random(len(lb)) < 0.25
-                child = np.clip(child + mask * mutation, lb, ub)
+                mask[[i for i in range(len(lb)) if i not in refinement.active_indices(config)]] = False
+                child = refinement.enforce_fixed(config, np.clip(child + mask * mutation, lb, ub))
+                if regions:
+                    idx=refinement.active_indices(config)
+                    region=min(regions,key=lambda q:np.linalg.norm((child[idx]-q['center'][idx])/(ub-lb)[idx]))
+                    child=np.clip(child,region['lower'],region['upper'])
                 if not constraint_violations(config, baseline, child):
                     children.append(child)
                 if len(children) >= pop_size:
                     break
+        if not children:
+            break
         combined = np.vstack([pop, np.array(children)])
         combined_mean, _ = surrogate.predict(combined)
         fronts = non_dominated_sort(combined_mean)
@@ -723,37 +764,43 @@ def select_acquisition(
     if len(candidate_sources) != len(candidates):
         raise ValueError("candidate_sources must have the same length as candidates.")
     mean, std = surrogate.predict(candidates)
-    ehvi = approximate_expected_hvi(config, observed_objectives, mean, std)
-    if existing.size:
-        dist = pairwise_distances(normalize_x(config, candidates), normalize_x(config, existing)).min(axis=1)
-    else:
-        dist = np.ones(len(candidates))
-    dist_norm = dist / max(float(np.max(dist)), 1e-12)
-    score = normalize_vector(ehvi) + 0.15 * dist_norm
-    order = np.argsort(score)[::-1]
+    acquisition = expected_hvi(config, observed_objectives, mean, std)
+    ehvi = acquisition['scores']
+    dist = refinement.active_distances(config, candidates, existing)
     selected: list[SelectedCandidate] = []
     selected_existing = existing.copy()
-    for idx in order:
-        x = candidates[idx]
-        if constraint_violations(config, baseline, x):
-            continue
-        if not is_far_enough(config, x, selected_existing):
-            continue
-        selected.append(
-            SelectedCandidate(
-                x=x,
-                selection_rank=len(selected) + 1,
-                selection_source=candidate_sources[idx],
-                acquisition_score=float(score[idx]),
-                ehvi=float(ehvi[idx]),
-                distance_to_existing=float(dist[idx]),
-                pred_mean=mean[idx].copy(),
-                pred_std=std[idx].copy(),
-            )
-        )
-        selected_existing = np.vstack([selected_existing, x[None, :]]) if selected_existing.size else x[None, :]
-        if len(selected) >= count:
+    available = np.ones(len(candidates), dtype=bool)
+    roles = config.get('refinement', {}).get('candidate_roles', ['ehvi', 'uncertainty', 'diversity'])
+    if not roles or set(roles) - {'ehvi','uncertainty','diversity'}:
+        raise ValueError('Unknown or empty candidate roles.')
+    for rank in range(count):
+        role = roles[rank % len(roles)]
+        dist = refinement.active_distances(config, candidates, selected_existing)
+        if role == 'ehvi':
+            score = ehvi
+        elif role == 'uncertainty':
+            tolerance = np.maximum(objective_tolerances(config), 1e-12)
+            score = (std / tolerance).mean(axis=1)
+        else:
+            score = dist
+        for idx in np.argsort(score)[::-1]:
+            if not available[idx]:
+                continue
+            available[idx] = False
+            x = candidates[idx]
+            if constraint_violations(config, baseline, x) or not is_far_enough(config, x, selected_existing):
+                continue
+            selected.append(SelectedCandidate(
+                x=x, selection_rank=len(selected)+1, selection_source=candidate_sources[idx],
+                candidate_role=role, acquisition_score=float(score[idx]), ehvi=float(ehvi[idx]),
+                distance_to_existing=float(dist[idx]), pred_mean=mean[idx].copy(), pred_std=std[idx].copy(),
+                metadata={**(surrogate.metadata(x) if hasattr(surrogate,'metadata') else {}),
+                          'ehvi_samples':acquisition['samples'], 'ehvi_base_samples':acquisition['base_samples'],
+                          'ehvi_base_estimate':float(acquisition['base_scores'][idx]),
+                          'ehvi_sampling_change':float(acquisition['sampling_change'][idx])}))
+            selected_existing = np.vstack([selected_existing, x[None,:]]) if selected_existing.size else x[None,:]
             break
+
     return selected
 
 
@@ -775,47 +822,10 @@ def approximate_expected_hvi(
     mean: np.ndarray,
     std: np.ndarray,
 ) -> np.ndarray:
-    """Monte-Carlo approximation of expected hypervolume improvement.
-
-    Objectives are maximized. This is intentionally approximate but preserves
-    EGO behavior: candidates score highly only when sampled GP outcomes expand
-    the currently observed CFD Pareto dominated volume.
-    """
+    """Exact 2D improvement for common (quasi-)Monte-Carlo predictive samples."""
     if len(mean) == 0:
         return np.array([])
-    if observed_objectives.size == 0:
-        return normalize_objectives(mean).mean(axis=1)
-
-    settings = config.get("surrogate", {})
-    n_y_samples = int(settings.get("ehvi_y_samples", 32))
-    n_hv_points = int(settings.get("ehvi_hv_points", 2048))
-    seed = int(config["runtime"].get("seed", 42)) + 707
-    rng = np.random.default_rng(seed)
-
-    pareto = observed_objectives[pareto_mask(observed_objectives)]
-    combined_hi = np.maximum(np.max(observed_objectives, axis=0), np.max(mean + 2.0 * std, axis=0))
-    combined_lo = np.min(observed_objectives, axis=0)
-    span = np.maximum(combined_hi - combined_lo, 1e-9)
-    reference = combined_lo - 0.05 * span
-    upper = combined_hi + 0.05 * span
-    volume = float(np.prod(np.maximum(upper - reference, 1e-12)))
-    points = reference + rng.random((n_hv_points, mean.shape[1])) * (upper - reference)
-
-    current_dominated = dominated_by_any(points, pareto)
-    improvement_region = ~current_dominated
-    if not np.any(improvement_region):
-        improvement_region = np.ones(len(points), dtype=bool)
-
-    scores = np.zeros(len(mean), dtype=float)
-    safe_std = np.maximum(std, 1e-12)
-    for i in range(len(mean)):
-        sampled_y = rng.normal(mean[i], safe_std[i], size=(n_y_samples, mean.shape[1]))
-        gains = []
-        for y in sampled_y:
-            dominates = np.all(points <= y, axis=1)
-            gains.append(float(np.mean(dominates & improvement_region)) * volume)
-        scores[i] = float(np.mean(gains))
-    return scores
+    return expected_hvi(config, observed_objectives, mean, std)['scores']
 
 
 def dominated_by_any(points: np.ndarray, pareto: np.ndarray) -> np.ndarray:
@@ -829,7 +839,7 @@ def dominated_by_any(points: np.ndarray, pareto: np.ndarray) -> np.ndarray:
 
 def fallback_selections(samples: list[np.ndarray], source: str, start_rank: int = 1) -> list[SelectedCandidate]:
     return [
-        SelectedCandidate(x=x, selection_rank=start_rank + idx, selection_source=source)
+        SelectedCandidate(x=x, selection_rank=start_rank + idx, selection_source=source, candidate_role="fallback")
         for idx, x in enumerate(samples)
     ]
 
@@ -849,6 +859,8 @@ def build_diagnostic_row(
         "status": result.row.get("status", ""),
         "selection_rank": selected.selection_rank,
         "selection_source": selected.selection_source,
+        "candidate_role": selected.candidate_role,
+        **selected.metadata,
         "acquisition_score": selected.acquisition_score,
         "ehvi": selected.ehvi,
         "distance_to_existing": selected.distance_to_existing,
@@ -870,20 +882,20 @@ def build_diagnostic_row(
 
 
 def next_case_index(config: dict[str, Any], df: pd.DataFrame) -> int:
+    ids = []
     if not df.empty and "run_id" in df.columns:
-        ids = []
         for value in df["run_id"].dropna().astype(str):
             if value.startswith("case_"):
                 try:
                     ids.append(int(value.split("_")[1]))
                 except Exception:
                     pass
-        if ids:
-            return max(ids) + 1
+    ids.extend(parse_case_number(name) for name in case_reservations(output_dir(config)) if parse_case_number(name) is not None)
+    queue = pending.load(config)
+    ids.extend(parse_case_number(e['run_id']) for e in queue['entries'] if parse_case_number(e['run_id']) is not None)
     cases = output_dir(config) / "cases"
     if not cases.exists():
-        return 0
-    ids = []
+        return max(ids) + 1 if ids else 0
     for path in cases.glob("case_*"):
         try:
             ids.append(int(path.name.split("_")[1]))
@@ -965,6 +977,8 @@ def evaluate_true_cfd(
     batch_index: int | float = np.nan,
     selection_rank: int | float = np.nan,
     selection_source: str = "",
+    experiment_id: str = "",
+    design_role: str = "",
 ) -> CaseResult:
     run_id = f"case_{case_index:06d}"
     sample = vector_to_sample(config, x)
@@ -977,6 +991,8 @@ def evaluate_true_cfd(
             "batch_index": batch_index,
             "selection_rank": selection_rank,
             "selection_source": selection_source,
+            "experiment_id": experiment_id,
+            "design_role": design_role,
             "status": "failed",
             "failure_stage": "",
             "message": "",
@@ -992,27 +1008,70 @@ def evaluate_true_cfd(
         append_row(config, row)
         return CaseResult(row, False)
 
-    candidate_path = write_candidate_files(config, baseline, x, run_id)
-    row["case_dir"] = str(candidate_path.parent)
-    ok, msg = run_geometry(config, candidate_path, dry_run=False)
-    if not ok:
-        row["failure_stage"] = "geometry"
-        row["message"] = msg
-        append_row(config, row)
-        return CaseResult(row, False)
+    case_dir = output_dir(config) / 'cases' / run_id
+    candidate_path = case_dir / 'candidate.json'
+    if candidate_path.exists():
+        previous = json.loads(candidate_path.read_text())
+        if not np.allclose([previous['variables'][n] for n in variable_names(config)],x,rtol=0,atol=1e-10):
+            raise ValueError('Refusing to overwrite a different existing candidate.')
+        if previous.get('run_id') != run_id or previous.get('geometry') != candidate_geometry(config,baseline,x):
+            raise ValueError('Existing candidate geometry does not match its parameter vector and baseline.')
+    else:
+        candidate_path = write_candidate_files(config, baseline, x, run_id)
+    row['case_dir'] = str(case_dir)
+    receipt_path = case_dir / 'geometry_state.json'
+    signature = refinement.digest({'physical':refinement.physical_signature(config), 'x':x.tolist(), 'candidate':file_identity(candidate_path)})
+    receipt = json.loads(receipt_path.read_text()) if receipt_path.exists() else None
+    if receipt is not None:
+        if receipt.get('signature') != signature or receipt.get('status') != 'complete' or receipt.get('mesh') != file_identity(case_dir/'Impeller_Mesh.gtm'):
+            row.update(failure_stage='geometry',message='Geometry receipt is incomplete or inputs/mesh changed. Inspect this case.')
+            append_row(config,row)
+            return CaseResult(row,False)
+    else:
+        if (case_dir/'cfx_state.json').exists() or (case_dir/'CFX_Results.txt').exists() or list(case_dir.glob('*.res')):
+            row.update(failure_stage='geometry',message='Unverified legacy geometry/CFX artifacts; no geometry completion receipt.')
+            append_row(config,row)
+            return CaseResult(row,False)
+        atomic_json(receipt_path,{'signature':signature,'status':'running'})
+        try:
+            ok,msg = run_geometry(config,candidate_path,dry_run=False)
+        except OSError as exc:
+            ok,msg=False,str(exc)
+            row['failure_stage']='environment'
+            (case_dir/'environment.log').write_text(msg,encoding='utf-8')
+        if not ok:
+            row['failure_stage']=row['failure_stage'] or 'geometry'
+            row['message']=msg
+            atomic_json(receipt_path,{'signature':signature,'status':'failed','message':msg})
+            append_row(config,row)
+            return CaseResult(row,False)
+        mesh = file_identity(case_dir/'Impeller_Mesh.gtm')
+        if mesh is None:
+            row.update(failure_stage='mesh',message='Geometry layer returned success without a mesh.')
+            atomic_json(receipt_path,{'signature':signature,'status':'failed','message':row['message']})
+            append_row(config,row)
+            return CaseResult(row,False)
+        atomic_json(receipt_path,{'signature':signature,'status':'complete','mesh':mesh})
 
     runtime = config["runtime"]
     paths = config["paths"]
-    cfx = run_cfx_pipeline(
-        candidate_path.parent,
-        run_id,
-        p_out_pa=float(runtime["p_out_pa"]),
-        cfx_bin_dir=paths["cfx_bin_dir"],
-        template_cfx=paths["template_cfx"],
-        template_cse=paths["template_cse"],
-        cores=int(runtime["cfx_cores"]),
-        n_blades=int(runtime["n_blades"]),
-    )
+    try:
+        cfx = run_cfx_pipeline(
+            candidate_path.parent,
+            run_id,
+            p_out_pa=float(runtime["p_out_pa"]),
+            cfx_bin_dir=paths["cfx_bin_dir"],
+            template_cfx=paths["template_cfx"],
+            template_cse=paths["template_cse"],
+            cores=int(runtime["cfx_cores"]),
+            n_blades=int(runtime["n_blades"]),
+        )
+    except OSError as exc:
+        row['failure_stage'] = 'environment'
+        row['message'] = str(exc)
+        (candidate_path.parent / 'environment.log').write_text(str(exc), encoding='utf-8')
+        append_row(config, row)
+        return CaseResult(row, False)
     if not cfx.success:
         row["failure_stage"] = cfx.failure_stage or "cfx"
         row["message"] = cfx.message
@@ -1021,6 +1080,11 @@ def evaluate_true_cfd(
 
     for col in RESULT_COLUMNS:
         row[col] = float(cfx.metrics.get(col, np.nan))
+    if not np.isfinite([row[o] for o in OBJECTIVE_COLUMNS]).all():
+        row['failure_stage'] = 'post'
+        row['message'] = 'Non-finite objective returned by CFX-Post.'
+        append_row(config, row)
+        return CaseResult(row, False)
     row["status"] = "success"
     row["failure_stage"] = ""
     row["message"] = cfx.message
@@ -1030,152 +1094,87 @@ def evaluate_true_cfd(
 
 def run_loop(args: argparse.Namespace) -> None:
     config = load_config(args.config)
-    runtime = config["runtime"]
-    if args.initial_samples is not None:
-        runtime["initial_samples"] = int(args.initial_samples)
-    if args.iterations is not None:
-        runtime["iterations"] = int(args.iterations)
-    if args.batch_size is not None:
-        runtime["batch_size"] = int(args.batch_size)
-    if args.max_new_cfd is not None:
-        runtime["max_new_cfd"] = int(args.max_new_cfd)
-    if args.seed is not None:
-        runtime["seed"] = int(args.seed)
+    with output_lock(output_dir(config)):
+        _run_loop(args, config)
 
+
+def _run_loop(args: argparse.Namespace, config: dict[str, Any]) -> None:
+    runtime = config['runtime']
+    for name in ['initial_samples', 'iterations', 'batch_size', 'max_new_cfd', 'seed']:
+        value = getattr(args, name, None)
+        if value is not None:
+            runtime[name] = int(value)
+    if runtime['max_new_cfd'] < 0 or runtime['batch_size'] < 1 or runtime['iterations'] < 0:
+        raise ValueError('Invalid run budget or batch size.')
     out = output_dir(config)
     out.mkdir(parents=True, exist_ok=True)
-    baseline = extract_baseline(config)
     df = load_training(config)
-    if not args.resume and not df.empty:
-        raise SystemExit(f"{training_csv_path(config)} already exists. Use --resume to append to it.")
-
-    seed = int(runtime["seed"])
-    max_new = int(runtime["max_new_cfd"])
-    used_new = 0
-    case_idx = next_case_index(config, df)
-    summary_rows: list[dict[str, Any]] = []
-
-    existing = existing_vectors(config, df)
-    if len(df) < int(runtime["initial_samples"]):
-        needed = int(runtime["initial_samples"]) - len(df)
-        seeds = lhs_samples(config, needed * 4, seed)
-        initial: list[np.ndarray] = []
-        for x in seeds:
-            if len(initial) >= needed:
-                break
-            if constraint_violations(config, baseline, x):
-                continue
-            if not is_far_enough(config, x, existing):
-                continue
-            initial.append(x)
-            existing = np.vstack([existing, x[None, :]]) if existing.size else x[None, :]
-        if len(initial) < needed:
-            initial.extend(valid_random_samples(config, baseline, needed - len(initial), seed + 1000, existing))
-        for x in initial:
-            if used_new >= max_new:
-                break
-            print(f"[CFD] initial {case_idx:06d}")
-            result = evaluate_true_cfd(
-                config,
-                baseline,
-                x,
-                case_idx,
-                sample_phase="doe",
-                doe_index=case_idx,
-            )
-            used_new += 1
-            case_idx += 1
-            df = load_training(config)
-            summary_rows.append(
-                {
-                    "sample_phase": "doe",
-                    "iteration": -1,
-                    "batch_index": "",
-                    "run_id": result.row["run_id"],
-                    "status": result.row["status"],
-                }
-            )
-            write_pareto(config, df)
-
-    for iteration in range(int(runtime["iterations"])):
-        if used_new >= max_new:
-            break
-        df = load_training(config)
-        success = df[df["status"] == "success"].copy()
+    if not args.resume and (not df.empty or pending.load(config)['entries']):
+        raise SystemExit('Existing training/pending data found. Use --resume.')
+    pending.check_orphans(config, df)
+    baseline = extract_baseline(config)
+    seed, max_new = int(runtime['seed']), int(runtime['max_new_cfd'])
+    recovered = pending.run(config, baseline, max_new)
+    used_new, failures, summary = recovered['new_attempts'], recovered['failures'], recovered['summary']
+    df = load_training(config)
+    if len(df) < runtime['initial_samples'] and used_new < max_new:
+        needed = min(runtime['initial_samples']-len(df), max_new-used_new)
         existing = existing_vectors(config, df)
-        batch_size = min(int(runtime["batch_size"]), max_new - used_new)
-        pareto_rows_before = len(write_pareto(config, df))
-        if len(success) >= 4:
-            x_train = success[variable_names(config)].astype(float).to_numpy()
-            y_train = success[OBJECTIVE_COLUMNS].astype(float).to_numpy()
-            surrogate = fit_surrogate(config, x_train, y_train, seed + iteration)
-            nsga = nsga2_candidates(config, baseline, surrogate, existing, seed + iteration * 17)
-            random_pool = np.array(
-                valid_random_samples(config, baseline, int(runtime["candidate_pool_size"]), seed + iteration * 31, existing)
-            )
-            candidates = np.vstack([nsga, random_pool]) if len(random_pool) else nsga
-            candidate_sources = ["nsga"] * len(nsga) + ["random_pool"] * len(random_pool)
-            selected = select_acquisition(
-                config,
-                baseline,
-                candidates,
-                candidate_sources,
-                surrogate,
-                existing,
-                y_train,
-                batch_size,
-            )
-            if len(selected) < batch_size:
-                fallback = valid_random_samples(config, baseline, batch_size - len(selected), seed + iteration * 97, existing)
-                selected.extend(fallback_selections(fallback, "fallback_random", len(selected) + 1))
+        initial = []
+        for x in lhs_samples(config, needed*4, seed):
+            if len(initial) >= needed:break
+            if not constraint_violations(config, baseline, x) and is_far_enough(config,x,existing):
+                initial.append(x)
+                existing = np.vstack([existing,x[None,:]]) if existing.size else x[None,:]
+        if len(initial) < needed:
+            initial.extend(valid_random_samples(config,baseline,needed-len(initial),seed+1000,existing))
+        candidates = fallback_selections(initial, 'doe')
+        index = next_case_index(config,df)
+        pending.enqueue(config,candidates,[{'sample_phase':'doe','doe_index':index+i} for i in range(len(candidates))])
+        result=pending.run(config,baseline,max_new-used_new)
+        used_new+=result['new_attempts'];failures+=result['failures'];summary.extend(result['summary'])
+    df=load_training(config)
+    iterations=pd.to_numeric(df.loc[df.sample_phase.eq('active_learning'),'al_iteration'],errors='coerce')
+    first=int(iterations.max())+1 if iterations.notna().any() else 0
+    for iteration in range(first,first+runtime['iterations']):
+        if used_new>=max_new:break
+        df=load_training(config)
+        success,_=refinement.training_partition(config,df)
+        existing=existing_vectors(config,df)
+        batch=min(runtime['batch_size'],max_new-used_new)
+        if len(success)>=4:
+            reference=refinement.hv_reference(config,df)
+            config['_ehvi_reference']=reference.tolist()
+            diagnostics=pd.read_csv(diagnostics_csv_path(config)) if diagnostics_csv_path(config).exists() else pd.DataFrame()
+            surrogate=refinement.ConditionalSurrogate(config,success,fit_surrogate,seed+iteration,diagnostics)
+            regions=refinement.local_regions(config,df) if hasattr(refinement,'local_regions') else []
+            nsga=nsga2_candidates(config,baseline,surrogate,existing,seed+iteration*17,regions=regions)
+            pool,sources=refinement.candidate_pool(config,baseline,df,seed+iteration*31,regions) if hasattr(refinement,'candidate_pool') else (
+                np.array(valid_random_samples(config,baseline,runtime['candidate_pool_size'],seed+iteration*31,existing)),
+                ['random_pool']*runtime['candidate_pool_size'])
+            candidates=np.vstack([nsga,pool]) if len(pool) else nsga
+            selected=select_acquisition(config,baseline,candidates,['nsga_local' if regions else 'nsga']*len(nsga)+sources,
+                                          surrogate,existing,success[OBJECTIVE_COLUMNS].to_numpy(float),batch)
+            if len(selected)<batch:
+                extra=valid_random_samples(config,baseline,batch-len(selected),seed+iteration*97,existing)
+                selected.extend(fallback_selections(extra,'fallback_random',len(selected)+1))
         else:
-            fallback = valid_random_samples(config, baseline, batch_size, seed + iteration * 97, existing)
-            selected = fallback_selections(fallback, "fallback_random")
-
-        for selected_candidate in selected[:batch_size]:
-            x = selected_candidate.x
-            print(f"[CFD] iteration {iteration} case {case_idx:06d}")
-            result = evaluate_true_cfd(
-                config,
-                baseline,
-                x,
-                case_idx,
-                sample_phase="active_learning",
-                al_iteration=iteration,
-                batch_index=selected_candidate.selection_rank,
-                selection_rank=selected_candidate.selection_rank,
-                selection_source=selected_candidate.selection_source,
-            )
-            used_new += 1
-            case_idx += 1
-            df = load_training(config)
-            summary_rows.append(
-                {
-                    "sample_phase": "active_learning",
-                    "iteration": iteration,
-                    "batch_index": selected_candidate.selection_rank,
-                    "run_id": result.row["run_id"],
-                    "status": result.row["status"],
-                }
-            )
-            pareto_rows_after = len(write_pareto(config, df))
-            append_diagnostic_row(
-                config,
-                build_diagnostic_row(
-                    config,
-                    iteration=iteration,
-                    selected=selected_candidate,
-                    result=result,
-                    pareto_rows_before=pareto_rows_before,
-                    pareto_rows_after=pareto_rows_after,
-                ),
-            )
-            if used_new >= max_new:
-                break
-
-    write_iteration_summary(config, summary_rows)
-    pareto = write_pareto(config, load_training(config))
-    print(f"Done. New CFD attempts: {used_new}. Pareto rows: {len(pareto)}. Output: {out}")
+            selected=fallback_selections(valid_random_samples(config,baseline,batch,seed+iteration*97,existing),'fallback_random')
+        if not selected:
+            raise RuntimeError('No feasible candidates could be generated; no CFD was started.')
+        if len(success)>=4:
+            for item in selected:
+                item.metadata.update(local_region_count=len(regions),local_radius_norm=regions[0]['radius_norm'] if regions else 0.)
+        arguments=[{'sample_phase':'active_learning','al_iteration':iteration,'batch_index':c.selection_rank,
+                    'selection_rank':c.selection_rank,'selection_source':c.selection_source} for c in selected]
+        pending.enqueue(config,selected,arguments)
+        result=pending.run(config,baseline,max_new-used_new)
+        used_new+=result['new_attempts'];failures+=result['failures'];summary.extend(result['summary'])
+    write_iteration_summary(config,summary)
+    front=write_pareto(config,load_training(config))
+    print(f'Done. New CFD attempts: {used_new}. Failed outcomes: {failures}. Pareto rows: {len(front)}. Output: {out}')
+    if failures:
+        raise SystemExit(1)
 
 
 def write_candidate_command(args: argparse.Namespace) -> None:
@@ -1192,11 +1191,34 @@ def write_candidate_command(args: argparse.Namespace) -> None:
         x = alternatives[0]
     run_id = f"dry_candidate_{int(args.index):03d}"
     candidate_path = write_candidate_files(config, baseline, x, run_id)
-    if args.dry_run:
+    if args.dry_run and not args.offline:
         ok, msg = run_geometry(config, candidate_path, dry_run=True)
         if not ok:
             raise SystemExit(msg)
+    if args.offline:
+        print('OFFLINE: Python candidate/geometry rules only; CFturbo XML and external programs not validated.')
     print(candidate_path)
+
+
+def refinement_command(args: argparse.Namespace) -> None:
+    config = load_config(args.config)
+    if args.command == 'diagnose':
+        history, local = refinement.training_partition(config, load_training(config))
+        report = history.copy()
+        report['inactive_distance_norm'] = refinement.slice_distance(config, report[variable_names(config)].to_numpy())
+        report['on_current_slice'] = refinement.same_slice_mask(config, report[variable_names(config)].to_numpy())
+        output_dir(config).mkdir(parents=True, exist_ok=True)
+        report.to_csv(output_dir(config) / 'training_slice_audit.csv', index=False)
+        print(json.dumps({'history_successes':len(history), 'same_slice_successes':len(local),
+                          'gate':refinement.write_diagnostics(config)}, indent=2))
+    elif args.command == 'write-boundary-plan':
+        plan = refinement.write_boundary_plan(config, args.center_run_id, Path(args.plan))
+        print(json.dumps({'plan':args.plan, 'plan_id':plan['plan_id'], 'points':len(plan['points']), 'stages':plan['stages']}, indent=2))
+    else:
+        result = refinement.run_boundary(config, Path(args.plan), args.stage, args.max_new_cfd, args.resume)
+        print(json.dumps(result, indent=2))
+        if result['stage_status'] == 'failed':
+            raise SystemExit(1)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1219,7 +1241,20 @@ def build_parser() -> argparse.ArgumentParser:
     wc.add_argument("--index", type=int, default=0)
     wc.add_argument("--seed", type=int)
     wc.add_argument("--dry-run", action="store_true")
+    wc.add_argument("--offline", action="store_true", help="Validate Python candidate rules only; skip PowerShell.")
     wc.set_defaults(func=write_candidate_command)
+    for name in ['diagnose', 'write-boundary-plan', 'run-boundary']:
+        command = sub.add_parser(name)
+        command.add_argument('--config', default='blade_shape_config.json')
+        if name != 'diagnose':
+            command.add_argument('--plan', required=True)
+        if name == 'write-boundary-plan':
+            command.add_argument('--center-run-id', required=True)
+        if name == 'run-boundary':
+            command.add_argument('--stage', choices=['singles','pairs','extension'], required=True)
+            command.add_argument('--max-new-cfd', type=int, required=True)
+            command.add_argument('--resume', action='store_true')
+        command.set_defaults(func=refinement_command)
     return parser
 
 
@@ -1228,7 +1263,9 @@ def main() -> None:
     args = parser.parse_args()
     if args.command is None:
         args = parser.parse_args(["run"])
-    args.func(args)
+    config = load_config(args.config)
+    with output_lock(output_dir(config)):
+        args.func(args)
 
 
 if __name__ == "__main__":
