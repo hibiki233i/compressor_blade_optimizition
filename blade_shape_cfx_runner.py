@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from blade_shape_runtime import atomic_json, digest, file_identity, output_lock
+from blade_shape_convergence import ConvergencePolicy, assess_out, convergence_ccl
 
 
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
@@ -122,22 +123,24 @@ def run_cfx_pipeline(
     working_dir: str | Path, run_id: str, *, p_out_pa: float,
     cfx_bin_dir: str | Path, template_cfx: str | Path, template_cse: str | Path,
     cores: int = 8, n_blades: int = 10,
+    convergence: ConvergencePolicy | None = None,
 ) -> CfxResult:
     with output_lock(working_dir):
         return _run_cfx_pipeline(working_dir, run_id, p_out_pa=p_out_pa,
                                  cfx_bin_dir=cfx_bin_dir, template_cfx=template_cfx,
-                                 template_cse=template_cse, cores=cores, n_blades=n_blades)
+                                 template_cse=template_cse, cores=cores, n_blades=n_blades,
+                                 convergence=convergence or ConvergencePolicy())
 
 
 def _run_cfx_pipeline(
     working_dir: str | Path, run_id: str, *, p_out_pa: float,
     cfx_bin_dir: str | Path, template_cfx: str | Path, template_cse: str | Path,
-    cores: int, n_blades: int,
+    cores: int, n_blades: int, convergence: ConvergencePolicy,
 ) -> CfxResult:
     """Accept only results linked to a recorded, successful Solve and matching inputs.
 
-    Process success is recorded here; it is not a residual/conservation certificate.
-    Failed/running Solve receipts require inspection, not an automatic second solve.
+    Final RMS acceptance is mandatory; conservation and mesh checks remain separate.
+    Only a normally exhausted first solve may receive one bounded continuation.
     """
     work = Path(working_dir)
     mesh, definition = work / 'Impeller_Mesh.gtm', work / 'Impeller.def'
@@ -149,26 +152,42 @@ def _run_cfx_pipeline(
               'candidate': file_identity(work / 'candidate.json'),
               'template_cfx': file_identity(template_cfx), 'template_cse': file_identity(template_cse),
               'p_out_pa': p_out_pa, 'cores': cores, 'n_blades': n_blades,
-              'cfx_bin_dir': str(cfx_bin_dir)}
+              'cfx_bin_dir': str(cfx_bin_dir), 'convergence': convergence.to_dict()}
     if inputs['template_cfx'] is None or inputs['template_cse'] is None:
         return CfxResult(False, {}, 'CFX templates are missing; cannot verify result identity.', 'environment')
     signature = digest(inputs)
     state = json.loads(receipt.read_text()) if receipt.exists() else None
-    if state is not None and (state.get('version') != 1 or state.get('signature') != signature):
+    if state is not None and (state.get('version') != 2 or state.get('signature') != signature):
         return CfxResult(False, {}, 'CFX input identity changed; existing results were not reused.', 'environment')
     if state is None:
         if output.exists() or list(work.glob('*.res')) or definition.exists():
             return CfxResult(False, {}, 'Unverified legacy CFX artifacts: no completion receipt. Inspect/archive or use a fresh case.', 'solve')
-        state = {'version': 1, 'signature': signature, 'inputs': inputs, 'stages': {}}
+        state = {'version': 2, 'signature': signature, 'inputs': inputs, 'stages': {}}
         atomic_json(receipt, state)
     stages = state['stages']
     solve = stages.get('solve', {})
-    if solve.get('status') in {'running', 'failed'}:
+    if solve.get('status') in {'running', 'failed', 'needs_restart'}:
         return CfxResult(False, {}, 'Previous Solve is incomplete or failed; its .res is not an accepted final result. Inspect the case before a new attempt.', 'solve')
     if solve.get('status') == 'complete':
         res_file = work / solve['result_file']
         if solve.get('exit_code') != 0 or file_identity(res_file) != solve.get('result_identity'):
             return CfxResult(False, {}, 'Completed Solve result is missing or changed.', 'solve')
+        pre = stages.get('pre', {})
+        controls_valid = (file_identity(definition) == pre.get('definition_identity')
+                          and file_identity(work/'update_bc.ccl') == pre.get('ccl_identity')
+                          and file_identity(work/'convergence.ccl') == state.get('convergence_control_identity'))
+        if state.get('restart'):
+            controls_valid = controls_valid and file_identity(work/'restart_convergence.ccl') == state['restart'].get('ccl_identity')
+        if not controls_valid:
+            return CfxResult(False, {}, 'Recorded solver definition/controls changed.', 'solve')
+        out_file = work / solve.get('out_file', '')
+        if not solve.get('convergence', {}).get('converged') or not out_file.is_file() or file_identity(out_file) != solve.get('out_identity'):
+            return CfxResult(False, {}, 'Final RMS acceptance evidence is missing or changed.', 'solve')
+        try:
+            if not assess_out(out_file.read_text(encoding='utf-8', errors='replace'), convergence)['converged']:
+                return CfxResult(False, {}, 'Final RMS criterion is not satisfied.', 'solve')
+        except ValueError as exc:
+            return CfxResult(False, {}, str(exc), 'solve')
         post = stages.get('post', {})
         if post.get('status') == 'complete' and file_identity(output) == post.get('result_identity'):
             try:
@@ -214,15 +233,66 @@ def _run_cfx_pipeline(
             return CfxResult(False, {}, 'Recorded .def/CCL is missing or changed.', 'pre')
         if list(work.glob('*.res')):
             return CfxResult(False, {}, 'Unexpected .res without a completed Solve receipt.', 'solve')
-        ret = invoke('solve', [str(executables['solve']), '-def', str(definition), '-ccl', str(work/'update_bc.ccl'),
-                               '-double', '-par-local', '-part', str(cores), '-batch'])
-        files = sorted(work.glob('*.res'), key=lambda p: p.stat().st_mtime_ns)
-        if ret != 0 or not files or files[-1].stat().st_size == 0:
-            stages['solve']['status'] = 'failed'; atomic_json(receipt, state)
-            return CfxResult(False, {}, f'CFX-Solve failed or produced no usable result, exit={ret}', 'solve')
-        res_file = files[-1]
-        stages['solve'].update(status='complete', result_file=res_file.name, result_identity=file_identity(res_file))
-        atomic_json(receipt, state)
+        controls = work / 'convergence.ccl'
+        controls.write_text(convergence_ccl(convergence), encoding='utf-8')
+        state['convergence_control_identity'] = file_identity(controls)
+        state['solve_attempts'] = []
+        previous_result = None
+        for attempt in range(2):
+            stage = 'solve' if attempt == 0 else 'solve_restart'
+            command = [str(executables['solve']), '-def', str(definition),
+                       '-ccl', str(work/'update_bc.ccl'), '-ccl', str(controls),
+                       '-double', '-par-local', '-part', str(cores), '-batch']
+            if previous_result is not None:
+                # Reset the counter while reusing the last flow field. This makes
+                # the extra iteration budget independent of accumulated history.
+                controls = work / 'restart_convergence.ccl'
+                controls.write_text(convergence_ccl(convergence, restart=True), encoding='utf-8')
+                command[command.index(str(work/'convergence.ccl'))] = str(controls)
+                command += ['-initial-file', str(previous_result)]
+                state['restart'] = {'iterations': convergence.restart_iterations,
+                                    'method': 'initial_file_reset_counter',
+                                    'source': previous_result.name,
+                                    'source_identity': file_identity(previous_result),
+                                    'ccl_identity': file_identity(controls)}
+            before = set(work.glob('*.res'))
+            old_outputs = {p.name: file_identity(p) for p in work.glob('*.out')}
+            ret = invoke(stage, command)
+            files = [p for p in work.glob('*.res') if p not in before and p.stat().st_size > 0]
+            if ret != 0 or len(files) != 1:
+                stages['solve'].update(status='failed', message='Solver failed or did not create one unambiguous new result')
+                atomic_json(receipt, state)
+                return CfxResult(False, {}, f'CFX-Solve failed or ambiguous new result, exit={ret}', 'solve')
+            res_file = files[0]
+            out_file = res_file.with_suffix('.out')
+            try:
+                if not out_file.is_file() or file_identity(out_file) == old_outputs.get(out_file.name):
+                    raise ValueError('Matching .out is missing or was not updated by this Solve')
+                report = assess_out(out_file.read_text(encoding='utf-8', errors='replace'), convergence)
+                if attempt and report['run_iteration'] > convergence.restart_iterations:
+                    raise ValueError('Restart exceeded the configured iteration budget')
+            except (ValueError, OSError) as exc:
+                stages['solve'].update(status='failed', message=str(exc))
+                atomic_json(receipt, state)
+                return CfxResult(False, {}, f'CFX RMS check failed: {exc}', 'solve')
+            evidence = dict(result_file=res_file.name, result_identity=file_identity(res_file),
+                            out_file=out_file.name, out_identity=file_identity(out_file), convergence=report)
+            state['solve_attempts'].append(dict(attempt=attempt, **evidence))
+            if report['converged']:
+                stages['solve'].update(status='complete', exit_code=0, **evidence)
+                atomic_json(receipt, state)
+                break
+            if attempt == 0 and report['iteration_limit_reached']:
+                stages['solve'].update(status='needs_restart', **evidence)
+                atomic_json(receipt, state)
+                previous_result = res_file
+                continue
+            message = (f"RMS {report['max_rms']:.6g} exceeds {convergence.rms_target:.6g}; "
+                       + ('extra iteration budget exhausted; point discarded' if attempt else
+                          'not a normal iteration-limit stop; point discarded'))
+            stages['solve'].update(status='failed', message=message, **evidence)
+            atomic_json(receipt, state)
+            return CfxResult(False, {}, message, 'solve')
     if output.exists():
         # Preserve an uncommitted/failed Post output, never accept it as the new output.
         output.rename(work / f'CFX_Results.unverified_{time.time_ns()}.txt')
@@ -237,7 +307,7 @@ def _run_cfx_pipeline(
         return CfxResult(False, {}, f'CFX result parsing failed: {exc}', 'post')
     stages['post'].update(status='complete', result_identity=file_identity(output))
     atomic_json(receipt, state)
-    return CfxResult(True, metrics, 'Success (recorded Pre/Solve/Post completion)')
+    return CfxResult(True, metrics, 'Success (final RMS accepted; recorded Pre/Solve/Post completion)')
 
 
 def _load_config(path: str | Path) -> dict[str, object]:
@@ -259,6 +329,9 @@ def _check_cfx_pre_inputs(config_path: str | Path, working_dir: str | Path) -> i
         p_out_pa=float(runtime["p_out_pa"]),
         template_cfx=paths["template_cfx"],
     )
+    policy = ConvergencePolicy.from_config(config)
+    (work / 'convergence.ccl').write_text(convergence_ccl(policy), encoding='utf-8')
+    (work / 'restart_convergence.ccl').write_text(convergence_ccl(policy, restart=True), encoding='utf-8')
     cfx_bin = Path(paths["cfx_bin_dir"])
     required = [
         Path(paths["template_cfx"]),

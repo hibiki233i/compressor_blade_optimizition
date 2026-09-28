@@ -195,6 +195,7 @@ class RunPage(Page):
 
         # ---- runner
         self.runner = CommandRunner(CODE_DIR, self)
+        self.ctx.command_runners.append(self.runner)
         self.runner.started.connect(self._on_started)
         self.runner.line.connect(self._on_line)
         self.runner.finished.connect(self._on_finished)
@@ -510,7 +511,8 @@ class RunPage(Page):
 
     # -------------------------------------------------------------- start
     def start(self) -> None:
-        if self.runner.running:
+        if any(runner.running for runner in self.ctx.command_runners):
+            self.ctx.report("已有运行或验证任务正在执行，请等待完成。")
             return
         errors = config_errors(self.ctx.project.issues)
         if errors:

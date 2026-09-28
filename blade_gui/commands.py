@@ -128,3 +128,45 @@ def build_check_pre(config_path: str | Path, *, working_dir: str | Path) -> Comm
         "--working-dir", str(working_dir),
     ]
     return CommandSpec("check-pre", args, "生成并检查 CFX-Pre 输入（不求解）", script=CFX_SCRIPT)
+
+
+VALIDATION_SCRIPT = 'blade_shape_incidence_validation.py'
+VALIDATION_OPTIONS = {
+    'init': ('res', 'geometry_source', 'output'),
+    'extract': ('spec', 'post_exe', 'output_dir'),
+    'sweep': ('spec', 'post_exe', 'stations', 'bands', 'output_dir'),
+    'legacy': ('csv', 'hub_beta_deg', 'shroud_beta_deg', 'output_dir'),
+    'compare': ('baseline', 'target', 'flow_tolerance', 'output'),
+    'plan': ('config', 'candidate', 'step_deg', 'pressures_pa', 'output_dir'),
+    'run': ('plan', 'max_new_cfd', 'resume'),
+}
+
+
+def build_validation(action: str, **values) -> CommandSpec:
+    """Only build argv; the validation CLI owns all calculations and execution."""
+    if action not in VALIDATION_OPTIONS:
+        raise ValueError(f'Unknown validation action: {action}')
+    args = [action]
+    optional = {'candidate', 'pressures_pa', 'resume'}
+    for key in VALIDATION_OPTIONS[action]:
+        value = values.get(key)
+        if key == 'resume':
+            if value: args.append('--resume')
+            continue
+        if value is None or value == '':
+            if key in optional: continue
+            raise ValueError(f'请填写 {key}')
+        args.append('--' + key.replace('_', '-'))
+        if key in {'stations', 'bands', 'pressures_pa'}:
+            parts = str(value).replace(',', ' ').split() if isinstance(value, str) else list(value)
+            if not parts: raise ValueError(f'{key} 不能为空')
+            try:
+                numbers = [int(p) if key == 'bands' else float(p) for p in parts]
+                import math
+                if not all(math.isfinite(n) for n in numbers): raise ValueError('non-finite')
+            except (ValueError, TypeError) as exc:
+                raise ValueError(f'{key} 需要用空格分隔的数值') from exc
+            args.extend(str(n) for n in numbers)
+        else:
+            args.append(str(value))
+    return CommandSpec('validation:' + action, args, '展向攻角验证：' + action, script=VALIDATION_SCRIPT)

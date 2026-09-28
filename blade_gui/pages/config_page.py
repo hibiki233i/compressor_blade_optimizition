@@ -107,6 +107,9 @@ PATH_FIELDS = [
 
 RUNTIME_FIELDS = [
     Field("runtime.cfx_cores", "CFX 核数", "int", minimum=1, maximum=512),
+    Field("cfx_convergence.rms_target", "CFX RMS 门槛", "float", minimum=0.000000000001, maximum=0.00001, decimals=12, step=0.000001),
+    Field("cfx_convergence.restart_iterations", "不收敛追加迭代数", "int", minimum=1500, maximum=2000),
+    Field("cfx_convergence.flow_analysis", "CFX Flow 名称", "text"),
     Field("runtime.n_blades", "叶片数", "int", minimum=1, maximum=200),
     Field("runtime.rpm", "转速 (rpm)", "float", decimals=2, step=100.0),
     Field("runtime.mass_flow", "质量流量", "float", decimals=6, step=0.0001),
@@ -398,8 +401,8 @@ class ConfigPage(Page):
             widget.setButtonSymbols(QSpinBox.UpDownArrows)
         elif spec.kind == "float":
             widget = QDoubleSpinBox()
-            widget.setRange(float(spec.minimum), float(spec.maximum))
             widget.setDecimals(int(spec.decimals))
+            widget.setRange(float(spec.minimum), float(spec.maximum))
             widget.setSingleStep(float(spec.step))
             widget.setButtonSymbols(QDoubleSpinBox.UpDownArrows)
         elif spec.kind == "choice":
@@ -441,6 +444,10 @@ class ConfigPage(Page):
     def reload_from_context(self) -> None:
         """Populate the form from the current project's config."""
         config = copy.deepcopy(self.ctx.project.config)
+        from blade_shape_convergence import ConvergencePolicy
+        defaults = ConvergencePolicy().to_dict()
+        if isinstance(config.get("cfx_convergence", {}), dict):
+            config["cfx_convergence"] = {**defaults, **config.get("cfx_convergence", {})}
         self._config_snapshot = config
         self._loaded_config_path = self.ctx.project.config_path
         for key, (spec, widget) in self._bindings.items():

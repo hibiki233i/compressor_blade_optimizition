@@ -1,0 +1,132 @@
+# 展向攻角验证入口
+
+入口为 `python blade_shape_incidence_validation.py`，在 `code/` 仓库中运行。所有目标路径均由参数或 JSON 提供，不绑定某个叶轮名称。用途是复现旧指标、提取有符号速度三角形、检验对比工况、运行已有参数化支持的进口角敏感性试验。它不向原优化训练目录追加数据，不修改原 Pareto 定义，不把攻角变成第三目标。
+
+## 1. 目标路径与几何确认
+
+PowerShell 示例；路径变量替换为本机真实路径，输出必须选独立的新目录：
+
+```powershell
+$TargetRes = 'D:\my_project\target\Impeller_001.res'
+$Geometry = 'D:\my_project\target\target.cft'
+$PostExe = 'D:\ANSYS Inc\v251\CFX\bin\cfx5post.exe'
+$ValidationRoot = 'D:\my_project\incidence_validation'
+$TargetSpec = Join-Path $ValidationRoot 'target.json'
+python blade_shape_incidence_validation.py init --res "$TargetRes" --geometry-source "$Geometry" --output "$TargetSpec"
+```
+
+`init` 仅生成配置，不要求这些工程文件在生成时已存在。`extract` 则必须在能访问真实文件和 CFX-Post 的机器运行。相对 `res_path` / `geometry_source` 按 spec 所在目录解释，其他 CLI 路径按当前工作目录解释。
+
+编辑生成的 JSON，确认并填写：
+
+- `hub_beta_deg`、`shroud_beta_deg`：目标实际前缘金属角，单位度，相对于指定周向参考方向。
+- `geometry_verified`：核对几何来源、`.res` 对应关系、`BetaModeLE=Linear`，以及 CFturbo 与 Turbo 展向坐标一致后才设 `true`。此字段记录人的确认，不代表程序已解析并独立证明几何身份。
+- `measurement.normal_sign`：+1 或 -1，使 `normal_sign * (W dot Normal)` 的正方向为下游；先在 CFD-Post 目视和数值确认。
+- `measurement.theta_reference_sign`：+1 表示从正周向量角，-1 表示从负周向量角。若通常的转子相对周向速度为负且 CFturbo 从负周向朝正流向量角，使用 -1；不得未经核对照抄。
+- `conditions`：实际 `rpm`、入口总压 Pa、入口总温 K、`fluid_id`、叶片数 `n_blades`。这些是用户声明的工况，代码不自动从 `.res` 证明它们。
+- `conditions.simulated_passages`：模拟的实际通道数，默认 1；整轮模型填 `n_blades`。整体流量按 `n_blades/simulated_passages` 换算。
+- `measurement.bands`（默认 20）、`le_station`（默认 0.22）、`turbo_domain`（默认 R1）、`max_reverse_fraction`（默认 0.01）。
+
+前缘金属角采用线性插值。非线性展向角模板不应设置 `geometry_verified=true` 来绕过限制；本版本尚未支持其金属角读取。`le_station=0.22` 是 Blade Aligned 坐标，不是前缘上游某个弦长百分比。比较前必须统一截面定义。
+
+## 2. CFX-Post 展向提取
+
+```powershell
+python blade_shape_incidence_validation.py extract --spec "$TargetSpec" --post-exe "$PostExe" --output-dir "$ValidationRoot\target_20bands_022"
+```
+
+在旋转域使用相对 `Velocity u/v/w` 与面法向求正向和逆向质量通量；按等宽 `Span Normalized` 带积分。各带先以**正向质量通量**平均有符号的 `Velocity Streamwise` 与 `Velocity Circumferential`，再计算：
+
+`beta_f = degrees(atan2(W_streamwise_bar, theta_reference_sign * W_theta_bar))`
+
+`i_geo = wrap180(beta_b - beta_f)`，正负号与报告的 `i=beta_b-beta_f` 一致。流角使用 Turbo 流向/周向平面，不能将 `Velocity Streamwise` 无条件视为子午速度模；若原研究用另一套局部基底，需先统一定义。
+
+金属角在带内质量加权叶高 `s_mass` 上线性插值，避免拿端壁金属角直接对比宽展向带。正向权重保证 RMS 非负；逆向通量单独记录。某带无正向通量、平均流向速度非正、逆向通量占该带总绝对通量的比例超过阈值，或带积分净流量与 CFX `massFlow()` 相差超过 1%，均使 `quality_ok=false`，整体攻角指标留空，CLI 返回 2。
+
+生成：
+
+- `profile.csv`：带界限、正/逆向流量 kg/s、质量加权叶高、平均相对速度 m/s、金属角、流角、几何攻角（度）。
+- `summary.json`：质量加权 RMS、质量加权平均绝对攻角、最大绝对攻角、整轮净流量和质量标记。
+- `inputs.json`：配置与 `.res`、几何来源的 SHA-256。提取后再次核对身份，文件改变则失败。
+- `extract.cse`、`command.json`、`cfxpost.log`、`returncode.json`、`flow_diagnostics.tsv`、`state.json`：完整执行证据；错误日志若生成也保留。
+
+这是流动诊断，不是最小损失攻角标定。`numerical_acceptance_verified=false`、`min_loss_angle_calibrated=false` 始终明确保留。`quality_ok` 不验证残差、网格独立性、物性适用性或稳定裕度。禁止把经验 Stanitz 修正直接作为已验证的真实最优角。
+
+CFX session 复用现有 Turbo 初始化与截面生成器。新增积分表达式尚需 Windows CFX-Post 25.1 的真实结果验证；离线测试只检查公式、命令和失败路径。
+
+## 3. 复现报告的 20 点旧指标
+
+把原始导出的目标曲线整理成严格的两列 CSV：`span,beta_cfx_deg`。要求 20 行、按 `j/19` 从 0 到 1 排序；叶高精度至少 6 位小数。这里读取的是原始 `Velocity Beta ACA` 数据，不是当前模块产生的质量加权流角，也不是旧报告中已计算出的攻角。
+
+```powershell
+$LegacyCsv = 'D:\my_project\exports\target_beta_aca.csv'
+$HubBeta = 70.356
+$ShroudBeta = 20.209
+python blade_shape_incidence_validation.py legacy --csv "$LegacyCsv" --hub-beta-deg $HubBeta --shroud-beta-deg $ShroudBeta --output-dir "$ValidationRoot\legacy_target"
+```
+
+角度示例来自所讨论报告，只能在确认对应几何时使用。该模式严格限定 ACA 在已确认的 [-90°, 0°] 象限，复现 `beta_f=90-abs(beta_cfx)`、线性金属角和 20 点算术平均绝对攻角；不把此公式推广到回流或其他象限。输出方法标识与新指标不同，两者不能混合比较。源 CSV 的路径与哈希保存在 summary；复现 2.768° / 4.861° 仍需原始20点数据，程序不内置或伪造这些结果。
+
+## 4. 工况匹配对比与测量敏感性
+
+分别为基准和目标准备 spec 并提取后：
+
+```powershell
+python blade_shape_incidence_validation.py compare --baseline "$ValidationRoot\baseline\summary.json" --target "$ValidationRoot\target\summary.json" --flow-tolerance 0.01 --output "$ValidationRoot\comparison.json"
+```
+
+只有方法和测量定义一致才比较。比较会检查声明的转速、入口总温总压、介质、叶片数，并按提取后的整轮净流量检查相对差。质量检查失败或流量/工况不匹配时返回 2，`usable_for_matched_point_diagnostic=false`。即使声明工况匹配，也不等于已证明网格和求解数值接受，不能用该标记进行损失因果归因。
+
+截面/分带敏感性入口可以对同一 `.res` 自动提取多组设置：
+
+```powershell
+python blade_shape_incidence_validation.py sweep --spec "$TargetSpec" --post-exe "$PostExe" --stations 0.20 0.22 0.24 --bands 20 40 --output-dir "$ValidationRoot\measurement_sweep"
+```
+
+该例运行6次只读后处理，生成逐次日志、进度和 `sensitivity.csv`，每次检查来源身份；后处理失败即停，已有日志保留，不自动重试。检查曲线和统计量的稳定性后再选固定定义。这些测量定义不同的结果不能通过 `compare` 冒充同定义设计对照。此处尚不提供自动收敛阈值或自动选“最好截面”。
+
+## 5. 现有参数化下的真实 CFD 敏感性
+
+复制当前 `blade_shape_config.json` 到目标工程配置，并把 `paths` 指向实际目标的 `.cft/.cft-batch`、TurboGrid/CFX 模板和软件路径。路径应优先使用绝对路径，计划生成时会将路径按现有 CLI 的当前工作目录规则固化。目标几何必须满足当前两条主叶片平均线和12变量接口；不支持凭空生成中间叶高控制点。
+
+```powershell
+$TargetConfig = 'D:\my_project\target_validation_config.json'
+$Study = Join-Path $ValidationRoot 'endpoint_study_01'
+$AngleStep = 0.25
+python blade_shape_incidence_validation.py plan --config "$TargetConfig" --step-deg $AngleStep --output-dir "$Study"
+```
+
+不带 `--candidate` 时，中心是目标 batch 模板本身（12个偏移全为零）。带 `--candidate <candidate.json>` 时，中心使用已有候选，代码会重新从基准模板与参数向量生成几何并核对，不接受不匹配的候选。
+
+每个背压点生成5个设计：中心、hub进口角±step、shroud进口角±step。其余坐标固定在目标值，只有**独立试验配置**的搜索切片会相应调整；原配置文件和原运行目录不变。所有扰动仍须通过原变量边界及几何约束，越界会拒绝整个计划，不自动扩大边界。需要背压扫描时显式添加 `--pressures-pa`，数值单位及压力基准沿用原 CFX runner 的 `MyBackPressure`，必须根据实际模板定义选择，不能把其他工程的12 Pa直接照搬。
+
+```powershell
+# 只有在工程路径、模板工况和预算确认后运行；以下最多新增1次真实CFD
+python blade_shape_incidence_validation.py run --plan "$Study\plan.json" --max-new-cfd 1
+# 继续后续尚未尝试的点；不自动重算失败或中断点
+python blade_shape_incidence_validation.py run --plan "$Study\plan.json" --max-new-cfd 1 --resume
+```
+
+调用原 `evaluate_true_cfd`，沿用几何、网格、CFX和各阶段失败记录。结果写入 `$Study\cfd` 的独立训练CSV及case目录，并在 `progress.json` 中记录计划内工况/角色对应的结果；这些CSV沿用主程序历史单位，不能当作SI流量。原始结果的每个 case 都需再用本验证模块提取SI流量和攻角。
+
+计划冻结配置、候选和物理输入的身份，并保存 SHA-256 签名。源文件改变后拒绝执行；每次外部计算前先写入 `running`，失败即停，中断后保留运行状态，`--resume` 不会自动重试该点。计划全部完成只说明流程完成，不能替代CFD数值接受。恢复失败/中断点需要人工核查；本入口刻意不提供跳过失败或强制覆写开关。
+
+背压扫描只提供不同工作点的样本，不自动保证等流量。必须依据各点实际提取流量用 `compare` 检查，必要时另建预算明确的新背压计划；不能把插值或代理预测冒充已计算的等流量点。该入口尚未实现自动等流量寻根、非线性展向前缘几何、稳定裕度判定或最小损失角标定。
+
+## 验证与来源
+
+```powershell
+python -m py_compile blade_shape_incidence_validation.py
+python -m unittest tests.test_incidence_validation -v
+python -m unittest discover -s tests
+```
+
+测试使用合成数据和外部调用替身，覆盖角度象限、回流、质量闭合、旧指标、身份、对比工况、预算、续跑及失败/中断不重算。真实Windows验证时先做一份已有 `.res` 的只读提取，对照CFD-Post手工积分和速度三角形，再决定是否运行预算化敏感性CFD。
+
+正/逆向通量表达式依据 [ANSYS Knowledge](https://innovationspace.ansys.com/knowledge/forums/topic/how-to-calculate-the-positive-or-negative-mass-flow-rate-through-an-arbitrary-plane-in-cfd-post/)；Turbo变量及坐标定义见 [CFD-Post 2025 R1](https://ansyshelp.ansys.com/public/Views/Secured/corp/v251/en/cfd_post/i1306553.html) 与 [Turbo Charts](https://ansyshelp.ansys.com/public/Views/Secured/corp/v251/en/cfd_post/i1362519.html)。
+
+## GUI 与 CFX 残差门槛
+
+桌面GUI新增“验证”页（`Ctrl+6`），上述七个入口均可通过表单执行，仍调用本CLI子进程。项目设置页可调整共用的 `cfx_convergence` 设置。
+
+敏感性CFD复用原runner，因此同样要求末次 `.out` 中各方程RMS达到1e-5（或配置的更严格值）。初次正常耗尽步数而未达标时，从末次 `.res` 流场出发追加最多1500–2000步，默认2000；计数重新开始，仍不达标则作为solve失败保留证据并停止当前验证方案。该受控的一次追加属于同一设计点，不是失败点的无限自动重试。`--max-new-cfd` 是设计点预算，最多可能对应两倍的求解器调用。详细行为见 [CFD残差接受规则](README_blade_shape_active_learning.md#mandatory-final-rms-acceptance-and-one-bounded-continuation)。

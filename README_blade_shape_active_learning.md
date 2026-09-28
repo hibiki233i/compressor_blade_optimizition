@@ -398,3 +398,64 @@ the only records the optimizer reads.
 ```powershell
 python -m unittest tests.test_gui -v   # runs offscreen; widget tests skip without PySide6
 ```
+
+### Mandatory final RMS acceptance and one bounded continuation
+
+`cfx_convergence` is the common CLI/GUI configuration source:
+
+```json
+"cfx_convergence": {
+  "rms_target": 0.00001,
+  "restart_iterations": 2000,
+  "flow_analysis": "Flow Analysis 1"
+}
+```
+
+Old configs without this section use these defaults. The RMS target must be positive
+and no looser than 1e-5; the extra budget must be an integer between 1500 and 2000.
+The flow name must match the actual CFX analysis in the template. The first solve
+keeps the template iteration limit and explicitly applies the RMS target using a
+separate `convergence.ccl` overlay.
+
+After a zero-exit Solve, the runner requires one new nonempty `.res` and its matching,
+new/updated same-stem `.out`. It reads the **final outer iteration** RMS column (not
+Max Res or the minimum residual earlier in the run). U/V/W momentum, continuity and
+energy must be present; every reported equation, including turbulence, must meet
+the threshold. Missing/malformed/nonfinite output or a missing solver-finished
+marker is rejected. Equations present in the preceding iteration may not disappear
+from the final table. This reader targets this project's steady 3D compressor runs.
+
+If the final RMS is too high, a continuation is allowed only when the output reports
+an iteration-limit termination and the current-run counter has reached the declared
+maximum iteration count. A generic process failure, user interruption, unknown stop,
+missing limit declaration or truncated output never triggers an automatic restart.
+
+The continuation reads the last `.res` using `-initial-file`, with the same `.def`
+and boundary-condition overlay. It **resets the iteration counter**, rather than
+using `-continue-from-file` to inherit the previous history. This bounds the new run
+to exactly the configured maximum of 1500–2000 additional iterations, independent
+of old accumulated counters. `restart_convergence.ccl` sets that limit and the RMS
+target. The flow field is reused; previous solver monitor/iteration history is not
+continued. Early convergence may stop the new run before its maximum.
+
+Only a converged final result reaches CFX-Post. If the continuation still fails the
+RMS criterion, the point is recorded as `status=failed`, `failure_stage=solve`; logs
+and both result files remain for inspection, but the point cannot enter surrogate
+training or Pareto exports. One design attempt may therefore run the solver twice;
+`--max-new-cfd` counts design attempts, not solver launches. The normal optimizer
+can proceed to other points; existing boundary/validation fail-stop rules remain.
+
+`cfx_state.json` version 2 records policy, both solve attempts, paired `.out` identities,
+final equation residuals and generated control-file identities. A resumed completed
+result must still have valid residual evidence. Interrupted/failed attempts do not
+get another automatic continuation. Old version-1 receipts are not silently promoted
+to numerical acceptance; historical training CSV rows are unchanged. Use a fresh,
+explicitly reviewed case if an old case needs recalculation. Newly frozen plans include
+the convergence policy in their physical signature.
+
+`check-pre` also emits the initial and restart convergence CCL files. This is an input
+inspection, not a solver execution. RMS acceptance does not replace conservation,
+mesh independence, operating-condition or engineering review.
+
+References: [CFX output tables](https://ansyshelp.ansys.com/public/Views/Secured/corp/v251/en/cfx_solv/i1299644.html),
+[initial-file versus continued history](https://ansyshelp.ansys.com/public/Views/Secured/corp/v251/en/cfx_mod/mod_ic_continuinghistory.html).

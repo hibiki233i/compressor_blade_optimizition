@@ -1,18 +1,93 @@
 from __future__ import annotations
 
 import math
+import json
+import subprocess
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 from blade_shape_flow_diagnostics import (
     add_angle_proxies,
+    analyze_res,
+    main,
     measurement_expressions,
     parse_measurements,
     render_session,
+    read_candidate_angles,
     summarize,
 )
 
 
 class FlowDiagnosticsTests(unittest.TestCase):
+    def test_proxy_wrap_missing_angles_and_nonfinite_candidate(self) -> None:
+        result = {"le_hub_flow_angle_deg": -179.0, "blade_hub_leading_deg": 1.0}
+        add_angle_proxies(result)
+        self.assertEqual(result["le_hub_incidence_proxy_deg"], -2.0)
+        self.assertIsNone(result["te_hub_deviation_proxy_deg"])
+        self.assertFalse(result["angle_proxies_available"])
+        with tempfile.TemporaryDirectory() as temp:
+            case = Path(temp)
+            candidate = {"geometry": {"hub_beta_rad": [1.0, float("nan")],
+                                      "shroud_beta_rad": [1.0, 0.8]}}
+            (case / "candidate.json").write_text(json.dumps(candidate))
+            with self.assertRaisesRegex(ValueError, "Non-finite hub"):
+                read_candidate_angles(case / "test.res")
+
+    def test_post_failure_preserves_evidence_and_resolves_executable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            res = root / "test.res"
+            res.write_text("unchanged result")
+            post = root / "cfx5post.exe"
+            post.touch()
+            logs = root / "logs"
+            with patch("blade_shape_flow_diagnostics.subprocess.run") as run:
+                run.return_value = subprocess.CompletedProcess([], 0, stdout="expression failed")
+                with self.assertRaisesRegex(RuntimeError, "logs retained"):
+                    analyze_res(res, post, inlet="R1 Inlet", outlet="R1 Outlet",
+                                span_band=0.2, log_dir=logs)
+            work = next(logs.iterdir())
+            self.assertEqual((work / "cfxpost.log").read_text(), "expression failed")
+            self.assertTrue((work / "Extract_Flow_Diagnostics.cse").is_file())
+            self.assertTrue((work / "failure.txt").is_file())
+            self.assertEqual(json.loads((work / "command.json").read_text())["argv"][0], str(post.resolve()))
+            self.assertEqual(res.read_text(), "unchanged result")
+
+    def test_post_error_log_is_rejected_even_with_zero_exit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            res, post = root / "test.res", root / "post.exe"
+            res.touch()
+            post.touch()
+            def fake_run(command, **kwargs):
+                work = kwargs["cwd"]
+                (work / "flow_diagnostics.tsv").write_text("__complete__\t1\n")
+                (work / "cfdpost_error.log").write_text("Failed to evaluate")
+                return subprocess.CompletedProcess(command, 0, stdout="done")
+            with patch("blade_shape_flow_diagnostics.subprocess.run", side_effect=fake_run):
+                with self.assertRaisesRegex(RuntimeError, "Failed to evaluate"):
+                    analyze_res(res, post, inlet="R1 Inlet", outlet="R1 Outlet",
+                                span_band=0.2, log_dir=root / "logs")
+
+    def test_cli_override_without_config_and_refuses_output_overwrite(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            output = root / "diagnostics.csv"
+            argv = ["diagnostics", "--config", str(root / "missing.json"),
+                    "--post-exe", str(root / "post.exe"), "--res", str(root / "test.res"),
+                    "--output", str(output)]
+            with patch("sys.argv", argv), patch("blade_shape_flow_diagnostics.analyze_res", return_value={"quality_ok": True}) as analyze:
+                self.assertEqual(main(), 0)
+                self.assertEqual(analyze.call_count, 1)
+            before = output.read_bytes()
+            with patch("sys.argv", argv), patch("blade_shape_flow_diagnostics.analyze_res") as analyze:
+                with self.assertRaises(SystemExit):
+                    main()
+                analyze.assert_not_called()
+            self.assertEqual(output.read_bytes(), before)
+
     def test_session_uses_explicit_units_turbo_surfaces_and_safe_names(self) -> None:
         expressions = measurement_expressions("R1 Inlet", "R1 Outlet", 0.2)
         session = render_session(expressions)

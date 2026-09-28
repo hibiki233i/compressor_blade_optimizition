@@ -27,12 +27,15 @@
 | `blade_shape_acquisition.py`、`blade_shape_refinement.py` | 候选筛选、局部搜索和边界实验辅助逻辑 |
 | `blade_shape_pending.py`、`blade_shape_runtime.py` | 待处理队列、恢复与运行时保护 |
 | `blade_shape_flow_diagnostics.py` | 对已有 `.res` 做只读熵增和近叶片流向角诊断；不改变优化目标 |
-| `blade_gui/` | 五页桌面控制台：总览、分析、设置、运行、算例浏览 |
+| `blade_shape_incidence_validation.py` | 可变目标路径的展向攻角验证、旧指标复现、工况比较及预算化进口角敏感性试验 |
+| `blade_gui/` | 六页桌面控制台：总览、分析、设置、运行、算例浏览、验证 |
 | `tests/` | Python 与离屏 GUI 测试；合成模板仅供测试 |
 
 算法、边界实验和产物字段见 [命令行详细说明](README_blade_shape_active_learning.md)；界面操作见 [GUI 详细说明](README_blade_gui.md)。
 
 进出口熵增与叶片角匹配的初步实测、独立提取命令和单位问题见 [流动诊断评估](README_flow_diagnostics.md)。目前该诊断不会修改现有训练数据、Pareto 前沿或 CFD 续跑状态。
+
+目标叶轮的验证入口和可变路径示例见 [展向攻角验证](README_incidence_validation.md)。支持 `init`、`extract`、`sweep`、`legacy`、`compare`、`plan`、`run`，真实敏感性计算复用原 CFD 链并写独立目录；需明确 `--max-new-cfd`。
 
 ## 运行条件与配置
 

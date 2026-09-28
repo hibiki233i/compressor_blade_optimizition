@@ -21,6 +21,7 @@ class AppContext(QObject):
 
     def __init__(self, config_path: str | Path | None = None, data_dir: str | Path | None = None):
         super().__init__()
+        self.command_runners = []
         self.settings = QSettings(ORG_NAME, APP_NAME)
         stored_config = self._read_setting("config_path")
         stored_data = self._read_setting("data_dir")

@@ -435,3 +435,126 @@ training_data.csv
 - 选点是否都来自 `nsga`，是否缺少探索性。
 - 是否出现异常高流量但效率或收敛质量变差的点。
 
+## 2026-06-25：7维降维、诊断闭环与校准追加
+
+### 7维主动学习实现
+
+根据 Sobol 分析和后续讨论，当前优化搜索已从 12 维降为 7 维，但仍保持 CFturbo 几何写入接口为完整 12 维。
+
+当前 active 变量为：
+
+```text
+hub_beta_0
+hub_beta_3
+hub_beta_4
+shroud_beta_0
+shroud_beta_2
+shroud_beta_3
+hub_theta
+```
+
+当前 fixed 变量为：
+
+```text
+hub_beta_1    = -0.7976745
+hub_beta_2    = -3.0395772
+shroud_beta_1 = -2.5264410
+shroud_beta_4 =  1.9412122
+shroud_theta  = -0.6344326
+```
+
+实现位置在独立 worktree：
+
+```text
+D:\blade optizamation\.worktrees\7d-active-learning
+```
+
+关键实现点：
+
+- LHS、随机池、NSGA 交叉/变异、代理模型输入、重复距离判断只使用 7 个 active 变量。
+- 每个候选生成后强制覆盖 5 个 fixed 变量，再输出完整 12 维 candidate JSON。
+- 代理模型诊断纳入主动学习闭环，使用 GP、RBF ridge ensemble、ExtraTrees 三模型滚动比较。
+- 每批固定选 3 类点：EHVI、最大不确定性、active 空间最大距离。
+- 增加 `write-boundary-plan` 和 `run-boundary`，但边界实验必须通过诊断硬门槛后才允许执行。
+
+### 第一次 2轮×3点真实验证结果
+
+已完成 6 个新 CFD 点：
+
+```text
+case_000078..case_000083
+iteration 10..11
+```
+
+6 个点全部 CFD 成功，但诊断硬门槛未通过：
+
+```text
+Efficiency MAE = 0.00101923，阈值 0.0003，约 3.40 倍阈值
+MassFlow   MAE = 0.02920531，阈值 0.006，约 4.87 倍阈值
+Efficiency 校准后 ±2σ 覆盖 = 6/6
+MassFlow   校准后 ±2σ 覆盖 = 6/6
+Diagnostic gate passed = false
+```
+
+结论：
+
+- 当前不应进入 12 点主控边界实验。
+- 失败主要来自均值预测误差过大，而不是不确定性覆盖不足。
+- 7维 active/fixed 写入机制在真实 CFD 链中有效，5 个 fixed 变量最大写入误差约为 `2.22e-16`。
+- 新点中 `case_000081` 进入了 Pareto，但相对旧点改善低于工程容差，不应视为明确前沿扩展。
+
+### 代理模型问题判断
+
+当前模型精度不足的主要原因不是参数没有写入成功，而是历史数据分布与新 7 维 fixed 子空间不匹配：
+
+```text
+旧 78 个成功 CFD 样本大多不在新的 5 个 fixed 变量子空间附近。
+把旧 12 维样本投影到 7 维后，冻结维度原本造成的响应变化被代理模型当作残差噪声。
+当前只有 6 个新样本真正位于新的 fixed 子空间，数量不足以稳定校准局部代理模型。
+```
+
+因此后续策略从“立即做主控边界”调整为：
+
+```text
+先继续做 2轮 × 3点 的局部校准/主动学习追加。
+若诊断 MAE 收敛到工程阈值附近，再重新考虑主控边界实验。
+```
+
+### 当前追加的 2轮×3点校准运行
+
+用户要求继续做 2 轮 × 3 点校准，并且正常运行后不持续监视。
+
+已启动后台进程：
+
+```text
+PID 33060
+```
+
+启动命令：
+
+```text
+python "D:\blade optizamation\.worktrees\7d-active-learning\blade_shape_active_learning.py" run --config "D:\blade optizamation\.worktrees\7d-active-learning\blade_shape_config.json" --resume --iterations 2 --batch-size 3 --max-new-cfd 6
+```
+
+日志文件：
+
+```text
+D:\blade optizamation\blade_al_runs\calibration_2x3_20260625_retry.stdout.log
+D:\blade optizamation\blade_al_runs\calibration_2x3_20260625_retry.stderr.log
+```
+
+第一次启动失败是因为 `Start-Process` 参数中脚本路径包含空格，Python 将 `D:\blade` 误识别为入口路径。已改用显式引号参数重新启动。
+
+截至追加本总结时：
+
+```text
+python PID 33060 正在运行
+stdout 日志暂未写出内容
+stderr 仅见 sklearn ConvergenceWarning，不是启动失败
+```
+
+后续检查建议：
+
+- 运行完成后优先查看 `diagnostic_gate.json` 是否通过。
+- 再比较新增 `case_000084..case_000089` 的预测误差、candidate role 和 active 距离。
+- 若 MAE 仍明显超阈值，应继续增加固定子空间内的局部校准点，而不是启动边界确认。

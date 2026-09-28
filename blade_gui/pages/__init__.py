@@ -7,9 +7,10 @@ from .cases_page import CasesPage
 from .config_page import ConfigPage
 from .dashboard import DashboardPage
 from .run_page import RunPage
+from .validation_page import ValidationPage
 
 #: sidebar order
-PAGE_CLASSES = [DashboardPage, AnalyticsPage, ConfigPage, RunPage, CasesPage]
+PAGE_CLASSES = [DashboardPage, AnalyticsPage, ConfigPage, RunPage, CasesPage, ValidationPage]
 
 __all__ = [
     "AnalyticsPage",

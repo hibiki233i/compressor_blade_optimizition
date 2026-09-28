@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 
 from blade_shape_cfx_runner import run_cfx_pipeline
+from blade_shape_convergence import ConvergencePolicy
 import blade_shape_refinement as refinement
 from blade_shape_acquisition import expected_hvi
 import blade_shape_pending as pending
@@ -85,6 +86,7 @@ def load_config(path: str | Path) -> dict[str, Any]:
     config_path = Path(path)
     payload = json.loads(config_path.read_text(encoding="utf-8"))
     payload["_config_path"] = str(config_path.resolve())
+    ConvergencePolicy.from_config(payload)
     refinement.active_indices(payload)
     return payload
 
@@ -1065,6 +1067,7 @@ def evaluate_true_cfd(
             template_cse=paths["template_cse"],
             cores=int(runtime["cfx_cores"]),
             n_blades=int(runtime["n_blades"]),
+            convergence=ConvergencePolicy.from_config(config),
         )
     except OSError as exc:
         row['failure_stage'] = 'environment'

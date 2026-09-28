@@ -7,6 +7,7 @@ import pandas as pd
 import blade_shape_active_learning as b
 import blade_shape_refinement as r
 import blade_shape_cfx_runner as cfx
+from tests.cfx_output_samples import output as cfx_output
 
 class ReliabilityTests(unittest.TestCase):
     def setUp(self):
@@ -49,7 +50,7 @@ class ReliabilityTests(unittest.TestCase):
         def command(cmd,cwd,log):
             name=Path(cmd[0]).name;calls.append(name)
             if name=='cfx5pre.exe':(self.out/'Impeller.def').write_text('def');return 0
-            if name=='cfx5solve.exe':(self.out/'complete.res').write_text('res');return 0
+            if name=='cfx5solve.exe':(self.out/'complete.res').write_text('res');(self.out/'complete.out').write_text(cfx_output());return 0
             (self.out/'CFX_Results.txt').write_text('0.76,2,1,.42,2.1');return 0
         with patch.object(cfx,'_run_logged',side_effect=command):
             self.assertTrue(cfx.run_cfx_pipeline(self.out,'case_0',**kw).success)
@@ -225,7 +226,8 @@ class ReliabilityTests(unittest.TestCase):
         def external(cmd,cwd,log):
             name=Path(cmd[0]).name;calls.append(name)
             if name=='cfx5pre.exe':(cwd/'Impeller.def').write_text('def')
-            elif name=='cfx5solve.exe':(cwd/'complete.res').write_text('complete')
+            elif name=='cfx5solve.exe':
+                (cwd/'complete.res').write_text('complete');(cwd/'complete.out').write_text(cfx_output())
             else:(cwd/'CFX_Results.txt').write_text('.762,2,1,.425,2.1')
             return 0
         original=b.append_row

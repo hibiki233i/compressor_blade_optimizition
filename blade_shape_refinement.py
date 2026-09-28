@@ -272,6 +272,7 @@ def physical_signature(config: dict[str,Any]) -> str:
         path=Path(config['paths'].get(key,''))
         assets[key]={'path':str(path),'sha256':hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None}
     return digest({'variables':config['variables'],'constraints':config['constraints'],'search':config.get('search',{}),
+                   'cfx_convergence':config.get('cfx_convergence',{}),
                    'runtime':{k:config['runtime'].get(k) for k in ['n_blades','rpm','mass_flow','p_out_pa','alpha0']},'assets':assets})
 
 

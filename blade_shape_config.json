@@ -13,6 +13,11 @@
     "template_cse": "D:\\blade optizamation\\Templates\\Extract_Results.cse",
     "output_dir": "D:\\blade optizamation\\blade_al_runs"
   },
+  "cfx_convergence": {
+    "rms_target": 0.00001,
+    "restart_iterations": 2000,
+    "flow_analysis": "Flow Analysis 1"
+  },
   "runtime": {
     "cfx_cores": 8,
     "n_blades": 10,

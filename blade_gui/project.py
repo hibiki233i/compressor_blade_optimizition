@@ -78,6 +78,11 @@ def validate_config(config: dict[str, Any]) -> list[Issue]:
     expected when the GUI is opened on a machine that is not the CFD host).
     """
     issues: list[Issue] = []
+    try:
+        from blade_shape_convergence import ConvergencePolicy
+        ConvergencePolicy.from_config(config)
+    except (ValueError, TypeError) as exc:
+        issues.append(Issue("error", f"CFX 收敛设置无效：{exc}"))
 
     variables = config.get("variables")
     if not isinstance(variables, list) or not variables:

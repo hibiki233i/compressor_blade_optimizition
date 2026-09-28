@@ -108,6 +108,7 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+3"), self, activated=lambda: self._select_page(2))
         QShortcut(QKeySequence("Ctrl+4"), self, activated=lambda: self._select_page(3))
         QShortcut(QKeySequence("Ctrl+5"), self, activated=lambda: self._select_page(4))
+        QShortcut(QKeySequence("Ctrl+6"), self, activated=lambda: self._select_page(5))
 
     def _build_sidebar(self) -> QWidget:
         sidebar = QFrame()
