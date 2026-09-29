@@ -13,17 +13,17 @@ from ..commands import VALIDATION_OPTIONS, build_validation
 from ..project import CODE_DIR
 from ..runner import CommandRunner, default_python
 
-ACTIONS = [('init','创建目标验证配置'), ('extract','提取展向攻角'),
+ACTIONS = [('init','准备验证配置（可用字段预填）'), ('extract','提取展向攻角'),
            ('sweep','截面 / 分带敏感性'), ('legacy','复现报告20点指标'),
            ('compare','基准 / 目标工况对比'), ('plan','生成进口角敏感性方案'),
            ('run','运行敏感性 CFD')]
-LABELS = {'res':'目标 .res', 'geometry_source':'几何来源 .cft / candidate.json',
+LABELS = {'res':'目标 .res', 'geometry_source':'几何来源 .cft / .cft-batch / candidate.json',
           'output':'新输出文件', 'spec':'验证配置 JSON', 'post_exe':'CFX-Post 程序',
           'output_dir':'新输出目录', 'stations':'前缘上游截面', 'bands':'展向分带数',
           'csv':'原始 ACA CSV', 'hub_beta_deg':'hub 前缘金属角 (°)',
           'shroud_beta_deg':'shroud 前缘金属角 (°)', 'baseline':'基准 summary.json',
           'target':'目标 summary.json', 'flow_tolerance':'流量相对差容差',
-          'config':'目标工程配置 JSON', 'candidate':'中心 candidate.json（可选）',
+          'config':'目标工程配置 JSON', 'candidate':'candidate.json（可选）',
           'step_deg':'进口角扰动 (°)', 'pressures_pa':'背压序列 Pa（可选）',
           'plan':'冻结方案 plan.json', 'max_new_cfd':'本次最多新增 CFD 点数', 'resume':'续跑尚未尝试的点'}
 
@@ -42,7 +42,7 @@ class ValidationPage(Page):
         self.action_box=QComboBox()
         for key,label in ACTIONS:self.action_box.addItem(label,key)
         root.addWidget(self.action_box)
-        self.note=QLabel('创建配置后需填写实际角度、工况和方向约定。RMS通过不等于完成网格/守恒验证。')
+        self.note=QLabel('准备配置会从可识别的算例文件预填字段；仍须核对几何对应关系、实际工况和方向约定。RMS通过不等于完成网格/守恒验证。')
         self.note.setWordWrap(True);root.addWidget(self.note)
         self.stack=QStackedWidget();self.forms={}
         for action,_ in ACTIONS:
@@ -67,7 +67,8 @@ class ValidationPage(Page):
                     row=QWidget();layout=QHBoxLayout(row);layout.setContentsMargins(0,0,0,0)
                     layout.addWidget(widget);browse=QPushButton('浏览…')
                     browse.clicked.connect(lambda _=False,w=widget,k=key:self.browse(w,k))
-                    layout.addWidget(browse);form.addRow(LABELS[key],row)
+                    label = '预填角度用 candidate.json（可选）' if action == 'init' and key == 'candidate' else LABELS[key]
+                    layout.addWidget(browse);form.addRow(label,row)
                 else:form.addRow(LABELS[key],widget)
             self.forms[action]=fields
             scroll=QScrollArea();scroll.setWidgetResizable(True);scroll.setWidget(content)
@@ -155,5 +156,8 @@ class ValidationPage(Page):
         self.action_box.setEnabled(not running);self.stack.setEnabled(not running);self.status.setText(message)
 
     def finished(self,code,reason):
-        message='完成' if code==0 and reason=='normal' else ('质量或工况检查未通过，请查看日志' if code==2 else f'执行失败：{code} / {reason}')
+        if code==0 and reason=='normal' and self.action_box.currentData()=='init':
+            message='已生成待核对配置；请打开 JSON 补齐日志列出的字段后再提取'
+        else:
+            message='完成' if code==0 and reason=='normal' else ('质量或工况检查未通过，请查看日志' if code==2 else f'执行失败：{code} / {reason}')
         self.set_running(False,message);self.ctx.report('验证：'+message)

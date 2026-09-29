@@ -191,6 +191,56 @@ class EntryTests(unittest.TestCase):
             self.assertEqual(s['res_path'],r'D:\target\test.res')
             self.assertFalse(s['geometry_verified'])
 
+    def test_init_prefills_candidate_angles_but_keeps_manual_checks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);case=root/'case';case.mkdir()
+            res=case/'point.res';res.touch()
+            geometry=case/'point.cft';geometry.touch()
+            candidate=case/'candidate.json'
+            candidate.write_text(json.dumps({'geometry': {
+                'hub_beta_rad': [math.radians(60.)]*5,
+                'shroud_beta_rad': [math.radians(30.)]*5}}), encoding='utf-8')
+            output=root/'spec.json'
+            v.main(['init','--res',str(res),'--geometry-source',str(geometry),
+                    '--output',str(output)])
+            created=json.loads(output.read_text(encoding='utf-8'))
+            self.assertAlmostEqual(created['hub_beta_deg'],60.)
+            self.assertAlmostEqual(created['shroud_beta_deg'],30.)
+            self.assertFalse(created['geometry_verified'])
+            self.assertTrue(any('.cft angle parsing' in warning for warning in created['prefill_warnings']))
+            self.assertIn('conditions.rpm',v.pending_spec_fields(created))
+            self.assertIn(str(candidate.resolve()),created['prefill_inputs'])
+            v.verify_prefill_inputs(created)
+            candidate.write_text(candidate.read_text(encoding='utf-8')+' ',encoding='utf-8')
+            with self.assertRaisesRegex(ValueError,'Prefill source changed'):
+                v.verify_prefill_inputs(created)
+
+    def test_init_prefills_batch_angles_and_matching_receipt_blade_count(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);res=root/'point.res';res.write_bytes(b'CFX result test')
+            batch=Path(__file__).parent/'fixtures/synthetic_meanline.cft-batch'
+            receipt=root/'cfx_state.json'
+            receipt.write_text(json.dumps({'version':2, 'inputs':{'n_blades':10},
+                'stages':{'solve':{'status':'complete','exit_code':0,
+                                   'convergence':{'converged':True},'result_file':res.name,
+                                   'result_identity':v.file_identity(res)}}}), encoding='utf-8')
+            created=v.initial_spec(res,batch)
+            self.assertAlmostEqual(created['hub_beta_deg'],math.degrees(1.0))
+            self.assertEqual(created['conditions']['n_blades'],10)
+            self.assertFalse(created['geometry_verified'])
+            self.assertIsNone(created['conditions']['rpm'])
+            receipt.write_text(receipt.read_text(encoding='utf-8').replace('point.res','another.res'),encoding='utf-8')
+            unmatched=v.initial_spec(res,batch)
+            self.assertIsNone(unmatched['conditions']['n_blades'])
+
+    def test_incomplete_spec_reports_all_missing_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            created=v.initial_spec(Path(tmp)/'point.res',Path(tmp)/'point.cft')
+            with self.assertRaisesRegex(ValueError,'conditions.rpm') as error:
+                v.validate_spec(created)
+            self.assertIn('geometry_verified',str(error.exception))
+            self.assertIn('measurement.normal_sign',str(error.exception))
+
     def test_sweep_freezes_input_and_collects_six_definitions(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);case=root/'case';case.mkdir();s=spec()

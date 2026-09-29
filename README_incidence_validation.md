@@ -15,11 +15,13 @@ $TargetSpec = Join-Path $ValidationRoot 'target.json'
 python blade_shape_incidence_validation.py init --res "$TargetRes" --geometry-source "$Geometry" --output "$TargetSpec"
 ```
 
-`init` 仅生成配置，不要求这些工程文件在生成时已存在。`extract` 则必须在能访问真实文件和 CFX-Post 的机器运行。相对 `res_path` / `geometry_source` 按 spec 所在目录解释，其他 CLI 路径按当前工作目录解释。
+`init` 生成**待核对配置**，并尝试预填可识别的字段。若几何来源是本项目的 `candidate.json` 或可解析的 `.cft-batch`，会预填 hub/shroud 前缘角；若 `.res` 同目录有本项目的 `candidate.json`，也会尝试读取。几何来源为 `.cft` 且候选文件位于别处时，可额外传 `--candidate "<candidate.json>"`。若 `.res` 同目录的 `cfx_state.json` 记录了与该 `.res` 哈希一致的已完成求解，还会预填其声明的叶片数。JSON 中的 `prefill_sources` 和 `prefill_inputs` 分别记录字段来源和文件身份；来源文件随后改变，提取会拒绝继续。预填值仍需核对，它们不会自动使 `geometry_verified=true`。
+
+没有可解析文件时，`init` 仍可只登记路径并生成模板；显式提供的 `--candidate` 则必须存在且符合本项目格式。CLI 会列出预填字段、警告和仍需确认的字段。`init` 不启动 CFX-Post，也不从二进制 `.res` 自动读取转速、入口条件或介质；当前没有通用 `.cft` 角度解析器。`extract` 必须在能访问真实文件和 CFX-Post 的机器运行。相对 `res_path` / `geometry_source` 按 spec 所在目录解释，其他 CLI 路径按当前工作目录解释。
 
 编辑生成的 JSON，确认并填写：
 
-- `hub_beta_deg`、`shroud_beta_deg`：目标实际前缘金属角，单位度，相对于指定周向参考方向。
+- `hub_beta_deg`、`shroud_beta_deg`：目标实际前缘金属角，单位度，相对于指定周向参考方向。即使由候选或 batch 预填，也须核对它与目标 `.res` 的几何身份及角度约定。
 - `geometry_verified`：核对几何来源、`.res` 对应关系、`BetaModeLE=Linear`，以及 CFturbo 与 Turbo 展向坐标一致后才设 `true`。此字段记录人的确认，不代表程序已解析并独立证明几何身份。
 - `measurement.normal_sign`：+1 或 -1，使 `normal_sign * (W dot Normal)` 的正方向为下游；先在 CFD-Post 目视和数值确认。
 - `measurement.theta_reference_sign`：+1 表示从正周向量角，-1 表示从负周向量角。若通常的转子相对周向速度为负且 CFturbo 从负周向朝正流向量角，使用 -1；不得未经核对照抄。
@@ -127,6 +129,6 @@ python -m unittest discover -s tests
 
 ## GUI 与 CFX 残差门槛
 
-桌面GUI新增“验证”页（`Ctrl+6`），上述七个入口均可通过表单执行，仍调用本CLI子进程。项目设置页可调整共用的 `cfx_convergence` 设置。
+桌面GUI新增“验证”页（`Ctrl+6`），上述七个入口均可通过表单执行，仍调用本CLI子进程。“准备验证配置”可选填 `candidate.json` 预填角度；执行后须打开生成的 JSON 补齐日志列出的字段。项目设置页可调整共用的 `cfx_convergence` 设置。
 
 敏感性CFD复用原runner，因此同样要求末次 `.out` 中各方程RMS达到1e-5（或配置的更严格值）。初次正常耗尽步数而未达标时，从末次 `.res` 流场出发追加最多1500–2000步，默认2000；计数重新开始，仍不达标则作为solve失败保留证据并停止当前验证方案。该受控的一次追加属于同一设计点，不是失败点的无限自动重试。`--max-new-cfd` 是设计点预算，最多可能对应两倍的求解器调用。详细行为见 [CFD残差接受规则](README_blade_shape_active_learning.md#mandatory-final-rms-acceptance-and-one-bounded-continuation)。

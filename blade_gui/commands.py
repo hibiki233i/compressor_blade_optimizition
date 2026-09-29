@@ -132,7 +132,7 @@ def build_check_pre(config_path: str | Path, *, working_dir: str | Path) -> Comm
 
 VALIDATION_SCRIPT = 'blade_shape_incidence_validation.py'
 VALIDATION_OPTIONS = {
-    'init': ('res', 'geometry_source', 'output'),
+    'init': ('res', 'geometry_source', 'candidate', 'output'),
     'extract': ('spec', 'post_exe', 'output_dir'),
     'sweep': ('spec', 'post_exe', 'stations', 'bands', 'output_dir'),
     'legacy': ('csv', 'hub_beta_deg', 'shroud_beta_deg', 'output_dir'),

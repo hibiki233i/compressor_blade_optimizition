@@ -11,6 +11,7 @@ import csv
 import json
 import math
 import subprocess
+import xml.etree.ElementTree as ET
 from pathlib import Path, PureWindowsPath
 from typing import Any
 
@@ -18,6 +19,13 @@ from blade_shape_flow_diagnostics import LOCATION_NAME, RAW_NAME, parse_measurem
 from blade_shape_runtime import atomic_json, digest, file_identity, output_lock
 
 METHOD = 'forward_mass_velocity_triangle_v1'
+
+REQUIRED_SPEC_FIELDS = (
+    'hub_beta_deg', 'shroud_beta_deg', 'measurement.normal_sign',
+    'measurement.theta_reference_sign', 'conditions.rpm',
+    'conditions.inlet_total_pressure_pa', 'conditions.inlet_total_temperature_k',
+    'conditions.fluid_id', 'conditions.n_blades',
+)
 
 
 def finite(value: Any, name: str) -> float:
@@ -30,8 +38,9 @@ def finite(value: Any, name: str) -> float:
 def validate_spec(spec: dict[str, Any]) -> None:
     if spec.get('schema_version') != 1:
         raise ValueError('Unsupported validation schema')
-    if spec.get('geometry_verified') is not True:
-        raise ValueError('Confirm linear LE geometry, span coordinate and result correspondence first')
+    missing = pending_spec_fields(spec)
+    if missing:
+        raise ValueError('Validation spec needs confirmation: ' + ', '.join(missing))
     for name in ('target_id', 'res_path', 'geometry_source'):
         if not spec.get(name):
             raise ValueError(f'Missing {name}')
@@ -58,6 +67,116 @@ def validate_spec(spec: dict[str, Any]) -> None:
     passages = c.get('simulated_passages', 1)
     if type(passages) is not int or not 1 <= passages <= c['n_blades']:
         raise ValueError('simulated_passages must be an integer in [1, n_blades]')
+
+
+def pending_spec_fields(spec: dict[str, Any]) -> list[str]:
+    """List unanswered questions before numeric validation or CFX-Post startup."""
+    pending = []
+    if spec.get('geometry_verified') is not True:
+        pending.append('geometry_verified (confirm geometry/result and angle convention)')
+    for name in REQUIRED_SPEC_FIELDS:
+        current: Any = spec
+        for part in name.split('.'):
+            current = current.get(part) if isinstance(current, dict) else None
+        if current is None or current == '':
+            pending.append(name)
+    return pending
+
+
+def _candidate_angles(path: Path) -> tuple[float, float]:
+    candidate = json.loads(path.read_text(encoding='utf-8'))
+    geometry = candidate['geometry']
+    values = []
+    for key in ('hub_beta_rad', 'shroud_beta_rad'):
+        angles = geometry[key]
+        if not isinstance(angles, list) or len(angles) != 5:
+            raise ValueError(f'{path}: expected five {key} values')
+        values.append(math.degrees(finite(angles[0], key)))
+    return values[0], values[1]
+
+
+def _batch_angles(path: Path) -> tuple[float, float]:
+    blade = ET.parse(path).getroot().find(".//Updates//BladePropsML[@Name='Main blade']")
+    if blade is None:
+        raise ValueError(f'{path}: Main blade update is missing')
+    beta = blade.find('Beta1')
+    if beta is None:
+        raise ValueError(f'{path}: Beta1 is missing')
+    values = {item.attrib.get('Index'): item.text for item in beta.findall('Value')}
+    return tuple(math.degrees(finite(values[str(index)], f'Beta1[{index}]'))
+                 for index in (0, 1))
+
+
+def initial_spec(res: Path, geometry_source: Path, candidate_path: Path | None = None) -> dict[str, Any]:
+    """Prefill only values backed by readable case files; never certify a geometry."""
+    result = dict(schema_version=1, target_id=res.stem, res_path=path_argument(res),
+                  geometry_source=path_argument(geometry_source), geometry_verified=False,
+                  hub_beta_deg=None, shroud_beta_deg=None,
+                  measurement=dict(bands=20, le_station=.22, turbo_domain='R1',
+                                   normal_sign=None, theta_reference_sign=None,
+                                   max_reverse_fraction=.01),
+                  conditions=dict(rpm=None, inlet_total_pressure_pa=None,
+                                  inlet_total_temperature_k=None, fluid_id=None,
+                                  n_blades=None, simulated_passages=1),
+                  prefill_sources={}, prefill_inputs={}, prefill_warnings=[])
+    if not res.is_file():
+        result['prefill_warnings'].append(f'Result file is not accessible during preparation: {res}')
+    if not geometry_source.is_file():
+        result['prefill_warnings'].append(f'Geometry source is not accessible during preparation: {geometry_source}')
+    elif geometry_source.suffix.lower() == '.cft':
+        result['prefill_warnings'].append('CFturbo .cft angle parsing is not supported; use a matching candidate.json for provisional angles')
+    angle_source = None
+    if geometry_source.suffix.lower() == '.cft-batch' and geometry_source.is_file():
+        angles = _batch_angles(geometry_source)
+        angle_source = geometry_source
+    else:
+        foreign_res = PureWindowsPath(str(res)).is_absolute() and not res.is_absolute()
+        candidate = candidate_path or (geometry_source if geometry_source.suffix.lower() == '.json'
+                                       else None if foreign_res else res.parent / 'candidate.json')
+        if candidate is not None and candidate.is_file():
+            try:
+                angles = _candidate_angles(candidate)
+                angle_source = candidate
+            except (KeyError, TypeError, ValueError, OSError) as exc:
+                if candidate_path is not None or candidate == geometry_source:
+                    raise ValueError(f'Cannot prefill candidate angles: {exc}') from exc
+                result['prefill_warnings'].append(f'Ignored adjacent candidate.json: {exc}')
+        elif candidate_path is not None:
+            raise ValueError(f'Candidate JSON for prefill is missing: {candidate}')
+        elif candidate == geometry_source:
+            result['prefill_warnings'].append(f'Candidate geometry is not readable here: {candidate}')
+    if angle_source is not None:
+        result['hub_beta_deg'], result['shroud_beta_deg'] = angles
+        for field in ('hub_beta_deg', 'shroud_beta_deg'):
+            result['prefill_sources'][field] = f'{path_argument(angle_source)}: leading-edge beta (radians to degrees)'
+        result['prefill_inputs'][path_argument(angle_source)] = file_identity(angle_source)
+
+    receipt = res.parent / 'cfx_state.json'
+    if res.is_file() and receipt.is_file():
+        try:
+            state = json.loads(receipt.read_text(encoding='utf-8'))
+            solve = state['stages']['solve']
+            if (state.get('version') == 2 and solve.get('status') == 'complete'
+                    and solve.get('exit_code') == 0
+                    and solve.get('convergence', {}).get('converged') is True
+                    and solve.get('result_file') == res.name
+                    and solve.get('result_identity') == file_identity(res)):
+                n_blades = state['inputs']['n_blades']
+                if type(n_blades) is int and n_blades > 0:
+                    result['conditions']['n_blades'] = n_blades
+                    result['prefill_sources']['conditions.n_blades'] = f'{path_argument(receipt)}: recorded input'
+                    result['prefill_inputs'][path_argument(receipt)] = file_identity(receipt)
+            else:
+                result['prefill_warnings'].append('cfx_state.json does not prove a completed solve for this .res; blade count was not prefilled')
+        except (KeyError, TypeError, ValueError, OSError) as exc:
+            result['prefill_warnings'].append(f'Could not use cfx_state.json: {exc}')
+    return result
+
+
+def verify_prefill_inputs(spec: dict[str, Any]) -> None:
+    for name, expected in spec.get('prefill_inputs', {}).items():
+        if file_identity(name) != expected:
+            raise ValueError(f'Prefill source changed or is unavailable: {name}')
 
 
 def profile_expressions(spec: dict[str, Any]) -> dict[str, str]:
@@ -227,6 +346,7 @@ def measurement_sweep(spec: dict, post_exe: Path, output: Path,
 
 def extract(spec: dict, post_exe: Path, output: Path) -> dict:
     validate_spec(spec)
+    verify_prefill_inputs(spec)
     post_exe = post_exe.resolve(); res = Path(spec['res_path']).resolve()
     geometry = Path(spec['geometry_source']).resolve()
     if res.suffix.lower() != '.res' or not all(p.is_file() for p in (post_exe,res,geometry)):
@@ -415,8 +535,9 @@ def run_plan(path: Path, budget: int, resume: bool) -> dict:
 def main(argv: list[str] | None = None) -> int:
     parser=argparse.ArgumentParser(description=__doc__)
     commands=parser.add_subparsers(dest='command',required=True)
-    init=commands.add_parser('init',help='Write a target spec requiring explicit geometry/convention review')
+    init=commands.add_parser('init',help='Prefill a draft spec from supported case files; manual review remains required')
     init.add_argument('--res',type=Path,required=True);init.add_argument('--geometry-source',type=Path,required=True)
+    init.add_argument('--candidate',type=Path,help='Optional candidate.json for provisional leading-edge angles')
     init.add_argument('--output',type=Path,required=True)
     ext=commands.add_parser('extract',help='CFX-Post only; does not run a new CFD solution')
     ext.add_argument('--spec',type=Path,required=True);ext.add_argument('--post-exe',type=Path,required=True)
@@ -442,13 +563,14 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument('--resume',action='store_true')
     args=parser.parse_args(argv)
     if args.command=='init':
-        new_json(args.output,dict(schema_version=1,target_id=args.res.stem,res_path=path_argument(args.res),
-            geometry_source=path_argument(args.geometry_source),geometry_verified=False,
-            hub_beta_deg=None,shroud_beta_deg=None,
-            measurement=dict(bands=20,le_station=.22,turbo_domain='R1',normal_sign=None,
-                             theta_reference_sign=None,max_reverse_fraction=.01),
-            conditions=dict(rpm=None,inlet_total_pressure_pa=None,inlet_total_temperature_k=None,
-                            fluid_id=None,n_blades=None,simulated_passages=1)))
+        spec = initial_spec(args.res, args.geometry_source, args.candidate)
+        new_json(args.output, spec)
+        print('Created draft validation spec: ' + str(args.output))
+        if spec['prefill_sources']:
+            print('Prefilled: ' + ', '.join(spec['prefill_sources']))
+        for warning in spec['prefill_warnings']:
+            print('Prefill warning: ' + warning)
+        print('Still requires review: ' + ', '.join(pending_spec_fields(spec)))
     elif args.command=='extract':
         summary=extract(load_spec(args.spec),args.post_exe,args.output_dir)
         print(json.dumps(summary,indent=2));return 0 if summary['quality_ok'] else 2

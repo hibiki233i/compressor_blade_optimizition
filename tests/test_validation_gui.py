@@ -21,6 +21,8 @@ class ValidationCommandsTests(unittest.TestCase):
                 self.assertEqual(spec.script,VALIDATION_SCRIPT)
                 self.assertEqual(spec.args[0],action)
         self.assertIn('D:/a b/x.res',build_validation('init',**options['init']).args)
+        self.assertIn('candidate.json',build_validation('init',**{**options['init'],
+            'candidate':'candidate.json'}).args)
         self.assertIn('--resume',build_validation('run',**options['run']).args)
         self.assertNotIn('--candidate',build_validation('plan',**options['plan']).args)
         with self.assertRaises(ValueError):build_validation('sweep',**{**options['sweep'],'bands':'oops'})
