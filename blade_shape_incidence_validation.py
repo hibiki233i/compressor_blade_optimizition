@@ -10,7 +10,9 @@ import copy
 import csv
 import json
 import math
+import shutil
 import subprocess
+import time
 import xml.etree.ElementTree as ET
 from pathlib import Path, PureWindowsPath
 from typing import Any
@@ -84,7 +86,15 @@ def pending_spec_fields(spec: dict[str, Any]) -> list[str]:
 
 
 def _candidate_angles(path: Path) -> tuple[float, float]:
-    candidate = json.loads(path.read_text(encoding='utf-8'))
+    raw = path.read_text(encoding='utf-8-sig')
+    if not raw.strip():
+        raise ValueError(f'{path} is empty; expected this project\'s candidate.json')
+    try:
+        candidate = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f'{path} is not valid JSON (line {exc.lineno}, column {exc.colno})') from exc
+    if not isinstance(candidate, dict) or not isinstance(candidate.get('geometry'), dict):
+        raise ValueError(f'{path} has no candidate.geometry object')
     geometry = candidate['geometry']
     values = []
     for key in ('hub_beta_rad', 'shroud_beta_rad'):
@@ -138,11 +148,11 @@ def initial_spec(res: Path, geometry_source: Path, candidate_path: Path | None =
                 angles = _candidate_angles(candidate)
                 angle_source = candidate
             except (KeyError, TypeError, ValueError, OSError) as exc:
-                if candidate_path is not None or candidate == geometry_source:
+                if candidate == geometry_source:
                     raise ValueError(f'Cannot prefill candidate angles: {exc}') from exc
-                result['prefill_warnings'].append(f'Ignored adjacent candidate.json: {exc}')
+                result['prefill_warnings'].append(f'Candidate angles not prefilled: {exc}')
         elif candidate_path is not None:
-            raise ValueError(f'Candidate JSON for prefill is missing: {candidate}')
+            result['prefill_warnings'].append(f'Candidate angles not prefilled; file is missing: {candidate}')
         elif candidate == geometry_source:
             result['prefill_warnings'].append(f'Candidate geometry is not readable here: {candidate}')
     if angle_source is not None:
@@ -171,6 +181,46 @@ def initial_spec(res: Path, geometry_source: Path, candidate_path: Path | None =
         except (KeyError, TypeError, ValueError, OSError) as exc:
             result['prefill_warnings'].append(f'Could not use cfx_state.json: {exc}')
     return result
+
+
+def save_initial_spec(path: Path, proposed: dict[str, Any]) -> Path | None:
+    """Enrich a matching draft without replacing manual answers or prior evidence."""
+    if not path.exists():
+        new_json(path, proposed)
+        return None
+    existing = json.loads(path.read_text(encoding='utf-8'))
+    if not isinstance(existing, dict) or existing.get('schema_version') != 1:
+        raise ValueError(f'Existing output is not a validation spec: {path}')
+    for key in ('res_path', 'geometry_source'):
+        old, new = existing.get(key), proposed[key]
+        if not old or Path(old).resolve() != Path(new).resolve():
+            raise ValueError(f'Existing output has a different {key}; choose a new output file: {path}')
+    merged = copy.deepcopy(existing)
+    merged.setdefault('conditions', {})
+    merged.setdefault('prefill_sources', {})
+    merged.setdefault('prefill_inputs', {})
+    filled = []
+    for field in ('hub_beta_deg', 'shroud_beta_deg', 'conditions.n_blades'):
+        parts = field.split('.')
+        holder = merged if len(parts) == 1 else merged['conditions']
+        value = proposed if len(parts) == 1 else proposed['conditions']
+        key = parts[-1]
+        if holder.get(key) is None and value.get(key) is not None:
+            holder[key] = value[key]
+            filled.append(field)
+            source = proposed['prefill_sources'][field]
+            merged['prefill_sources'][field] = source
+            for name, identity in proposed['prefill_inputs'].items():
+                if source.startswith(name + ':'):
+                    merged['prefill_inputs'][name] = identity
+    merged['prefill_warnings'] = proposed['prefill_warnings']
+    if filled and merged.get('geometry_verified') is True:
+        merged['geometry_verified'] = False
+        merged['prefill_warnings'].append('Newly prefilled values require renewed geometry confirmation')
+    backup = path.with_name(f'{path.name}.bak-{time.time_ns()}')
+    shutil.copy2(path, backup)
+    atomic_json(path, merged)
+    return backup
 
 
 def verify_prefill_inputs(spec: dict[str, Any]) -> None:
@@ -564,13 +614,16 @@ def main(argv: list[str] | None = None) -> int:
     args=parser.parse_args(argv)
     if args.command=='init':
         spec = initial_spec(args.res, args.geometry_source, args.candidate)
-        new_json(args.output, spec)
-        print('Created draft validation spec: ' + str(args.output))
-        if spec['prefill_sources']:
-            print('Prefilled: ' + ', '.join(spec['prefill_sources']))
-        for warning in spec['prefill_warnings']:
+        backup = save_initial_spec(args.output, spec)
+        saved = json.loads(args.output.read_text(encoding='utf-8'))
+        print(('Updated' if backup else 'Created') + ' draft validation spec: ' + str(args.output))
+        if backup:
+            print('Previous spec backup: ' + str(backup))
+        if saved['prefill_sources']:
+            print('Prefilled: ' + ', '.join(saved['prefill_sources']))
+        for warning in saved['prefill_warnings']:
             print('Prefill warning: ' + warning)
-        print('Still requires review: ' + ', '.join(pending_spec_fields(spec)))
+        print('Still requires review: ' + ', '.join(pending_spec_fields(saved)))
     elif args.command=='extract':
         summary=extract(load_spec(args.spec),args.post_exe,args.output_dir)
         print(json.dumps(summary,indent=2));return 0 if summary['quality_ok'] else 2

@@ -157,7 +157,7 @@ class ValidationPage(Page):
 
     def finished(self,code,reason):
         if code==0 and reason=='normal' and self.action_box.currentData()=='init':
-            message='已生成待核对配置；请打开 JSON 补齐日志列出的字段后再提取'
+            message='已保存待核对配置；请打开 JSON 补齐日志列出的字段后再提取'
         else:
             message='完成' if code==0 and reason=='normal' else ('质量或工况检查未通过，请查看日志' if code==2 else f'执行失败：{code} / {reason}')
         self.set_running(False,message);self.ctx.report('验证：'+message)

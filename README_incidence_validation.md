@@ -17,7 +17,7 @@ python blade_shape_incidence_validation.py init --res "$TargetRes" --geometry-so
 
 `init` 生成**待核对配置**，并尝试预填可识别的字段。若几何来源是本项目的 `candidate.json` 或可解析的 `.cft-batch`，会预填 hub/shroud 前缘角；若 `.res` 同目录有本项目的 `candidate.json`，也会尝试读取。几何来源为 `.cft` 且候选文件位于别处时，可额外传 `--candidate "<candidate.json>"`。若 `.res` 同目录的 `cfx_state.json` 记录了与该 `.res` 哈希一致的已完成求解，还会预填其声明的叶片数。JSON 中的 `prefill_sources` 和 `prefill_inputs` 分别记录字段来源和文件身份；来源文件随后改变，提取会拒绝继续。预填值仍需核对，它们不会自动使 `geometry_verified=true`。
 
-没有可解析文件时，`init` 仍可只登记路径并生成模板；显式提供的 `--candidate` 则必须存在且符合本项目格式。CLI 会列出预填字段、警告和仍需确认的字段。`init` 不启动 CFX-Post，也不从二进制 `.res` 自动读取转速、入口条件或介质；当前没有通用 `.cft` 角度解析器。`extract` 必须在能访问真实文件和 CFX-Post 的机器运行。相对 `res_path` / `geometry_source` 按 spec 所在目录解释，其他 CLI 路径按当前工作目录解释。
+没有可解析文件时，`init` 仍可只登记路径并生成模板；可选的 `--candidate` 若为空、不是 JSON 或不符合本项目格式，程序会跳过角度预填、保留警告和待填字段，不会伪造角度。再次使用同一输出路径时，仅对 `.res` 和几何来源相同的验证配置补齐仍为空的可预填字段，保留人工填写的值，并先生成带时间戳的备份；不同算例或无效 JSON 不会被覆盖。CLI 会列出预填字段、警告和仍需确认的字段。`init` 不启动 CFX-Post，也不从二进制 `.res` 自动读取转速、入口条件或介质；当前没有通用 `.cft` 角度解析器。`extract` 必须在能访问真实文件和 CFX-Post 的机器运行。相对 `res_path` / `geometry_source` 按 spec 所在目录解释，其他 CLI 路径按当前工作目录解释。
 
 编辑生成的 JSON，确认并填写：
 

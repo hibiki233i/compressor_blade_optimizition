@@ -241,6 +241,39 @@ class EntryTests(unittest.TestCase):
             self.assertIn('geometry_verified',str(error.exception))
             self.assertIn('measurement.normal_sign',str(error.exception))
 
+    def test_invalid_optional_candidate_leaves_draft_and_preserves_existing_spec(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);res=root/'point.res';res.touch()
+            geometry=root/'point.cft';geometry.touch()
+            candidate=root/'candidate.json';candidate.write_text('',encoding='utf-8')
+            output=root/'blade.json'
+            v.main(['init','--res',str(res),'--geometry-source',str(geometry),
+                    '--candidate',str(candidate),'--output',str(output)])
+            first=json.loads(output.read_text(encoding='utf-8'))
+            self.assertIsNone(first['hub_beta_deg'])
+            self.assertTrue(any('is empty' in item for item in first['prefill_warnings']))
+            first['conditions']['rpm']=10500.
+            output.write_text(json.dumps(first),encoding='utf-8')
+            candidate.write_text(json.dumps({'geometry': {
+                'hub_beta_rad':[1.0]*5,'shroud_beta_rad':[.5]*5}}),encoding='utf-8')
+            v.main(['init','--res',str(res),'--geometry-source',str(geometry),
+                    '--candidate',str(candidate),'--output',str(output)])
+            updated=json.loads(output.read_text(encoding='utf-8'))
+            self.assertEqual(updated['conditions']['rpm'],10500.)
+            self.assertAlmostEqual(updated['hub_beta_deg'],math.degrees(1.0))
+            self.assertFalse(updated['geometry_verified'])
+            self.assertEqual(len(list(root.glob('blade.json.bak-*'))),1)
+
+    def test_init_refuses_to_update_different_case(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);output=root/'blade.json'
+            old=v.initial_spec(root/'old.res',root/'old.cft')
+            output.write_text(json.dumps(old),encoding='utf-8')
+            with self.assertRaisesRegex(ValueError,'choose a new output file'):
+                v.save_initial_spec(output,v.initial_spec(root/'new.res',root/'new.cft'))
+            self.assertEqual(json.loads(output.read_text(encoding='utf-8')),old)
+            self.assertEqual(list(root.glob('blade.json.bak-*')),[])
+
     def test_sweep_freezes_input_and_collects_six_definitions(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);case=root/'case';case.mkdir();s=spec()
