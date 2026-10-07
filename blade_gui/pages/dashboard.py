@@ -34,6 +34,32 @@ PHASE_LABELS = {
 }
 
 
+def gate_rows(gate: dict) -> list[tuple[str, object, object, str, bool]]:
+    """``(objective, mae, tolerance, coverage, passed)`` for both gate schemas.
+
+    ``write_diagnostics`` stores ``objectives: {name: {...}}``; the older
+    ``diagnostic_gate.json`` used flat ``mae_<name>`` keys.
+    """
+    rows = []
+    nested = gate.get("objectives") if isinstance(gate.get("objectives"), dict) else {}
+    for objective in OBJECTIVES:
+        item = nested.get(objective)
+        if isinstance(item, dict):
+            if "mae" not in item:
+                rows.append((objective, None, item.get("tolerance"), f"n={item.get('n', 0)}",
+                             bool(item.get("passed", False))))
+                continue
+            coverage = item.get("coverage_2sigma")
+            text = f"{float(coverage) * 100:.0f}% (n={item.get('n', 0)})" if coverage is not None else "—"
+            rows.append((objective, item.get("mae"), item.get("tolerance"), text,
+                         bool(item.get("passed", False))))
+        elif gate.get(f"mae_{objective}") is not None:
+            rows.append((objective, gate.get(f"mae_{objective}"), gate.get(f"tolerance_{objective}"),
+                         str(gate.get(f"covered_2sigma_{objective}")),
+                         bool(gate.get(f"passed_{objective}", False))))
+    return rows
+
+
 def _successful(frame):
     """Rows whose ``status`` is exactly ``success`` (empty frame when absent)."""
     if frame is None:
@@ -49,6 +75,7 @@ class DashboardPage(Page):
     subtitle = "优化进度、Pareto 前沿与关键指标"
     nav_label = "总览看板"
     nav_icon = "dashboard"
+    nav_section = "监控"
 
     def __init__(self, ctx, parent: QWidget | None = None):
         super().__init__(ctx, parent)
@@ -97,6 +124,7 @@ class DashboardPage(Page):
         self.pareto_chart.setMinimumHeight(320)
         self.pareto_chart.set_axis_labels("MassFlow", "Efficiency")
         self.pareto_chart.setToolTip("点击数据点可跳转到对应算例")
+        self.pareto_chart.pointClicked.connect(self._on_point_clicked)
         self.pareto_empty = EmptyState("暂无 Pareto 解", "成功样本达到 1 个后才会生成前沿。", "target")
         self.pareto_card.body.addWidget(self.pareto_chart)
         self.pareto_card.body.addWidget(self.pareto_empty)
@@ -260,6 +288,11 @@ class DashboardPage(Page):
                     )
         self.pareto_chart.set_series(series)
 
+    def _on_point_clicked(self, payload: dict) -> None:
+        run_id = str((payload or {}).get("label") or "").strip()
+        if run_id:
+            self.ctx.case_requested.emit(run_id)
+
     def _refresh_convergence(self) -> None:
         xs, eff, flow = self.ctx.project.best_so_far()
         has_data = bool(xs)
@@ -303,23 +336,20 @@ class DashboardPage(Page):
             return
 
         passed = bool(gate.get("passed"))
+        rows = gate_rows(gate)
         header = QHBoxLayout()
         header.setSpacing(8)
-        title = f"最近 {int(gate.get('expected_points', 0) or 0)} 个点"
-        header.addWidget(Badge.for_status("success" if passed else "failed"))
+        points = gate.get("expected_points", gate.get("minimum_points"))
+        title = (f"最近 {int(points or 0)} 个点" if "expected_points" in gate
+                 else f"至少 {int(points or 0)} 个点")
+        header.addWidget(Badge("通过" if passed else "未通过", "good" if passed else "bad"))
         header.addWidget(Badge(title, "muted"))
         header.addStretch(1)
         holder = QWidget()
         holder.setLayout(header)
         self.gate_body.addWidget(holder)
 
-        for objective in OBJECTIVES:
-            mae = gate.get(f"mae_{objective}")
-            tolerance = gate.get(f"tolerance_{objective}")
-            covered = gate.get(f"covered_2sigma_{objective}")
-            if mae is None:
-                continue
-            ok = bool(gate.get(f"passed_{objective}", False))
+        for objective, mae, tolerance, covered, ok in rows:
             row = QHBoxLayout()
             row.setSpacing(8)
             label = QLabel(objective)

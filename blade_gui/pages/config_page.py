@@ -7,6 +7,7 @@ blocks on errors, then writes atomically while keeping a timestamped backup.
 from __future__ import annotations
 
 import copy
+import math
 from dataclasses import dataclass, field as dc_field
 from pathlib import Path
 from typing import Any
@@ -52,6 +53,14 @@ def get_path(data: dict[str, Any], key: str, default: Any = None) -> Any:
             return default
         node = node[part]
     return node
+
+
+def _as_float(value: Any, default: float = 0.0) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return number if math.isfinite(number) else default
 
 
 def set_path(data: dict[str, Any], key: str, value: Any) -> None:
@@ -234,8 +243,12 @@ class VariableTable(QTableWidget):
     def load(self, config: dict[str, Any]) -> None:
         self.blockSignals(True)
         variables = config.get("variables", [])
+        # Malformed entries are reported by validate_config; never crash the editor.
+        variables = [item for item in variables if isinstance(item, dict)] if isinstance(variables, list) else []
         fixed = get_path(config, "search.fixed_variables", {}) or {}
+        fixed = fixed if isinstance(fixed, dict) else {}
         active = get_path(config, "search.active_variables", None)
+        active = active if isinstance(active, list) else None
         self.setRowCount(len(variables))
         self._rows = []
         for row, item in enumerate(variables):
@@ -249,7 +262,7 @@ class VariableTable(QTableWidget):
             lower.setDecimals(6)
             lower.setRange(-360.0, 360.0)
             lower.setSingleStep(0.5)
-            lower.setValue(float(item.get("lower", 0.0)))
+            lower.setValue(_as_float(item.get("lower")))
             lower.valueChanged.connect(self.changed)
             self.setCellWidget(row, 1, lower)
 
@@ -257,7 +270,7 @@ class VariableTable(QTableWidget):
             upper.setDecimals(6)
             upper.setRange(-360.0, 360.0)
             upper.setSingleStep(0.5)
-            upper.setValue(float(item.get("upper", 0.0)))
+            upper.setValue(_as_float(item.get("upper")))
             upper.valueChanged.connect(self.changed)
             self.setCellWidget(row, 2, upper)
 
@@ -276,7 +289,7 @@ class VariableTable(QTableWidget):
             value.setDecimals(6)
             value.setRange(-360.0, 360.0)
             value.setSingleStep(0.1)
-            value.setValue(float(fixed.get(name, 0.0)))
+            value.setValue(_as_float(fixed.get(name)))
             value.setEnabled(not is_active)
             searchable.toggled.connect(lambda checked, widget=value: widget.setEnabled(not checked))
             value.valueChanged.connect(self.changed)
@@ -316,6 +329,7 @@ class ConfigPage(Page):
     subtitle = "可视化编辑 blade_shape_config.json（保存前自动校验并备份）"
     nav_label = "项目设置"
     nav_icon = "tune"
+    nav_section = "工作流"
 
     def __init__(self, ctx, parent: QWidget | None = None):
         super().__init__(ctx, parent)

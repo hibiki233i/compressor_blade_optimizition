@@ -6,6 +6,7 @@ import json
 import math
 import os
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -405,6 +406,10 @@ def write_iteration_summary(config: dict[str, Any], rows: list[dict[str, Any]]) 
 
 def write_pareto(config: dict[str, Any], df: pd.DataFrame) -> pd.DataFrame:
     success = df[df["status"] == "success"].copy()
+    # A success row with a missing/non-finite objective (e.g. a hand-edited CSV)
+    # is never dominated under NaN comparisons and would leak into both fronts.
+    objectives = success[OBJECTIVE_COLUMNS].apply(pd.to_numeric, errors="coerce")
+    success = success.loc[np.isfinite(objectives.to_numpy(dtype=float)).all(axis=1)]
     if success.empty:
         pareto = pd.DataFrame(columns=df.columns)
         strict_pareto = pd.DataFrame(columns=df.columns)
@@ -949,6 +954,12 @@ def run_geometry(config: dict[str, Any], candidate_path: Path, dry_run: bool = F
         "-TurboGridTemplate",
         str(paths["turbogrid_template"]),
     ]
+    # The mesh periodicity must match the count CFX uses to scale MassFlow/Power.
+    # The script used to hard-code 10; only pass the flag when it differs, so an
+    # older script copy still works for 10 blades and fails loudly otherwise.
+    n_blades = int(config["runtime"]["n_blades"])
+    if n_blades != 10:
+        cmd += ["-BladeCount", str(n_blades)]
     if dry_run:
         cmd.append("-DryRun")
     log_path = candidate_path.parent / ("geometry_dry_run.log" if dry_run else "geometry.log")
@@ -1228,9 +1239,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Blade-shape active learning with real CFD feedback.")
     parser.add_argument("--config", default="blade_shape_config.json")
     sub = parser.add_subparsers(dest="command")
+    # Sub-parser defaults overwrite a value parsed before the sub-command, so a
+    # leading ``--config other.json run`` used to fall back silently to the
+    # default file. SUPPRESS keeps the top-level value unless repeated here.
+    config_default = argparse.SUPPRESS
 
     run = sub.add_parser("run", help="Run the active-learning CFD loop.")
-    run.add_argument("--config", default="blade_shape_config.json")
+    run.add_argument("--config", default=config_default)
     run.add_argument("--initial-samples", type=int)
     run.add_argument("--iterations", type=int)
     run.add_argument("--batch-size", type=int)
@@ -1240,7 +1255,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.set_defaults(func=run_loop)
 
     wc = sub.add_parser("write-candidate", help="Write one candidate JSON and optionally dry-run XML generation.")
-    wc.add_argument("--config", default="blade_shape_config.json")
+    wc.add_argument("--config", default=config_default)
     wc.add_argument("--index", type=int, default=0)
     wc.add_argument("--seed", type=int)
     wc.add_argument("--dry-run", action="store_true")
@@ -1248,7 +1263,7 @@ def build_parser() -> argparse.ArgumentParser:
     wc.set_defaults(func=write_candidate_command)
     for name in ['diagnose', 'write-boundary-plan', 'run-boundary']:
         command = sub.add_parser(name)
-        command.add_argument('--config', default='blade_shape_config.json')
+        command.add_argument('--config', default=config_default)
         if name != 'diagnose':
             command.add_argument('--plan', required=True)
         if name == 'write-boundary-plan':
@@ -1263,9 +1278,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     parser = build_parser()
-    args = parser.parse_args()
+    argv = sys.argv[1:]
+    args = parser.parse_args(argv)
     if args.command is None:
-        args = parser.parse_args(["run"])
+        # Keep any top-level options (notably --config) when defaulting to run.
+        args = parser.parse_args([*argv, "run"])
     config = load_config(args.config)
     with output_lock(output_dir(config)):
         args.func(args)

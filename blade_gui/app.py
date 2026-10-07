@@ -25,21 +25,29 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def configure_application(app: QApplication) -> None:
+    """Apply style, fonts and the style sheet (shared by main() and screenshots)."""
+    app.setApplicationName(APP_NAME)
+    app.setOrganizationName(ORG_NAME)
+    app.setApplicationDisplayName("Blade Shape · 主动学习控制台")
+    app.setWindowIcon(icons.brand_icon(64))
+    app.setStyle("Fusion")
+    app.setPalette(theme.application_palette())
+    families = theme.available_families(theme.UI_FAMILIES)
+    font = QFont()
+    if families:
+        font.setFamilies(families)
+    font.setPixelSize(13)
+    app.setFont(font)
+    app.setStyleSheet(theme.build_stylesheet(theme.ensure_assets(), families or None))
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
     QApplication.setAttribute(Qt.AA_DontShowIconsInMenus, False)
     app = QApplication(sys.argv[:1])
-    app.setApplicationName(APP_NAME)
-    app.setOrganizationName(ORG_NAME)
-    app.setApplicationDisplayName("Blade Shape · 主动学习控制台")
-    app.setWindowIcon(icons.icon("target", theme.PALETTE["accent"], 64))
-    app.setStyle("Fusion")
-    app.setStyleSheet(theme.build_stylesheet())
-
-    font = QFont()
-    font.setPixelSize(13)
-    app.setFont(font)
+    configure_application(app)
 
     config_path = Path(args.config) if args.config else None
     data_dir = Path(args.data_dir) if args.data_dir else None

@@ -107,6 +107,8 @@ class Series:
     dashed: bool = False
     ring: bool = False
     z: float = 0.0
+    #: reference/guide lines can stay out of the legend
+    legend: bool = True
 
     def points(self) -> list[tuple[float, float, int]]:
         out: list[tuple[float, float, int]] = []
@@ -316,11 +318,13 @@ class XYChart(_ChartBase):
         right_width = max((tick_metrics.horizontalAdvance(fmt_tick(v, y2_step)) for v in y2_ticks), default=0)
         axis_font = self._f_axis
 
-        left = rect.left() + 12 + left_width + 8
-        right = rect.right() - 12 - (right_width + 8 if has_right else 0) - (14 if self.y_label else 0)
+        # Reserve the rotated axis titles' columns on their own side; the old
+        # code took the left title's width from the right and overlapped ticks.
+        left = rect.left() + 12 + (16 if self.y_label else 0) + left_width + 8
+        right = rect.right() - 12 - (right_width + 8 if has_right else 0) - (16 if self.y2_label and has_right else 0)
         available = max(20.0, right - left)
 
-        legend_series = [item for item in self._series if item.points()]
+        legend_series = [item for item in self._series if item.points() and item.legend]
         legend_height = 0.0
         if len(legend_series) > 1:
             legend_metrics = QFontMetricsF(self._f_legend)
@@ -418,6 +422,9 @@ class XYChart(_ChartBase):
                 if item.dashed:
                     pen.setStyle(Qt.DashLine)
                 painter.setPen(pen)
+                # Markers of an earlier series leave a brush set; without this
+                # reset a step/line path is drawn as a filled polygon.
+                painter.setBrush(Qt.NoBrush)
                 path = QPainterPath()
                 previous: tuple[float, float] | None = None
                 for x, y, _ in points:
@@ -456,13 +463,13 @@ class XYChart(_ChartBase):
             painter.drawText(QRectF(plot.left(), rect.bottom() - 20, plot.width(), 16), Qt.AlignCenter, self.x_label)
         if self.y_label:
             painter.save()
-            painter.translate(rect.left() + 12, plot.center().y())
+            painter.translate(rect.left() + 14, plot.center().y())
             painter.rotate(-90)
             painter.drawText(QRectF(-plot.height() / 2, -8, plot.height(), 16), Qt.AlignCenter, self.y_label)
             painter.restore()
         if self.y2_label and has_right:
             painter.save()
-            painter.translate(rect.right() - 4, plot.center().y())
+            painter.translate(rect.right() - 12, plot.center().y())
             painter.rotate(90)
             painter.drawText(QRectF(-plot.height() / 2, -8, plot.height(), 16), Qt.AlignCenter, self.y2_label)
             painter.restore()

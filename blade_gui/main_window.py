@@ -4,11 +4,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtGui import QFontMetrics, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QButtonGroup,
     QFileDialog,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -19,29 +20,62 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import icons, theme
+from . import __version__, icons, theme
 from .context import AppContext
 from .pages import PAGE_CLASSES
 from .pages.config_page import ConfigPage
 from .widgets import tool_button
 
-SIDEBAR_WIDTH = 212
+SIDEBAR_WIDTH = 224
 
 
 class NavButton(QPushButton):
-    def __init__(self, label: str, icon_name: str, parent: QWidget | None = None):
+    def __init__(self, label: str, icon_name: str, shortcut: str = "", parent: QWidget | None = None):
         super().__init__(f"  {label}", parent)
         self.setObjectName("NavItem")
         self.setCheckable(True)
         self.setCursor(Qt.PointingHandCursor)
-        self.setMinimumHeight(38)
+        self.setMinimumHeight(36)
         self.setIcon(icons.icon(icon_name, theme.PALETTE["text_dim"], 18))
         self._icon_name = icon_name
+        if shortcut:
+            layout = QHBoxLayout(self)
+            layout.setContentsMargins(0, 0, 10, 0)
+            layout.addStretch(1)
+            hint = QLabel(shortcut)
+            hint.setObjectName("NavShortcut")
+            hint.setAttribute(Qt.WA_TransparentForMouseEvents)
+            layout.addWidget(hint)
 
     def set_active(self, active: bool) -> None:
         super().setChecked(active)
         color = theme.PALETTE["accent"] if active else theme.PALETTE["text_dim"]
         self.setIcon(icons.icon(self._icon_name, color, 18))
+
+
+class Chip(QFrame):
+    """Pill with a small icon and elided text (top bar context)."""
+
+    def __init__(self, icon_name: str, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setObjectName("Chip")
+        self.setFixedHeight(26)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(9, 0, 11, 0)
+        layout.setSpacing(6)
+        self.glyph = QLabel()
+        self.glyph.setPixmap(icons.pixmap(icon_name, theme.PALETTE["text_faint"], 13))
+        layout.addWidget(self.glyph)
+        self.text = QLabel()
+        self.text.setStyleSheet(f"color: {theme.PALETTE['text_dim']}; font-size: 11px;")
+        layout.addWidget(self.text)
+        self._max_width = 360
+
+    def set_text(self, text: str, tooltip: str = "", tint: str = "text_dim") -> None:
+        metrics = QFontMetrics(self.text.font())
+        self.text.setText(metrics.elidedText(text, Qt.ElideMiddle, self._max_width))
+        self.text.setStyleSheet(f"color: {theme.PALETTE.get(tint, tint)}; font-size: 11px;")
+        self.setToolTip(tooltip or text)
 
 
 class MainWindow(QMainWindow):
@@ -51,18 +85,23 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Blade Shape · 主动学习控制台")
         self.setMinimumSize(1180, 760)
         self.resize(1440, 900)
-        self.setWindowIcon(icons.icon("target", theme.PALETTE["accent"], 64))
+        self.setWindowIcon(icons.brand_icon(64))
 
         self._build()
         self.ctx.project_reloaded.connect(self._on_project_reloaded)
         self.ctx.status_message.connect(self._on_status)
         self.ctx.case_requested.connect(self._on_case_requested)
+        for runner in self.ctx.command_runners:
+            runner.started.connect(lambda *_: self._sync_busy())
+            runner.finished.connect(lambda *_: QTimer.singleShot(0, self._sync_busy))
+            runner.failed.connect(lambda *_: QTimer.singleShot(0, self._sync_busy))
 
         self._auto_timer = QTimer(self)
         self._auto_timer.setInterval(15000)
         self._auto_timer.timeout.connect(self._auto_refresh)
 
         self._on_project_reloaded()
+        self._sync_busy()
         self._select_page(0)
 
     # ------------------------------------------------------------- layout
@@ -72,7 +111,6 @@ class MainWindow(QMainWindow):
         layout = QHBoxLayout(central)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        layout.addWidget(self._build_sidebar())
 
         right = QWidget()
         right_layout = QVBoxLayout(right)
@@ -87,13 +125,16 @@ class MainWindow(QMainWindow):
             self.pages.append(page)
             self.stack.addWidget(page)
         right_layout.addWidget(self.stack, 1)
-        layout.addWidget(right, 1)
 
         status = QFrame()
         status.setObjectName("StatusBar")
-        status.setFixedHeight(26)
+        status.setFixedHeight(28)
         status_layout = QHBoxLayout(status)
-        status_layout.setContentsMargins(14, 0, 14, 0)
+        status_layout.setContentsMargins(16, 0, 16, 0)
+        status_layout.setSpacing(8)
+        self.status_dot = QLabel()
+        self.status_dot.setFixedSize(7, 7)
+        status_layout.addWidget(self.status_dot)
         self.status_label = QLabel("就绪")
         self.status_label.setObjectName("SidebarFooter")
         status_layout.addWidget(self.status_label, 1)
@@ -102,13 +143,14 @@ class MainWindow(QMainWindow):
         status_layout.addWidget(self.status_right)
         right_layout.addWidget(status)
 
+        # the sidebar reads page classes; build it after the pages exist
+        layout.addWidget(self._build_sidebar())
+        layout.addWidget(right, 1)
+
         QShortcut(QKeySequence("Ctrl+R"), self, activated=self.ctx.reload)
-        QShortcut(QKeySequence("Ctrl+1"), self, activated=lambda: self._select_page(0))
-        QShortcut(QKeySequence("Ctrl+2"), self, activated=lambda: self._select_page(1))
-        QShortcut(QKeySequence("Ctrl+3"), self, activated=lambda: self._select_page(2))
-        QShortcut(QKeySequence("Ctrl+4"), self, activated=lambda: self._select_page(3))
-        QShortcut(QKeySequence("Ctrl+5"), self, activated=lambda: self._select_page(4))
-        QShortcut(QKeySequence("Ctrl+6"), self, activated=lambda: self._select_page(5))
+        for index in range(len(self.pages)):
+            QShortcut(QKeySequence(f"Ctrl+{index + 1}"), self,
+                      activated=lambda i=index: self._select_page(i))
 
     def _build_sidebar(self) -> QWidget:
         sidebar = QFrame()
@@ -116,12 +158,13 @@ class MainWindow(QMainWindow):
         sidebar.setFixedWidth(SIDEBAR_WIDTH)
         layout = QVBoxLayout(sidebar)
         layout.setContentsMargins(12, 16, 12, 12)
-        layout.setSpacing(6)
+        layout.setSpacing(3)
 
         brand = QHBoxLayout()
-        brand.setSpacing(9)
+        brand.setSpacing(10)
+        brand.setContentsMargins(4, 0, 0, 0)
         glyph = QLabel()
-        glyph.setPixmap(icons.pixmap("target", theme.PALETTE["accent"], 26))
+        glyph.setPixmap(icons.brand_pixmap(30))
         brand.addWidget(glyph)
         titles = QVBoxLayout()
         titles.setSpacing(0)
@@ -134,54 +177,89 @@ class MainWindow(QMainWindow):
         brand.addLayout(titles)
         brand.addStretch(1)
         layout.addLayout(brand)
-        layout.addSpacing(14)
+        layout.addSpacing(10)
 
         self.nav_group = QButtonGroup(self)
         self.nav_group.setExclusive(True)
+        section = None
         for index, page_class in enumerate(PAGE_CLASSES):
-            button = NavButton(page_class.nav_label, page_class.nav_icon)
+            current = getattr(page_class, "nav_section", "")
+            if current and current != section:
+                header = QLabel(current)
+                header.setObjectName("NavSection")
+                layout.addWidget(header)
+                section = current
+            shortcut = QKeySequence(f"Ctrl+{index + 1}").toString(QKeySequence.NativeText)
+            button = NavButton(page_class.nav_label, page_class.nav_icon, shortcut)
             button.clicked.connect(lambda _=False, i=index: self._select_page(i))
             self.nav_group.addButton(button, index)
             layout.addWidget(button)
         layout.addStretch(1)
 
+        stats = QFrame()
+        stats.setObjectName("SidebarStats")
+        grid = QGridLayout(stats)
+        grid.setContentsMargins(12, 10, 12, 10)
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(6)
+        self._stat_values: dict[str, QLabel] = {}
+        for position, (key, label, tint) in enumerate((
+            ("attempts", "尝试", "text"), ("successes", "成功", "good"),
+            ("pareto", "Pareto", "accent"), ("failures", "失败", "bad"),
+        )):
+            cell = QVBoxLayout()
+            cell.setSpacing(0)
+            value = QLabel("—")
+            value.setObjectName("StatsValue")
+            value.setStyleSheet(f"color: {theme.PALETTE[tint]};")
+            caption = QLabel(label)
+            caption.setObjectName("StatsLabel")
+            cell.addWidget(value)
+            cell.addWidget(caption)
+            grid.addLayout(cell, position // 2, position % 2)
+            self._stat_values[key] = value
+        layout.addWidget(stats)
+        # kept for callers that read the plain-text summary
         self.sidebar_stats = QLabel("—")
-        self.sidebar_stats.setObjectName("SidebarFooter")
-        self.sidebar_stats.setWordWrap(True)
+        self.sidebar_stats.setVisible(False)
         layout.addWidget(self.sidebar_stats)
+        layout.addSpacing(6)
 
-        self.auto_button = tool_button("自动刷新 (15s)", "clock", "ghost")
+        self.auto_button = tool_button("自动刷新 · 15 s", "clock", "ghost")
         self.auto_button.setCheckable(True)
         self.auto_button.clicked.connect(self._toggle_auto)
         layout.addWidget(self.auto_button)
 
-        refresh = tool_button("刷新数据  Ctrl+R", "refresh")
+        refresh = tool_button("刷新数据", "refresh", "ghost", "重新读取配置与结果（Ctrl+R）")
         refresh.clicked.connect(self.ctx.reload)
         layout.addWidget(refresh)
 
-        self.config_button = tool_button("切换配置文件…", "file")
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        self.config_button = tool_button("配置…", "file", "ghost", "切换配置文件")
         self.config_button.clicked.connect(self._choose_config)
-        layout.addWidget(self.config_button)
-
-        data_button = tool_button("设置数据目录…", "folder")
+        row.addWidget(self.config_button)
+        data_button = tool_button("数据目录…", "folder", "ghost", "设置只读数据目录（等价于 --data-dir）")
         data_button.clicked.connect(self._choose_data_dir)
-        layout.addWidget(data_button)
+        row.addWidget(data_button)
+        layout.addLayout(row)
 
         layout.addSpacing(6)
-        version = QLabel("GUI 1.0 · CLI 后端不变")
+        version = QLabel(f"GUI {__version__} · CLI 后端不变")
         version.setObjectName("SidebarFooter")
+        version.setAlignment(Qt.AlignCenter)
         layout.addWidget(version)
         return sidebar
 
     def _build_topbar(self) -> QWidget:
         bar = QFrame()
         bar.setObjectName("TopBar")
-        bar.setFixedHeight(64)
+        bar.setFixedHeight(68)
         layout = QHBoxLayout(bar)
-        layout.setContentsMargins(22, 8, 22, 8)
-        layout.setSpacing(12)
+        layout.setContentsMargins(24, 8, 22, 8)
+        layout.setSpacing(10)
         titles = QVBoxLayout()
-        titles.setSpacing(1)
+        titles.setSpacing(2)
         self.page_title = QLabel("总览看板")
         self.page_title.setObjectName("PageTitle")
         self.page_subtitle = QLabel("")
@@ -191,10 +269,19 @@ class MainWindow(QMainWindow):
         layout.addLayout(titles)
         layout.addStretch(1)
 
-        self.data_pill = QLabel("")
-        self.data_pill.setObjectName("CardHint")
-        self.data_pill.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        layout.addWidget(self.data_pill)
+        self.busy_chip = Chip("play")
+        self.busy_chip.set_text("任务运行中", tint="blue")
+        self.busy_chip.setVisible(False)
+        layout.addWidget(self.busy_chip)
+        self.override_chip = Chip("alert")
+        self.override_chip.setVisible(False)
+        layout.addWidget(self.override_chip)
+        self.config_chip = Chip("file")
+        layout.addWidget(self.config_chip)
+        self.data_chip = Chip("folder")
+        layout.addWidget(self.data_chip)
+        # legacy handle: callers/tests may read the plain output-dir text
+        self.data_pill = self.data_chip.text
         return bar
 
     # ------------------------------------------------------------ routing
@@ -224,16 +311,35 @@ class MainWindow(QMainWindow):
         for page in self.pages:
             page.refresh()
         summary = project.summary()
+        values = {"attempts": summary.attempts, "successes": summary.successes,
+                  "pareto": summary.pareto_count, "failures": summary.failures}
+        for key, value in values.items():
+            self._stat_values[key].setText(str(value))
         self.sidebar_stats.setText(
             f"尝试 {summary.attempts} · 成功 {summary.successes}\n"
             f"Pareto {summary.pareto_count} · 失败 {summary.failures}"
         )
-        self.data_pill.setText(f"输出目录：{project.output_dir}")
-        self.data_pill.setToolTip(str(project.config_path))
+        self.data_chip.set_text(f"输出 {project.output_dir}", f"数据目录：{project.output_dir}")
+        valid = project.config_valid
+        self.config_chip.set_text(
+            project.config_path.name + ("" if valid else " · 有错误"),
+            f"配置文件：{project.config_path}",
+            "text_dim" if valid else "bad",
+        )
+        override = project.data_dir_override is not None
+        self.override_chip.setVisible(override)
+        if override:
+            self.override_chip.set_text("只读数据视图", "运行命令仍写入配置中的 paths.output_dir", "amber")
         self.status_right.setText(
-            f"配置 {project.config_path.name} · {'' if project.config_valid else '存在校验错误 · '}"
+            f"配置 {project.config_path.name} · {'' if valid else '存在校验错误 · '}"
             f"记录 {summary.attempts} 条"
         )
+
+    def _sync_busy(self) -> None:
+        busy = any(runner.running for runner in self.ctx.command_runners)
+        self.busy_chip.setVisible(busy)
+        tint = theme.PALETTE["blue"] if busy else theme.PALETTE["good"]
+        self.status_dot.setStyleSheet(f"background: {tint}; border-radius: 3px;")
 
     def _on_status(self, message: str) -> None:
         self.status_label.setText(message)

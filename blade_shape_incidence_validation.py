@@ -113,6 +113,9 @@ def _batch_angles(path: Path) -> tuple[float, float]:
     if beta is None:
         raise ValueError(f'{path}: Beta1 is missing')
     values = {item.attrib.get('Index'): item.text for item in beta.findall('Value')}
+    missing = [str(index) for index in (0, 1) if values.get(str(index)) is None]
+    if missing:
+        raise ValueError(f'{path}: Beta1 lacks hub/shroud Value Index {", ".join(missing)}')
     return tuple(math.degrees(finite(values[str(index)], f'Beta1[{index}]'))
                  for index in (0, 1))
 
@@ -545,7 +548,7 @@ def run_plan(path: Path, budget: int, resume: bool) -> dict:
         state_path=root/'progress.json'
         if state_path.exists():
             if not resume: raise ValueError('Existing experiment requires --resume')
-            state=json.loads(state_path.read_text())
+            state=json.loads(state_path.read_text(encoding='utf-8'))
             if state['plan_id']!=signature: raise ValueError('Progress belongs to another plan')
         else:
             if list(al.output_dir(config).glob('training_data.csv')) or (al.output_dir(config)/'cases').exists():
@@ -638,7 +641,7 @@ def main(argv: list[str] | None = None) -> int:
         args.output_dir.mkdir(parents=True,exist_ok=False)
         write_csv(args.output_dir/'profile.csv',rows);atomic_json(args.output_dir/'summary.json',summary)
     elif args.command=='compare':
-        a=json.loads(args.baseline.read_text());b=json.loads(args.target.read_text())
+        a=json.loads(args.baseline.read_text(encoding='utf-8'));b=json.loads(args.target.read_text(encoding='utf-8'))
         result=compare_results(a,b,args.flow_tolerance)
         result['sources']={str(p.resolve()):file_identity(p) for p in (args.baseline,args.target)}
         new_json(args.output,result);return 0 if result['usable_for_matched_point_diagnostic'] else 2

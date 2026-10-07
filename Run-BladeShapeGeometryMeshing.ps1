@@ -6,6 +6,8 @@ param (
     [string]$CftBatchTemplate = "D:\blade optizamation\Templates\BaseModel.cft-batch",
     [string]$BaseCft = "D:\blade optizamation\Templates\0908-2.cft",
     [string]$TurboGridTemplate = "D:\blade optizamation\Templates\BaseMeshing.tst",
+    # Must match runtime.n_blades: CFX scales per-passage MassFlow/Power by it.
+    [ValidateRange(1, 200)][int]$BladeCount = 10,
     [switch]$DryRun
 )
 
@@ -255,7 +257,8 @@ if ($DryRun) {
         -HubCurve $Export_Hub `
         -ShroudCurve $Export_Shroud `
         -ProfileCurve $Export_Profile `
-        -OutputMesh $Export_Mesh
+        -OutputMesh $Export_Mesh `
+        -BladeCount $BladeCount
     Write-Host "Dry-run complete. Wrote $Current_CFT, $Input_CFT_Model, $Current_TGS, and $Current_TSE"
     exit 0
 }
@@ -306,7 +309,8 @@ Write-TurboGridFiles `
     -HubCurve $Export_Hub `
     -ShroudCurve $Export_Shroud `
     -ProfileCurve $Export_Profile `
-    -OutputMesh $Export_Mesh
+    -OutputMesh $Export_Mesh `
+    -BladeCount $BladeCount
 
 $tgProcess = Start-Process -FilePath $TurboGridExe -ArgumentList "-batch `"$Current_TSE`"" -WorkingDirectory $WorkingDir -Wait -PassThru -NoNewWindow
 if ($tgProcess.ExitCode -ne 0) {

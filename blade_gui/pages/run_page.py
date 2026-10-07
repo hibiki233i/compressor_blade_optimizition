@@ -6,7 +6,7 @@ from html import escape
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, QUrl
-from PySide6.QtGui import QDesktopServices, QFont
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -34,6 +34,7 @@ from ..widgets import (
     MessageBar,
     clear_layout,
     danger_button,
+    fit_stack_to_current,
     primary_button,
     tool_button,
 )
@@ -57,6 +58,7 @@ class RunPage(Page):
     subtitle = "以子进程方式调用原始 CLI，实时回显日志"
     nav_label = "运行控制"
     nav_icon = "play"
+    nav_section = "工作流"
 
     def __init__(self, ctx, parent: QWidget | None = None):
         super().__init__(ctx, parent)
@@ -106,8 +108,7 @@ class RunPage(Page):
         self.preview = QPlainTextEdit()
         self.preview.setReadOnly(True)
         self.preview.setMaximumHeight(76)
-        mono = QFont("SF Mono, Menlo, Consolas, monospace")
-        mono.setPixelSize(11)
+        mono = theme.mono_font(11)
         self.preview.setFont(mono)
         preview_card.body.addWidget(self.preview)
         copy_row = QHBoxLayout()
@@ -356,13 +357,21 @@ class RunPage(Page):
 
     def apply_config_defaults(self) -> None:
         """Copy runtime values from the config into the form."""
-        config = self.ctx.project.config
-        runtime = config.get("runtime", {})
-        self.run_initial.setValue(int(runtime.get("initial_samples", 0) or 0))
-        self.run_iterations.setValue(int(runtime.get("iterations", 0) or 0))
-        self.run_batch.setValue(max(1, int(runtime.get("batch_size", 1) or 1)))
-        self.run_max.setValue(int(runtime.get("max_new_cfd", 0) or 0))
-        self.run_seed.setValue(int(runtime.get("seed", 0) or 0))
+        runtime = self.ctx.project.config.get("runtime")
+        runtime = runtime if isinstance(runtime, dict) else {}
+
+        def number(key: str, default: int) -> int:
+            # An invalid value is reported by validate_config; keep the form usable.
+            try:
+                return int(runtime.get(key, default) or default)
+            except (TypeError, ValueError):
+                return default
+
+        self.run_initial.setValue(number("initial_samples", 0))
+        self.run_iterations.setValue(number("iterations", 0))
+        self.run_batch.setValue(max(1, number("batch_size", 1)))
+        self.run_max.setValue(number("max_new_cfd", 0))
+        self.run_seed.setValue(number("seed", 0))
         self.ctx.report("已按 blade_shape_config.json 重置运行参数。")
 
     def _sync_center_runs(self) -> None:
@@ -419,6 +428,7 @@ class RunPage(Page):
     def _on_action_changed(self) -> None:
         index = self.action_box.currentIndex()
         self.stack.setCurrentIndex(max(0, index))
+        fit_stack_to_current(self.stack)
         self._update_preview()
 
     def _build_spec(self) -> commands.CommandSpec:
@@ -634,7 +644,11 @@ class RunPage(Page):
         )
         if not target:
             return
-        Path(target).write_text(self.log.toPlainText(), encoding="utf-8")
+        try:
+            Path(target).write_text(self.log.toPlainText(), encoding="utf-8")
+        except OSError as exc:
+            QMessageBox.warning(self, "保存失败", str(exc))
+            return
         self.ctx.report(f"日志已保存：{target}")
 
     def _open_output(self) -> None:

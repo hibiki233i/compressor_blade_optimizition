@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QDesktopServices, QFont
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QComboBox,
     QGridLayout,
@@ -38,6 +38,7 @@ class CasesPage(Page):
     subtitle = "cases/ 目录、生成文件与各阶段日志"
     nav_label = "算例浏览"
     nav_icon = "folder"
+    nav_section = "检查与验证"
 
     def __init__(self, ctx, parent: QWidget | None = None):
         super().__init__(ctx, parent)
@@ -142,6 +143,12 @@ class CasesPage(Page):
         self.tabs.addTab(self._build_log_tab(), "日志")
         self.tabs.addTab(self._build_json_tab(), "candidate.json")
         right_layout.addWidget(self.tabs, 1)
+        self.detail_empty = EmptyState(
+            "选择一个算例",
+            "在左侧列表中选择算例，或在总览看板单击 Pareto 点跳转到这里。",
+            "folder",
+        )
+        right_layout.addWidget(self.detail_empty, 1)
         splitter.addWidget(right)
         splitter.setSizes([560, 620])
 
@@ -207,8 +214,7 @@ class CasesPage(Page):
         layout.addLayout(row)
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
-        mono = QFont("SF Mono, Menlo, Consolas, monospace")
-        mono.setPixelSize(11)
+        mono = theme.mono_font(11)
         self.log_view.setFont(mono)
         self.log_view.setPlaceholderText("该算例没有可读取的文本日志。")
         layout.addWidget(self.log_view, 1)
@@ -223,8 +229,7 @@ class CasesPage(Page):
         layout.setContentsMargins(12, 12, 12, 12)
         self.json_view = QPlainTextEdit()
         self.json_view.setReadOnly(True)
-        mono = QFont("SF Mono, Menlo, Consolas, monospace")
-        mono.setPixelSize(11)
+        mono = theme.mono_font(11)
         self.json_view.setFont(mono)
         self.json_view.setPlaceholderText("该算例目录下没有 candidate.json。")
         layout.addWidget(self.json_view, 1)
@@ -324,6 +329,7 @@ class CasesPage(Page):
 
     def _set_detail_visible(self, visible: bool) -> None:
         self.tabs.setVisible(visible)
+        self.detail_empty.setVisible(not visible)
         self.detail_message.setVisible(visible)
         if not visible:
             self.detail_title.setText("未选择算例")
@@ -425,11 +431,10 @@ class CasesPage(Page):
         self.log_hint.setText(f"{path} · {human_size(size)} · 仅显示末尾 800 行")
 
     def _populate_json(self, record: CaseRecord) -> None:
+        # Only candidate.json: falling back to "any *.json" used to show
+        # cfx_state.json or geometry_state.json under this tab's title.
         path = record.path / "candidate.json"
-        if not path.exists():
-            candidates = list(record.path.glob("*.json"))
-            path = candidates[0] if candidates else path
-        if not path.exists():
+        if not path.is_file():
             self.json_view.setPlainText("")
             return
         raw = read_text(path)
