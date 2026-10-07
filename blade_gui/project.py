@@ -78,6 +78,13 @@ def validate_config(config: dict[str, Any]) -> list[Issue]:
     expected when the GUI is opened on a machine that is not the CFD host).
     """
     issues: list[Issue] = []
+    # A hand-edited file can hold the wrong JSON type anywhere; report it instead
+    # of raising, because the GUI must still open to let the user repair it.
+    for section in ("paths", "runtime", "constraints", "search", "cfx_convergence"):
+        if section in config and not isinstance(config[section], dict):
+            issues.append(Issue("error", f"{section} 必须是 JSON 对象。"))
+    if any(issue.level == "error" for issue in issues):
+        return issues
     try:
         from blade_shape_convergence import ConvergencePolicy
         ConvergencePolicy.from_config(config)
@@ -91,6 +98,9 @@ def validate_config(config: dict[str, Any]) -> list[Issue]:
 
     names: list[str] = []
     for idx, item in enumerate(variables):
+        if not isinstance(item, dict):
+            issues.append(Issue("error", f"variables[{idx}] 必须是包含 name/lower/upper 的对象。"))
+            continue
         name = str(item.get("name", "")).strip()
         if not name:
             issues.append(Issue("error", f"variables[{idx}] 缺少 name。"))
@@ -175,7 +185,8 @@ def save_config(path: str | Path, config: dict[str, Any], *, keep_backup: bool =
 
 def external_tools(config: dict[str, Any]) -> list[tuple[str, str, bool]]:
     """``(label, path, exists)`` for every external program the pipeline calls."""
-    paths = config.get("paths", {})
+    paths = config.get("paths")
+    paths = paths if isinstance(paths, dict) else {}
     pairs = [
         ("PowerShell 7", paths.get("powershell_exe", "")),
         ("CFturbo", paths.get("cfturbo_exe", "")),
@@ -254,7 +265,10 @@ class Project:
             self.load_error = str(exc)
             self.issues = [Issue("error", f"无法读取配置：{exc}")]
             return
-        self.issues = validate_config(self.config)
+        try:
+            self.issues = validate_config(self.config)
+        except Exception as exc:  # noqa: BLE001 - keep the GUI usable for repairs
+            self.issues = [Issue("error", f"配置结构无效：{exc}")]
 
     @property
     def config_valid(self) -> bool:
@@ -265,7 +279,8 @@ class Project:
     def output_dir(self) -> Path:
         if self.data_dir_override:
             return self.data_dir_override
-        value = self.config.get("paths", {}).get("output_dir")
+        paths = self.config.get("paths")
+        value = paths.get("output_dir") if isinstance(paths, dict) else None
         return Path(str(value)) if value else CODE_DIR / "blade_al_runs"
 
     def path(self, name: str) -> Path:
@@ -374,7 +389,9 @@ class Project:
             return out
 
         out.attempts = len(df)
-        status = df.get("status", pd.Series(dtype=object)).astype(str).str.strip().str.lower()
+        # Align with df.index even when an un-normalized CSV lacks the column.
+        status = df["status"] if "status" in df.columns else pd.Series("", index=df.index, dtype=object)
+        status = status.astype(str).str.strip().str.lower()
         out.successes = int((status == "success").sum())
         out.failures = int(out.attempts - out.successes)
 

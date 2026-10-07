@@ -12,7 +12,7 @@ import shlex
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, Signal
+from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QTimer, Signal
 
 
 class CommandRunner(QObject):
@@ -83,8 +83,17 @@ class CommandRunner(QObject):
         if process is None or process.state() == QProcess.NotRunning:
             return
         process.terminate()
-        if not process.waitForFinished(2500):
-            process.kill()
+        # Console children ignore terminate() on Windows. Escalate later instead
+        # of blocking the event loop (the old waitForFinished froze the window).
+        QTimer.singleShot(2500, lambda: self._kill_if_running(process))
+
+    @staticmethod
+    def _kill_if_running(process: QProcess) -> None:
+        try:
+            if process.state() != QProcess.NotRunning:
+                process.kill()
+        except RuntimeError:  # the QProcess was already deleted
+            pass
 
     # ------------------------------------------------------------ signals
     def _on_ready(self) -> None:

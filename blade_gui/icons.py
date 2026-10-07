@@ -9,7 +9,7 @@ from __future__ import annotations
 from functools import lru_cache
 
 from PySide6.QtCore import QByteArray, QRectF, Qt
-from PySide6.QtGui import QIcon, QPainter, QPixmap
+from PySide6.QtGui import QColor, QIcon, QLinearGradient, QPainter, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 
 from . import theme
@@ -37,9 +37,23 @@ _PATHS: dict[str, str] = {
     "trash": "M4 7h16M9 7V5h6v2m-8 0 1 13h8l1-13",
     "plus": "M12 5v14M5 12h14",
     "pin": "M12 21s7-6.2 7-11a7 7 0 1 0-14 0c0 4.8 7 11 7 11Zm0-8.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z",
+    # impeller: hub plus four swept blades (brand mark)
+    "blade": "M14 12a2 2 0 1 1-4 0 2 2 0 0 1 4 0Zm-2-2c0-3 1.6-5.6 5.2-6.6M14 12c3 0 5.6 1.6 6.6 5.2"
+             "M12 14c0 3-1.6 5.6-5.2 6.6M10 12c-3 0-5.6-1.6-6.6-5.2",
+    # angle between a blade line and a flow arrow
+    "angle": "M4 19h16M4 19 15.5 6.5M9.5 19a6 6 0 0 0-1.9-4.4M17 16l3 3-3 3",
+    "compare": "M7 4v16M17 4v16M3 8h8M13 16h8",
+    "copy": "M9 9h10v11H9V9Zm-4 6V4h10",
+    "external": "M14 4h6v6m0-6-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5",
+    "chevron_down": "M6 9l6 6 6-6",
+    "chevron_up": "M6 15l6-6 6 6",
+    "check_bold": "M5 12.5 10 17.5 19 7",
+    "dash": "M6 12h12",
 }
 
 _FILLED = {"play", "stop", "dashboard", "pin", "target"}
+#: thicker strokes keep tiny style-sheet glyphs legible
+_STROKE = {"chevron_down": 2.4, "chevron_up": 2.4, "check_bold": 3.0, "dash": 2.6, "blade": 1.8}
 
 
 def _svg(name: str, color: str) -> str:
@@ -48,7 +62,7 @@ def _svg(name: str, color: str) -> str:
     attrs = (
         f'fill="{color}" stroke="none"'
         if filled
-        else f'fill="none" stroke="{color}" stroke-width="1.7" '
+        else f'fill="none" stroke="{color}" stroke-width="{_STROKE.get(name, 1.7)}" '
         'stroke-linecap="round" stroke-linejoin="round"'
     )
     return (
@@ -72,3 +86,30 @@ def pixmap(name: str, color: str = "#e8eef5", size: int = 22) -> QPixmap:
 @lru_cache(maxsize=256)
 def icon(name: str, color: str | None = None, size: int = 22) -> QIcon:
     return QIcon(pixmap(name, color or theme.PALETTE["text"], size))
+
+
+@lru_cache(maxsize=16)
+def brand_pixmap(size: int = 28) -> QPixmap:
+    """Brand mark: impeller glyph on a rounded teal-to-blue gradient tile."""
+    ratio = 2
+    pm = QPixmap(size * ratio, size * ratio)
+    pm.fill(Qt.transparent)
+    painter = QPainter(pm)
+    painter.setRenderHint(QPainter.Antialiasing, True)
+    edge = float(size * ratio)
+    gradient = QLinearGradient(0, 0, edge, edge)
+    gradient.setColorAt(0.0, QColor(theme.PALETTE["accent"]))
+    gradient.setColorAt(1.0, QColor(theme.PALETTE["blue"]))
+    painter.setPen(Qt.NoPen)
+    painter.setBrush(gradient)
+    painter.drawRoundedRect(QRectF(0, 0, edge, edge), edge * 0.28, edge * 0.28)
+    inset = edge * 0.16
+    renderer = QSvgRenderer(QByteArray(_svg("blade", theme.ON_ACCENT).encode("utf-8")))
+    renderer.render(painter, QRectF(inset, inset, edge - 2 * inset, edge - 2 * inset))
+    painter.end()
+    pm.setDevicePixelRatio(ratio)
+    return pm
+
+
+def brand_icon(size: int = 64) -> QIcon:
+    return QIcon(brand_pixmap(size))

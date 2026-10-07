@@ -15,6 +15,8 @@ class Page(QWidget):
     #: sidebar entry
     nav_label = "页面"
     nav_icon = "info"
+    #: sidebar group heading; consecutive pages with the same value share it
+    nav_section = ""
 
     def __init__(self, ctx: AppContext, parent: QWidget | None = None):
         super().__init__(parent)

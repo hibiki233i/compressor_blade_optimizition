@@ -15,7 +15,7 @@
 | `Run-BladeShapeGeometryMeshing.ps1` | 将候选写入 CFturbo batch，并调用 CFturbo、TurboGrid |
 | `blade_shape_cfx_runner.py` | CFX-Pre、求解、后处理、结果解析及阶段恢复 |
 | `blade_shape_flow_diagnostics.py` | 对已有 `.res` 做只读熵增及近叶片角度诊断；评估见 `README_flow_diagnostics.md` |
-| `blade_gui/` | PySide6 界面；`project.py` 读取配置/CSV/算例，`commands.py` 组装 CLI 参数，`runner.py` 通过子进程执行 CLI |
+| `blade_gui/` | PySide6 界面；`project.py` 读取配置/CSV/算例，`validation_data.py` 只读解析攻角验证产物，`commands.py` 组装 CLI 参数，`runner.py` 通过子进程执行 CLI |
 | `tests/` | 算法、恢复与界面测试；`fixtures/synthetic_meanline.cft-batch` 仅用于测试 |
 
 GUI 是 CLI 的控制台和结果视图。新增运行能力应先放在 CLI/共享模块，再通过 `blade_gui/commands.py` 接入；不要在页面中重做优化或 CFD 逻辑。`blade_gui/project.py` 不依赖 Qt，负责数据读取与配置校验。`--data-dir` 只改变 GUI 的只读数据视图，运行仍写到配置的 `paths.output_dir`。

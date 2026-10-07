@@ -54,6 +54,7 @@ class AnalyticsPage(Page):
     subtitle = "变量相关性、代理模型预测质量与主动学习进程"
     nav_label = "数据分析"
     nav_icon = "chart"
+    nav_section = "监控"
 
     def __init__(self, ctx, parent: QWidget | None = None):
         super().__init__(ctx, parent)

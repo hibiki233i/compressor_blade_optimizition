@@ -1,13 +1,16 @@
 """Reusable presentation widgets shared by every page."""
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSize, Qt
+from PySide6.QtGui import QPainter
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
     QLayout,
     QPushButton,
+    QSizePolicy,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -40,6 +43,31 @@ def clear_layout(layout: QLayout) -> None:
             del item
 
 
+class ElidedLabel(QLabel):
+    """Single-line label that elides instead of forcing its parent wider."""
+
+    def __init__(self, text: str = "", parent: QWidget | None = None):
+        super().__init__(text, parent)
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.setMinimumWidth(0)
+
+    def setText(self, text: str) -> None:  # noqa: N802 - Qt naming
+        super().setText(text)
+        self.setToolTip(text)
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        hint = super().minimumSizeHint()
+        return QSize(0, hint.height())
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setPen(self.palette().color(self.foregroundRole()))
+        painter.setFont(self.font())
+        text = self.fontMetrics().elidedText(self.text(), Qt.ElideRight, self.width())
+        painter.drawText(self.rect(), int(self.alignment() | Qt.AlignVCenter), text)
+        painter.end()
+
+
 class Card(QFrame):
     """Rounded panel with a title row and a content area."""
 
@@ -54,15 +82,15 @@ class Card(QFrame):
         self.header.setSpacing(8)
         self.title_label = QLabel(title)
         self.title_label.setObjectName("CardTitle")
-        self.hint_label = QLabel(hint)
+        self.hint_label = ElidedLabel(hint)
         self.hint_label.setObjectName("CardHint")
-        if title:
-            self.header.addWidget(self.title_label)
-        if hint:
-            self.header.addWidget(self.hint_label)
-        self.header.addStretch(1)
-        if title or hint:
-            outer.addLayout(self.header)
+        # Always present so set_title/set_hint work on cards created empty
+        # (they used to be silently dropped from the layout).
+        self.header.addWidget(self.title_label)
+        self.header.addWidget(self.hint_label, 1)
+        self.title_label.setVisible(bool(title))
+        self.hint_label.setVisible(bool(hint))
+        outer.addLayout(self.header)
 
         self.body = QVBoxLayout()
         self.body.setContentsMargins(0, 0, 0, 0)
@@ -74,26 +102,30 @@ class Card(QFrame):
 
     def set_title(self, text: str) -> None:
         self.title_label.setText(text)
+        self.title_label.setVisible(bool(text))
 
     def set_hint(self, text: str) -> None:
         self.hint_label.setText(text)
+        self.hint_label.setVisible(bool(text))
 
 
 class StatTile(QFrame):
     """Compact KPI tile: big value, caption, optional footnote."""
 
     def __init__(self, label: str, value: str = "—", foot: str = "",
-                 accent: str = "accent", parent: QWidget | None = None):
+                 accent: str = "accent", parent: QWidget | None = None, *, compact: bool = False):
         super().__init__(parent)
         self.setObjectName("StatTile")
-        self.setMinimumWidth(140)
+        self.setMinimumWidth(96 if compact else 140)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 12, 14, 12)
+        pad = (12, 10) if compact else (14, 12)
+        layout.setContentsMargins(pad[0], pad[1], pad[0], pad[1])
         layout.setSpacing(2)
 
         top = QHBoxLayout()
         top.setSpacing(6)
-        self.label = QLabel(label.upper())
+        # symbols such as |i| or β must keep their case in compact tiles
+        self.label = QLabel(label if compact else label.upper())
         self.label.setObjectName("StatLabel")
         top.addWidget(self.label)
         top.addStretch(1)
@@ -104,7 +136,7 @@ class StatTile(QFrame):
         layout.addLayout(top)
 
         self.value = QLabel(value)
-        self.value.setObjectName("StatValue")
+        self.value.setObjectName("StatValueCompact" if compact else "StatValue")
         self.value.setStyleSheet(f"color: {theme.PALETTE.get(accent, accent)};")
         layout.addWidget(self.value)
 
@@ -117,6 +149,11 @@ class StatTile(QFrame):
         self.value.setText(value)
         if foot is not None:
             self.foot.setText(foot)
+
+    def set_accent(self, accent: str) -> None:
+        tint = theme.PALETTE.get(accent, accent)
+        self.dot.setStyleSheet(f"background: {tint}; border-radius: 4px;")
+        self.value.setStyleSheet(f"color: {tint};")
 
 
 class Badge(QLabel):
@@ -202,6 +239,8 @@ class EmptyState(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 28, 16, 28)
         layout.setSpacing(8)
+        # keep glyph, title and hint together when the placeholder is tall
+        layout.addStretch(1)
         self._glyph = QLabel()
         self._glyph.setPixmap(icons.pixmap(icon_name, theme.PALETTE["text_faint"], 34))
         self._glyph.setAlignment(Qt.AlignCenter)
@@ -215,6 +254,7 @@ class EmptyState(QWidget):
         self.hint_label.setAlignment(Qt.AlignCenter)
         self.hint_label.setWordWrap(True)
         layout.addWidget(self.hint_label)
+        layout.addStretch(1)
         self.hint_label.setVisible(bool(hint))
 
     def set_text(self, title: str, hint: str = "") -> None:
@@ -242,7 +282,7 @@ def primary_button(text: str, icon_name: str = "play") -> QPushButton:
     button = QPushButton(text)
     button.setCursor(Qt.PointingHandCursor)
     button.setProperty("variant", "primary")
-    button.setIcon(icons.icon(icon_name, "#04211d", 16))
+    button.setIcon(icons.icon(icon_name, theme.ON_ACCENT, 16))
     button.setMinimumHeight(34)
     return button
 
@@ -251,7 +291,7 @@ def danger_button(text: str, icon_name: str = "stop") -> QPushButton:
     button = QPushButton(text)
     button.setCursor(Qt.PointingHandCursor)
     button.setProperty("variant", "danger")
-    button.setIcon(icons.icon(icon_name, "#ffe9e9", 16))
+    button.setIcon(icons.icon(icon_name, "#fecaca", 16))
     button.setMinimumHeight(34)
     return button
 
@@ -266,7 +306,7 @@ class FormRow(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
         self.label = QLabel(label)
-        self.label.setObjectName("CardHint")
+        self.label.setObjectName("FormLabel")
         self.label.setFixedWidth(label_width)
         self.label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         layout.addWidget(self.label, 0)
@@ -276,3 +316,27 @@ class FormRow(QWidget):
         self.hint.setFixedWidth(150)
         layout.addWidget(self.hint, 0)
         self.widget = widget
+
+
+def divider() -> QFrame:
+    """One-pixel horizontal rule in the border colour."""
+    line = QFrame()
+    line.setObjectName("Divider")
+    line.setFrameShape(QFrame.NoFrame)
+    return line
+
+
+def form_label(text: str) -> QLabel:
+    label = QLabel(text)
+    label.setObjectName("FormLabel")
+    return label
+
+
+def fit_stack_to_current(stack: QStackedWidget) -> None:
+    """Size a stacked widget to its current page instead of the tallest page."""
+    for index in range(stack.count()):
+        page = stack.widget(index)
+        policy = QSizePolicy.Preferred if index == stack.currentIndex() else QSizePolicy.Ignored
+        page.setSizePolicy(policy, policy)
+        page.adjustSize()
+    stack.adjustSize()
