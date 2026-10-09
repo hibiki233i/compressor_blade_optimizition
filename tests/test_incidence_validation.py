@@ -157,6 +157,8 @@ class SensitivityPlanTests(unittest.TestCase):
         for key in ('base_cft','turbogrid_template','template_cfx','template_cse','geometry_script_path'):
             p=self.root/key;p.write_text('synthetic fixture; never execute')
             self.config['paths'][key]=str(p)
+        self.script=self.root/'geometry_script_path'
+        self.script.write_text('param([int]$BladeCount = 10)\n# synthetic fixture; never execute')
         self.path=self.root/'config.json';self.path.write_text(json.dumps(self.config))
         self.study=self.root/'study'
 
@@ -192,6 +194,20 @@ class SensitivityPlanTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'Automatic retry'):
                 v.run_plan(self.study/'plan.json',2,True)
             self.assertEqual(evaluate.call_count,1)
+
+    def test_old_geometry_script_is_refused_before_any_point_state(self):
+        self.script.write_text('param([string]$CandidateJson)\n# copy older than the repository')
+        with self.assertRaisesRegex(self.al.GeometryScriptOutdated,'older than the repository'):
+            self.plan()
+        self.assertFalse((self.study/'plan.json').exists())
+        # a plan frozen before the check existed: run stops without touching progress
+        with patch.object(self.al,'check_geometry_script'):
+            self.plan()
+        with patch.object(self.al,'evaluate_true_cfd') as evaluate:
+            with self.assertRaises(self.al.GeometryScriptOutdated):
+                v.run_plan(self.study/'plan.json',1,False)
+            evaluate.assert_not_called()
+        self.assertFalse((self.study/'progress.json').exists())
 
     def test_interruption_records_running_and_prevents_duplicate_cfd(self):
         self.plan()

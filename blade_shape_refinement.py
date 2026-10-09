@@ -15,9 +15,20 @@ from typing import Any, Callable
 import numpy as np
 import pandas as pd
 
-from blade_shape_runtime import output_lock, case_reservations, reserve_case, atomic_json as durable_json
+from blade_shape_acquisition import hv_reference_point
+from blade_shape_runtime import output_lock, case_reservations, reserve_case, stream_seed, atomic_json as durable_json
 
 OBJECTIVES = ['Efficiency', 'MassFlow']
+
+#: Prediction intervals are mean ± INTERVAL_SIGMAS·σ (the *_2sigma diagnostics).
+INTERVAL_SIGMAS = 2.0
+#: Calibration inflates σ by max(1, q/INTERVAL_SIGMAS), where q is this quantile of
+#: |true − pred|/σ over recent prospective residuals, so that the 2σ interval
+#: would have covered 95% of them. σ is never shrunk below the model's own value.
+CALIBRATION_COVERAGE = 0.95
+#: Default for refinement.diagnostic_gate.min_coverage_2sigma: with the default
+#: diagnostic_min_points of 6, one point may fall outside its 2σ interval.
+DEFAULT_MIN_COVERAGE_2SIGMA = 5/6
 
 
 def active_indices(config: dict[str, Any]) -> list[int]:
@@ -130,7 +141,7 @@ class ConditionalSurrogate:
                 if len(d)>=int(config.get('refinement',{}).get('diagnostic_min_points',6)):
                     for j,o in enumerate(OBJECTIVES):
                         ratios = (d[f'true_{o}']-d[f'pred_{o}']).abs()/np.maximum(d[f'raw_std_{o}'],1e-12)
-                        self.scale[j] = max(1.,float(np.quantile(ratios,.95))/2.)
+                        self.scale[j] = max(1.,float(np.quantile(ratios,CALIBRATION_COVERAGE))/INTERVAL_SIGMAS)
 
     def predict(self, x: np.ndarray) -> tuple[np.ndarray,np.ndarray]:
         mean,std = self.primary.predict(x)
@@ -188,7 +199,7 @@ def hv_reference(config: dict[str,Any], frame: pd.DataFrame) -> np.ndarray | Non
     doe=clean.loc[clean.sample_phase.eq('doe')]
     basis=doe if not doe.empty else clean
     y=basis[OBJECTIVES].to_numpy(float)
-    ref=y.min(axis=0)-.05*np.maximum(np.ptp(y,axis=0),np.array([1e-6,1e-6]))
+    ref=hv_reference_point(y)
     atomic_json(path,{'objectives':OBJECTIVES,'reference':ref.tolist(),
                       'source_run_ids':basis.run_id.tolist(),'source':'DOE' if not doe.empty else 'first available successes'})
     return ref
@@ -231,8 +242,18 @@ def role_diagnostics(frame: pd.DataFrame, prefix: str = 'pred') -> pd.DataFrame:
             e=q[f'true_{o}']-q[pred]
             rows.append(dict(candidate_role=role,objective=o,prediction_channel=prefix,n=len(q),
                              mae=e.abs().mean(),rmse=np.sqrt(np.mean(e**2)),bias=e.mean(),
-                             coverage_2sigma=np.mean(e.abs()<=2*q[std]),mean_interval_width_2sigma=(4*q[std]).mean()))
+                             coverage_2sigma=np.mean(e.abs()<=INTERVAL_SIGMAS*q[std]),
+                             mean_interval_width_2sigma=(2*INTERVAL_SIGMAS*q[std]).mean()))
     return pd.DataFrame(rows,columns=columns)
+
+
+def diagnostic_min_coverage(config: dict[str,Any]) -> float:
+    """Minimum 2σ coverage for the prospective diagnostic gate (engineering acceptance policy)."""
+    gate=config.get('refinement',{}).get('diagnostic_gate',{})
+    value=gate.get('min_coverage_2sigma',DEFAULT_MIN_COVERAGE_2SIGMA) if isinstance(gate,dict) else None
+    if isinstance(value,bool) or not isinstance(value,(int,float)) or not 0<value<=1:
+        raise ValueError('refinement.diagnostic_gate.min_coverage_2sigma must be a number in (0, 1].')
+    return float(value)
 
 
 def write_diagnostics(config: dict[str,Any]) -> dict[str,Any]:
@@ -249,8 +270,10 @@ def write_diagnostics(config: dict[str,Any]) -> dict[str,Any]:
     # Historical rows without a slice identifier remain useful, but never pass a current gate.
     role_diagnostics(d).to_csv(out/'role_diagnostics_history.csv',index=False)
     minimum=int(config.get('refinement',{}).get('diagnostic_min_points',6))
+    coverage=diagnostic_min_coverage(config)
     gate={'slice_id':slice_id(config),'purpose':'prospective_ehvi_prediction',
-          'minimum_points':minimum,'passed':False,'predefined_singles_require_this_gate':False,'objectives':{}}
+          'minimum_points':minimum,'min_coverage_2sigma':coverage,'passed':False,
+          'predefined_singles_require_this_gate':False,'objectives':{}}
     for o in OBJECTIVES:
         q=table.loc[(table.candidate_role=='ehvi')&(table.objective==o)&(table.prediction_channel=='pred')]
         tol=float(config['pareto']['tolerances'][o])
@@ -259,7 +282,7 @@ def write_diagnostics(config: dict[str,Any]) -> dict[str,Any]:
         gate['objectives'][o]={'n':int(row['n']),'mae':float(row.mae),'tolerance':tol,
                                'coverage_2sigma':float(row.coverage_2sigma),
                                'mean_interval_width_2sigma':float(row.mean_interval_width_2sigma),
-                               'passed':bool(row['n']>=minimum and row.mae<=tol and row.coverage_2sigma>=5/6)}
+                               'passed':bool(row['n']>=minimum and row.mae<=tol and row.coverage_2sigma>=coverage)}
     gate['passed']=all(v['passed'] for v in gate['objectives'].values())
     atomic_json(out/'local_diagnostic_gate.json',gate)
     return gate
@@ -379,6 +402,7 @@ def run_boundary(config: dict[str,Any], path: Path, stage: str, max_new: int, re
 
 def _run_boundary(config: dict[str,Any], path: Path, stage: str, max_new: int, resume: bool) -> dict[str,Any]:
     import blade_shape_active_learning as b
+    b.check_geometry_script(config)
     path=Path(path)
     if stage not in ['singles','pairs','extension'] or max_new<=0:
         raise ValueError('Choose singles/pairs/extension and a positive CFD budget.')
@@ -550,7 +574,7 @@ def candidate_pool(config: dict[str,Any], baseline: Any, frame: pd.DataFrame, se
     existing=b.existing_vectors(config,frame)
     local=local_samples(config,baseline,int(round(count*fraction)) if regions else 0,seed,existing,regions)
     combined=np.vstack([existing,np.array(local)]) if local and len(existing) else np.array(local) if local else existing
-    global_points=b.valid_random_samples(config,baseline,count-len(local),seed+1,combined)
+    global_points=b.valid_random_samples(config,baseline,count-len(local),stream_seed(seed,'pool_global'),combined)
     values=np.array(local+global_points).reshape(-1,len(config['variables']))
     return values,['local_pool']*len(local)+['global_pool']*len(global_points)
 

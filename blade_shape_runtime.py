@@ -1,4 +1,4 @@
-"""Durable receipts and a process-level single-writer lock (Windows and POSIX)."""
+"""Durable receipts, a process-level single-writer lock (Windows and POSIX) and seed streams."""
 from __future__ import annotations
 
 from contextlib import contextmanager
@@ -10,6 +10,28 @@ import threading
 from typing import Any, Iterator
 
 _local = threading.local()
+
+#: Every random draw derives from runtime.seed as seed + offset + step * index,
+#: where index is the active-learning iteration (or the write-candidate index).
+#: The numbers are arbitrary but frozen: resuming a run regenerates the same
+#: candidates only while they stay unchanged. Streams are not guaranteed to be
+#: disjoint (at iteration 0 surrogate, nsga2 and candidate_pool share a seed);
+#: this is kept for reproducibility of existing runs.
+SEED_STREAMS: dict[str, tuple[int, int]] = {
+    'doe_fallback': (1000, 0),      # random fill when LHS yields too few feasible DOE points
+    'surrogate': (0, 1),            # surrogate fit (GP restarts, RBF ensemble resampling)
+    'nsga2': (0, 17),               # NSGA-II population and variation
+    'candidate_pool': (0, 31),      # local candidate pool; pool_global derives from this seed
+    'pool_global': (1, 0),          # global part of the candidate pool, relative to candidate_pool
+    'fallback_random': (0, 97),     # random batch fill when the surrogate path yields too few
+    'ehvi_normals': (707, 0),       # shared EHVI normal draws, the same for every iteration
+    'write_candidate': (100, 1),    # replacement for an infeasible LHS point in write-candidate
+}
+
+
+def stream_seed(seed: int, stream: str, index: int = 0) -> int:
+    offset, step = SEED_STREAMS[stream]
+    return int(seed) + offset + step * int(index)
 
 
 def atomic_json(path: Path, value: Any) -> None:

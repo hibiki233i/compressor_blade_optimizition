@@ -4,6 +4,21 @@ import math
 from typing import Any
 import numpy as np
 
+from blade_shape_runtime import stream_seed
+
+#: The hypervolume reference sits this fraction of each objective's observed
+#: range below the worst observed value, so the worst points still enclose a
+#: nonzero area. The output directory's hypervolume_reference.json keeps the
+#: value it was first written with, so changing this does not move the
+#: reference (or the hv_gain history) of an existing run.
+HV_REFERENCE_MARGIN = 0.05
+
+
+def hv_reference_point(observed: np.ndarray) -> np.ndarray:
+    """Reference point below the observed objectives (both maximised)."""
+    observed = np.asarray(observed, dtype=float).reshape(-1, 2)
+    return observed.min(axis=0)-HV_REFERENCE_MARGIN*np.maximum(np.ptp(observed, axis=0), 1e-6)
+
 
 def normal_samples(count: int, seed: int) -> np.ndarray:
     if count < 1:
@@ -48,11 +63,11 @@ def expected_hvi(config: dict[str,Any], observed: np.ndarray, mean: np.ndarray, 
     if reference is None:
         if not len(observed):
             raise ValueError('An explicit reference is required without observations.')
-        reference=observed.min(axis=0)-.05*np.maximum(np.ptp(observed,axis=0),1e-6)
+        reference=hv_reference_point(observed)
     reference=np.asarray(reference,float)
     if reference.shape!=(2,) or not np.isfinite(reference).all():
         raise ValueError('Invalid EHVI reference point.')
-    z=normal_samples(count,int(config['runtime'].get('seed',42))+707)
+    z=normal_samples(count,stream_seed(int(config['runtime'].get('seed',42)),'ehvi_normals'))
     # Evaluate every candidate with identical base samples. No ordering-dependent top-k refinement.
     draws=mean[:,None,:]+std[:,None,:]*z[None,:,:]
     gains=improvement_2d(draws,observed,reference)

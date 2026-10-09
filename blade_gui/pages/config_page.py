@@ -45,6 +45,7 @@ from ..widgets import (
     tool_button,
 )
 from .base import Page
+from blade_shape_convergence import RESTART_ITERATIONS_RANGE, RMS_TARGET_MAX  # noqa: E402 - path set by ..project
 
 
 # --------------------------------------------------------------------------
@@ -120,8 +121,10 @@ PATH_FIELDS = [
 
 RUNTIME_FIELDS = [
     Field("runtime.cfx_cores", "CFX 核数", "int", minimum=1, maximum=512),
-    Field("cfx_convergence.rms_target", "CFX RMS 门槛", "float", minimum=0.000000000001, maximum=0.00001, decimals=12, step=0.000001),
-    Field("cfx_convergence.restart_iterations", "不收敛追加迭代数", "int", minimum=1500, maximum=2000),
+    Field("cfx_convergence.rms_target", "CFX RMS 门槛", "float", minimum=0.000000000001, maximum=RMS_TARGET_MAX,
+          decimals=12, step=0.000001),
+    Field("cfx_convergence.restart_iterations", "不收敛追加迭代数", "int",
+          minimum=RESTART_ITERATIONS_RANGE[0], maximum=RESTART_ITERATIONS_RANGE[1]),
     Field("cfx_convergence.flow_analysis", "CFX Flow 名称", "text"),
     Field("runtime.n_blades", "叶片数", "int", minimum=1, maximum=200),
     Field("runtime.rpm", "声明转速 (rpm)", "float", decimals=2, step=100.0),
@@ -167,6 +170,8 @@ REFINEMENT_FIELDS = [
     Field("refinement.challenger_min_samples", "挑战模型最小样本", "int", minimum=1, maximum=100000),
     Field("refinement.diagnostic_min_points", "诊断门最少点数", "int", minimum=1, maximum=100000),
     Field("refinement.diagnostic_window", "诊断窗口", "int", minimum=1, maximum=100000),
+    Field("refinement.diagnostic_gate.min_coverage_2sigma", "诊断门最低 2σ 覆盖率", "float",
+          minimum=0.0001, maximum=1.0, decimals=4, step=0.05),
     Field("refinement.candidate_roles", "候选角色顺序", "csv", "逗号分隔"),
     Field("refinement.boundary_variables", "边界变量", "csv", "逗号分隔"),
     Field("refinement.extension.variable", "外推变量", "text"),
@@ -339,6 +344,8 @@ class ConfigPage(Page):
     def __init__(self, ctx, parent: QWidget | None = None):
         super().__init__(ctx, parent)
         self._bindings: dict[str, tuple[Field, QWidget]] = {}
+        # what each numeric widget showed right after loading (see _collect)
+        self._shown: dict[str, Any] = {}
         self._rows: dict[str, FormRow] = {}
         self._dirty = False
         self._build()
@@ -515,8 +522,14 @@ class ConfigPage(Page):
         defaults = ConvergencePolicy().to_dict()
         if isinstance(config.get("cfx_convergence", {}), dict):
             config["cfx_convergence"] = {**defaults, **config.get("cfx_convergence", {})}
+        from blade_shape_refinement import DEFAULT_MIN_COVERAGE_2SIGMA
+        refinement = config.get("refinement")
+        if isinstance(refinement, dict) and isinstance(refinement.get("diagnostic_gate", {}), dict):
+            refinement["diagnostic_gate"] = {"min_coverage_2sigma": DEFAULT_MIN_COVERAGE_2SIGMA,
+                                             **refinement.get("diagnostic_gate", {})}
         self._config_snapshot = config
         self._loaded_config_path = self.ctx.project.config_path
+        self._shown = {}
         for key, (spec, widget) in self._bindings.items():
             value = get_path(config, key)
             if value is None:
@@ -528,6 +541,7 @@ class ConfigPage(Page):
                     widget.setValue(type(widget.value())(value))
                 except (TypeError, ValueError):
                     continue
+                self._shown[key] = widget.value()
             elif spec.kind == "choice":
                 index = widget.findText(str(value))
                 if index >= 0:
@@ -562,10 +576,16 @@ class ConfigPage(Page):
         for key, (spec, widget) in self._bindings.items():
             if spec.kind == "bool":
                 set_path(config, key, bool(widget.isChecked()))
-            elif spec.kind == "int":
-                set_path(config, key, int(widget.value()))
-            elif spec.kind == "float":
-                set_path(config, key, float(widget.value()))
+            elif spec.kind in {"int", "float"}:
+                # A spin box rounds to its decimals and clamps to its range; a value the
+                # user has not changed (5/6, a threshold below the widget minimum)
+                # stays as the config holds it, and validation judges that value.
+                original = get_path(config, key)
+                if (key in self._shown and widget.value() == self._shown[key]
+                        and isinstance(original, (int, float)) and not isinstance(original, bool)
+                        and math.isfinite(original)):
+                    continue
+                set_path(config, key, (int if spec.kind == "int" else float)(widget.value()))
             elif spec.kind == "choice":
                 set_path(config, key, widget.currentText())
             elif spec.kind == "path":

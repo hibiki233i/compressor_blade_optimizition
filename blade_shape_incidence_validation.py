@@ -484,6 +484,8 @@ def make_plan(config_path: Path, candidate_path: Path | None, output: Path, step
     # Freeze the existing CLI's cwd-relative path interpretation at plan creation.
     for key,value in config['paths'].items():
         config['paths'][key]=str(Path(value).expanduser().resolve())
+    # Do not freeze a geometry script copy that every point would then reject.
+    al.check_geometry_script(config)
     baseline=al.extract_baseline(config)
     if candidate_path is not None:
         candidate=json.loads(candidate_path.read_text(encoding='utf-8'))
@@ -551,6 +553,8 @@ def run_plan(path: Path, budget: int, resume: bool) -> dict:
     for name,identity in plan['source_identities'].items():
         if identity != file_identity(name): raise ValueError(f'Frozen input changed: {name}')
     config=plan['config'];baseline=al.extract_baseline(config)
+    # Before any point is marked running: a refused script must not poison the plan.
+    al.check_geometry_script(config)
     with output_lock(root), output_lock(al.output_dir(config)):
         state_path=root/'progress.json'
         if state_path.exists():
