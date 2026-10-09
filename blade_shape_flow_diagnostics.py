@@ -16,6 +16,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from blade_shape_cfx_runner import command_file_version
+
 
 LOCATION_NAME = re.compile(r"[A-Za-z0-9 _.-]+")
 RAW_NAME = "flow_diagnostics.tsv"
@@ -64,15 +66,16 @@ def measurement_expressions(inlet: str, outlet: str, span_band: float) -> dict[s
 def render_session(
     expressions: dict[str, str], *, le_station: float = 0.22,
     te_station: float = 0.78, turbo_domain: str = "R1",
+    ansys_version: str | None = None,
 ) -> str:
-    """Build a CFX-Post 25.1 session that fails closed on absent measurements."""
+    """Build a CFX-Post session that fails closed on absent measurements."""
     if not 0 < le_station < 0.25 or not 0.75 < te_station < 1:
         raise ValueError("Near-edge stations must lie upstream of 0.25 and downstream of 0.75.")
     if not LOCATION_NAME.fullmatch(turbo_domain):
         raise ValueError(f"Unsafe turbo domain name: {turbo_domain!r}")
     lines = [
         "COMMAND FILE:",
-        "  CFX Post Version = 25.1",
+        f"  CFX Post Version = {command_file_version(ansys_version)}",
         "END",
         ">turbo init",
         ">turbo more vars",

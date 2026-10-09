@@ -124,10 +124,10 @@ RUNTIME_FIELDS = [
     Field("cfx_convergence.restart_iterations", "不收敛追加迭代数", "int", minimum=1500, maximum=2000),
     Field("cfx_convergence.flow_analysis", "CFX Flow 名称", "text"),
     Field("runtime.n_blades", "叶片数", "int", minimum=1, maximum=200),
-    Field("runtime.rpm", "转速 (rpm)", "float", decimals=2, step=100.0),
-    Field("runtime.mass_flow", "质量流量", "float", decimals=6, step=0.0001),
+    Field("runtime.rpm", "声明转速 (rpm)", "float", decimals=2, step=100.0),
+    Field("runtime.mass_flow", "声明质量流量", "float", decimals=6, step=0.0001),
     Field("runtime.p_out_pa", "出口静压 (Pa)", "float", decimals=3, step=1.0),
-    Field("runtime.alpha0", "进气角 alpha0", "float", decimals=3, step=1.0),
+    Field("runtime.alpha0", "声明进气角 alpha0", "float", decimals=3, step=1.0),
     Field("runtime.initial_samples", "初始 DOE 样本数", "int", minimum=0, maximum=10000),
     Field("runtime.iterations", "主动学习迭代数", "int", minimum=0, maximum=10000),
     Field("runtime.batch_size", "每批 CFD 点数", "int", minimum=1, maximum=64),
@@ -140,7 +140,7 @@ RUNTIME_FIELDS = [
 
 SURROGATE_FIELDS = [
     Field("surrogate.model", "代理模型", "choice", choices=("gp", "rbf_ridge_ensemble")),
-    Field("surrogate.fallback_model", "回退模型", "choice", choices=("rbf_ridge_ensemble", "gp")),
+    Field("surrogate.fallback_model", "回退模型", "choice", choices=("rbf_ridge_ensemble", "gp", "none")),
     Field("surrogate.ehvi_y_samples", "EHVI 采样数", "int", minimum=8, maximum=100000),
     Field("surrogate.ehvi_validation_samples", "EHVI 校验采样数", "int", minimum=8, maximum=1000000),
 ]
@@ -184,7 +184,7 @@ REFINEMENT_FIELDS = [
 SECTIONS: list[Section] = [
     Section("路径配置", "本机路径：JSON 中留空的项读写配置旁的 blade_shape_local.ini（不入库）；"
             "在本机不存在时仅告警，不阻止保存。", PATH_FIELDS),
-    Section("运行参数", "CFD 工况与运行预算。", RUNTIME_FIELDS),
+    Section("运行参数", "CFD 工况与运行预算。实际边界条件来自 CFX 模板；转速、流量、进气角只是声明值。", RUNTIME_FIELDS),
     Section("代理模型", "筛选候选的代理模型与 EHVI 采样设置。", SURROGATE_FIELDS),
     Section("Pareto 容差", "工程容差只影响 pareto_front.csv，严格前沿始终另存。", PARETO_FIELDS),
     Section("几何约束", "候选几何的硬约束；修改后需重新生成方案。", CONSTRAINT_FIELDS),

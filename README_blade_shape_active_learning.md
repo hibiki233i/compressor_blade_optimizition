@@ -109,8 +109,18 @@ All outputs are under `blade_al_runs` by default:
 - The preferred surrogate is Gaussian Process/Kriging via
   `sklearn.gaussian_process.GaussianProcessRegressor` with a Matern 5/2 ARD
   kernel. Acquisition uses a Monte-Carlo approximation of expected hypervolume
-  improvement, so this is an EGO/MOEGO-style loop. If `sklearn` is unavailable,
-  the code falls back to the local RBF-ridge ensemble.
+  improvement, so this is an EGO/MOEGO-style loop. `surrogate.model` accepts
+  `gp` (aliases `kriging`, `gaussian_process`) or `rbf_ridge_ensemble` (alias
+  `rbf`); any other name is a configuration error. If the GP cannot be built
+  (no `sklearn`, fewer than 3 samples) `surrogate.fallback_model` is used;
+  `none` stops instead of switching models.
+- Design variables reach CFturbo by name: `config['variables']` must contain
+  exactly `hub_beta_0..4_deg_offset`, `shroud_beta_0..4_deg_offset`,
+  `hub_theta_deg_offset` and `shroud_theta_deg_offset`, in any order. A missing
+  or extra name is rejected when the config loads.
+- `runtime.rpm`, `runtime.mass_flow` and `runtime.alpha0` are declared
+  operating-point metadata. They are hashed into the physical signature but are
+  not written to CFturbo or CFX; the CFX template owns the boundary conditions.
 - A future 28-variable splitter-blade version needs a CFturbo baseline with
   splitter geometry enabled and visible in the XML.
 
@@ -459,7 +469,11 @@ explicitly reviewed case if an old case needs recalculation. Newly frozen plans 
 the convergence policy in their physical signature.
 
 `check-pre` also emits the initial and restart convergence CCL files. This is an input
-inspection, not a solver execution. RMS acceptance does not replace conservation,
+inspection, not a solver execution. With `--def EXISTING.def` it also runs the read-only
+`cfx5cmds -read -def EXISTING.def -text definition_check.ccl` and compares every rotor
+`Angular Velocity` (literal or named expression) with the declared `runtime.rpm`; a
+mismatch or failed extraction returns 1, an unresolved CEL expression is reported as
+`unverified`. `mass_flow` and `alpha0` are not compared. RMS acceptance does not replace conservation,
 mesh independence, operating-condition or engineering review.
 
 References: [CFX output tables](https://ansyshelp.ansys.com/public/Views/Secured/corp/v251/en/cfx_solv/i1299644.html),

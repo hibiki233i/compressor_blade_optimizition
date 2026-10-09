@@ -109,8 +109,7 @@ def run(config: dict[str,Any], baseline: Any, budget: int) -> dict[str,Any]:
             existing=b.load_existing_diagnostics(config)
             if entry['run_id'] not in existing:b.append_diagnostic_row(config,diagnostic)
             r.write_diagnostics(config)
-            if hasattr(r,'update_local_search'):
-                r.update_local_search(config,entry['run_id'],metrics,result.success)
+            r.update_local_search(config,entry['run_id'],metrics,result.success)
         b.write_pareto(config,b.load_training(config))
         entry['status']='success' if result.success else 'failed'
         entry['finalized']=True

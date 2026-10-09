@@ -5,6 +5,7 @@ import glob
 import json
 import math
 import os
+import re
 import subprocess
 import time
 from dataclasses import dataclass
@@ -15,6 +16,34 @@ from blade_shape_convergence import ConvergencePolicy, assess_out, convergence_c
 
 
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
+#: Release whose command syntax the generated CFX-Pre/CFD-Post files use and were run with.
+COMMAND_FILE_VERSION = "25.1"
+
+
+def ansys_release(version: str) -> tuple[int, int]:
+    """``251``, ``v251`` or ``25.1`` -> ``(25, 1)`` (the AWP_ROOT<ver> spelling included)."""
+    text = str(version).strip().lower().removeprefix("v")
+    major, dot, minor = text.partition(".")
+    if not dot:
+        major, minor = text[:-1], text[-1:]
+    if not (major.isdigit() and minor.isdigit() and len(minor) == 1):
+        raise ValueError(f"Unrecognised ANSYS version {version!r}; expected e.g. 251 or 25.1")
+    return int(major), int(minor)
+
+
+def command_file_version(ansys_version: str | None = None) -> str:
+    """Version for the ``COMMAND FILE:`` header of generated session files.
+
+    The header declares which release's syntax the file is written in; a newer
+    release replays an older-version file with its backward-compatibility
+    handling. It therefore names the release these commands were verified with,
+    not the installed one. An installation older than that is refused because it
+    cannot be assumed to read the newer syntax. ``None`` means "unknown".
+    """
+    if ansys_version not in (None, "") and ansys_release(ansys_version) < ansys_release(COMMAND_FILE_VERSION):
+        raise ValueError(f"ANSYS {ansys_version} is older than the {COMMAND_FILE_VERSION} command syntax "
+                         "these scripts were written for; verify them on that release first.")
+    return COMMAND_FILE_VERSION
 
 
 @dataclass
@@ -71,6 +100,7 @@ def write_cfx_pre_inputs(
     *,
     p_out_pa: float,
     template_cfx: str | Path,
+    ansys_version: str | None = None,
 ) -> dict[str, Path]:
     work = Path(working_dir)
     work.mkdir(parents=True, exist_ok=True)
@@ -97,7 +127,7 @@ def write_cfx_pre_inputs(
 
     pre_script.write_text(
         f"""COMMAND FILE:
-  CFX Pre Version = 25.1
+  CFX Pre Version = {command_file_version(ansys_version)}
 END
 >load filename={_cfx_path(template_cfx)}
 >update
@@ -310,17 +340,113 @@ def _run_cfx_pipeline(
     return CfxResult(True, metrics, 'Success (final RMS accepted; recorded Pre/Solve/Post completion)')
 
 
+# runtime.rpm / mass_flow / alpha0 are declared operating-point metadata: they
+# enter the physical signature but are never written to CFX. The template owns
+# the real boundary conditions, so check-pre can compare the rotor speed in a
+# solver definition against the declared rpm (MassFlow is an objective under the
+# back-pressure outlet, so it cannot be compared to an input).
+RPM_PER_UNIT = {'rev min^-1': 1.0, 'rev s^-1': 60.0,
+                'radian s^-1': 30.0 / math.pi, 'rad s^-1': 30.0 / math.pi, 's^-1': 30.0 / math.pi}
+_QUANTITY = re.compile(r'^([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)\s*\[\s*([^\]]+?)\s*\]$')
+_BLOCK = re.compile(r'^[A-Z][A-Z0-9 _]*:')  # "DOMAIN: R1", "EXPRESSIONS:"
+_ASSIGNMENT = re.compile(r'^\s*([^=:]+?)\s*=\s*(.*?)\s*$')
+
+
+def extract_def_ccl(cfx_bin_dir: str | Path, definition: str | Path, output: str | Path) -> Path:
+    """Read-only: ``cfx5cmds -read -def <def> -text <ccl>`` writes the definition's CCL."""
+    tool, output = Path(cfx_bin_dir) / 'cfx5cmds.exe', Path(output)
+    if not tool.is_file():
+        raise FileNotFoundError(f'Missing CFX executable: {tool}')
+    if not Path(definition).is_file():
+        raise FileNotFoundError(f'Definition file not found: {definition}')
+    if output.exists():
+        output.unlink()
+    code = _run_logged([str(tool), '-read', '-def', str(definition), '-text', str(output)],
+                       output.parent, output.with_suffix('.log'))
+    if code != 0 or not output.is_file():
+        raise RuntimeError(f'cfx5cmds failed (exit {code}); see {output.with_suffix(".log")}')
+    return output
+
+
+def _ccl_expressions(text: str) -> dict[str, str]:
+    expressions, depth, inside = {}, 0, None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if _BLOCK.match(stripped) and '=' not in stripped:
+            depth += 1
+            if stripped.upper() == 'EXPRESSIONS:':
+                inside = depth
+        elif stripped.upper() == 'END':
+            inside = None if inside == depth else inside
+            depth -= 1
+        elif inside == depth and (match := _ASSIGNMENT.match(line)):
+            expressions[match[1]] = match[2]
+    return expressions
+
+
+def _rpm_value(text: str, expressions: dict[str, str]) -> float | None:
+    for _ in range(8):  # follow "Angular Velocity = Speed" through named expressions
+        if (match := _QUANTITY.match(text.strip())):
+            factor = RPM_PER_UNIT.get(' '.join(match[2].split()))
+            return None if factor is None else abs(float(match[1])) * factor
+        if text.strip() not in expressions:
+            return None
+        text = expressions[text.strip()]
+    return None
+
+
+def rotor_speed_report(ccl_text: str, declared_rpm: float, *, relative_tolerance: float = 1e-4) -> dict[str, object]:
+    """Compare every ``Angular Velocity`` in the CCL with ``runtime.rpm``.
+
+    ``mismatch`` if any resolved speed differs, ``unverified`` if one cannot be
+    resolved (non-trivial CEL, unknown unit) or none is present, else ``match``.
+    """
+    expressions = _ccl_expressions(ccl_text)
+    found = [m[2] for line in ccl_text.splitlines()
+             if (m := _ASSIGNMENT.match(line)) and m[1] == 'Angular Velocity']
+    speeds = [_rpm_value(value, expressions) for value in found]
+    resolved = [v for v in speeds if v is not None]
+    declared = abs(float(declared_rpm))
+    if any(abs(v - declared) > relative_tolerance * max(declared, 1.0) for v in resolved):
+        status = 'mismatch'
+    elif not resolved or len(resolved) < len(speeds):
+        status = 'unverified'
+    else:
+        status = 'match'
+    return {'status': status, 'declared_rpm': declared, 'definition_rpm': resolved,
+            'unresolved': [v for v, s in zip(found, speeds) if s is None]}
+
+
 def _load_config(path: str | Path) -> dict[str, object]:
     from blade_shape_local_config import apply_local_paths
     return apply_local_paths(json.loads(Path(path).read_text(encoding="utf-8")), path)
 
 
-def check_cfx_pre_inputs(config_path: str | Path, working_dir: str | Path) -> int:
+def check_cfx_pre_inputs(config_path: str | Path, working_dir: str | Path,
+                         definition: str | Path | None = None) -> int:
     with output_lock(working_dir):
-        return _check_cfx_pre_inputs(config_path,working_dir)
+        return _check_cfx_pre_inputs(config_path,working_dir,definition)
 
 
-def _check_cfx_pre_inputs(config_path: str | Path, working_dir: str | Path) -> int:
+def _check_definition(config: dict, work: Path, definition: str | Path) -> bool:
+    """Print the rotor-speed comparison; False only on a mismatch or failed extraction."""
+    runtime = config["runtime"]
+    try:
+        ccl = extract_def_ccl(config["paths"]["cfx_bin_dir"], definition, work / "definition_check.ccl")
+        report = rotor_speed_report(ccl.read_text(encoding="utf-8", errors="replace"), float(runtime["rpm"]))
+    except (OSError, RuntimeError) as exc:
+        print(f"Operating point: could not read {definition}: {exc}")
+        return False
+    print(f"Operating point ({definition}): {report['status']}; runtime.rpm={report['declared_rpm']:g}, "
+          f"Angular Velocity [rpm]={', '.join(f'{v:g}' for v in report['definition_rpm']) or 'none'}")
+    for value in report["unresolved"]:
+        print(f"  - unresolved Angular Velocity = {value}")
+    print("runtime.mass_flow and runtime.alpha0 are declared only; they are not compared or written to CFX.")
+    return report["status"] != "mismatch"
+
+
+def _check_cfx_pre_inputs(config_path: str | Path, working_dir: str | Path,
+                          definition: str | Path | None = None) -> int:
     config = _load_config(config_path)
     paths = config["paths"]
     runtime = config["runtime"]
@@ -363,7 +489,12 @@ def _check_cfx_pre_inputs(config_path: str | Path, working_dir: str | Path) -> i
         print("Stale tokens found in generated CFX-Pre file:")
         for token in stale:
             print(f"  - {token}")
-    return 1 if missing or stale else 0
+    if definition is None:
+        print("Operating point: not checked (pass --def with a solver definition from this template).")
+        consistent = True
+    else:
+        consistent = _check_definition(config, work, definition)
+    return 1 if missing or stale or not consistent else 0
 
 
 def main() -> None:
@@ -372,9 +503,11 @@ def main() -> None:
     check = sub.add_parser("check-pre", help="Generate and check CFX-Pre input files without running CFX.")
     check.add_argument("--config", default="blade_shape_config.json")
     check.add_argument("--working-dir", required=True)
+    check.add_argument("--def", dest="definition",
+                       help="Existing .def/.res to compare its rotor speed with runtime.rpm (read-only, uses cfx5cmds).")
     args = parser.parse_args()
     if args.command == "check-pre":
-        raise SystemExit(check_cfx_pre_inputs(args.config, args.working_dir))
+        raise SystemExit(check_cfx_pre_inputs(args.config, args.working_dir, args.definition))
 
 
 if __name__ == "__main__":

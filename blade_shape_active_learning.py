@@ -52,6 +52,12 @@ SAMPLE_COLUMNS = [
     "design_role",
 ]
 STATUS_COLUMNS = ["status", "failure_stage", "message", "case_dir", "run_id"]
+# Design variables are mapped to the CFturbo meanline by name, never by position.
+HUB_BETA_VARIABLES = tuple(f"hub_beta_{i}_deg_offset" for i in range(5))
+SHROUD_BETA_VARIABLES = tuple(f"shroud_beta_{i}_deg_offset" for i in range(5))
+HUB_THETA_VARIABLE = "hub_theta_deg_offset"
+SHROUD_THETA_VARIABLE = "shroud_theta_deg_offset"
+GEOMETRY_VARIABLES = (*HUB_BETA_VARIABLES, *SHROUD_BETA_VARIABLES, HUB_THETA_VARIABLE, SHROUD_THETA_VARIABLE)
 
 
 @dataclass
@@ -95,6 +101,8 @@ def load_config(path: str | Path) -> dict[str, Any]:
         where = local["ini"] if local.get("found") else f"{local['ini']} (not found; copy blade_shape_local.ini.example)"
         print(f"Warning: empty paths {', '.join(empty)}; set them in {where}", file=sys.stderr)
     ConvergencePolicy.from_config(payload)
+    geometry_indices(payload)
+    surrogate_choice(payload)
     refinement.active_indices(payload)
     return payload
 
@@ -175,12 +183,37 @@ def sample_to_vector(config: dict[str, Any], sample: dict[str, Any]) -> np.ndarr
     return np.array([float(sample[name]) for name in variable_names(config)], dtype=float)
 
 
+def geometry_indices(config: dict[str, Any]) -> dict[str, Any]:
+    """Vector positions of the meanline offsets, looked up by variable name.
+
+    Every geometry name must be present exactly once and no other name may
+    appear: an unmapped variable would be sampled and modelled but never reach
+    CFturbo.
+    """
+    names = variable_names(config)
+    missing = [name for name in GEOMETRY_VARIABLES if name not in names]
+    unknown = [name for name in names if name not in GEOMETRY_VARIABLES]
+    if missing or unknown or len(names) != len(set(names)):
+        raise ValueError(
+            "config['variables'] must name each meanline offset exactly once; "
+            f"missing: {missing or 'none'}; not mapped to geometry: {unknown or 'none'}"
+        )
+    position = {name: index for index, name in enumerate(names)}
+    return {
+        "hub_beta": [position[name] for name in HUB_BETA_VARIABLES],
+        "shroud_beta": [position[name] for name in SHROUD_BETA_VARIABLES],
+        "hub_theta": position[HUB_THETA_VARIABLE],
+        "shroud_theta": position[SHROUD_THETA_VARIABLE],
+    }
+
+
 def candidate_geometry(config: dict[str, Any], baseline: BaselineShape, x: np.ndarray) -> dict[str, Any]:
     offsets = np.array(x, dtype=float)
-    hub_offsets = np.deg2rad(offsets[0:5])
-    shroud_offsets = np.deg2rad(offsets[5:10])
-    hub_theta = baseline.hub_theta_rad + math.radians(float(offsets[10]))
-    shroud_theta = baseline.shroud_theta_rad + math.radians(float(offsets[11]))
+    index = geometry_indices(config)
+    hub_offsets = np.deg2rad(offsets[index["hub_beta"]])
+    shroud_offsets = np.deg2rad(offsets[index["shroud_beta"]])
+    hub_theta = baseline.hub_theta_rad + math.radians(float(offsets[index["hub_theta"]]))
+    shroud_theta = baseline.shroud_theta_rad + math.radians(float(offsets[index["shroud_theta"]]))
     return {
         "hub_beta_rad": (baseline.hub_beta_rad + hub_offsets).tolist(),
         "shroud_beta_rad": (baseline.shroud_beta_rad + shroud_offsets).tolist(),
@@ -219,7 +252,9 @@ def constraint_violations(config: dict[str, Any], baseline: BaselineShape, x: np
         violations.append("hub_beta_offset")
     if np.max(np.abs(np.rad2deg(shroud - baseline.shroud_beta_rad))) > max_beta_offset + 1e-9:
         violations.append("shroud_beta_offset")
-    if abs(float(x[10])) > max_theta_offset + 1e-9 or abs(float(x[11])) > max_theta_offset + 1e-9:
+    index = geometry_indices(config)
+    if (abs(float(x[index["hub_theta"]])) > max_theta_offset + 1e-9
+            or abs(float(x[index["shroud_theta"]])) > max_theta_offset + 1e-9):
         violations.append("theta_offset")
 
     hub_base_step = np.max(np.abs(np.diff(np.rad2deg(_interp_beta(baseline.hub_x, baseline.hub_beta_rad)))))
@@ -598,13 +633,45 @@ class GpKrigingSurrogate:
         return np.column_stack(means), np.column_stack(stds)
 
 
+SURROGATE_MODELS = {
+    "gp": "gp", "kriging": "gp", "gaussian_process": "gp",
+    "rbf": "rbf_ridge_ensemble", "rbf_ridge_ensemble": "rbf_ridge_ensemble",
+}
+NO_FALLBACK = "none"
+
+
+def surrogate_choice(config: dict[str, Any]) -> tuple[str, str]:
+    """Canonical (model, fallback_model); unknown names are errors, not silent RBF."""
+    settings = config.get("surrogate", {})
+    model = str(settings.get("model", "gp")).lower()
+    fallback = str(settings.get("fallback_model", "rbf_ridge_ensemble")).lower()
+    if model not in SURROGATE_MODELS:
+        raise ValueError(f"surrogate.model must be one of {sorted(SURROGATE_MODELS)}, got {model!r}")
+    if fallback != NO_FALLBACK and fallback not in SURROGATE_MODELS:
+        raise ValueError(f"surrogate.fallback_model must be one of {sorted(SURROGATE_MODELS)} "
+                         f"or {NO_FALLBACK!r}, got {fallback!r}")
+    return SURROGATE_MODELS[model], fallback if fallback == NO_FALLBACK else SURROGATE_MODELS[fallback]
+
+
+def _gp_unavailable(x_train: np.ndarray) -> str:
+    if GaussianProcessRegressor is None:
+        return "scikit-learn is unavailable"
+    if len(x_train) < 3:
+        return f"GP needs at least 3 samples, got {len(x_train)}"
+    return ""
+
+
 def fit_surrogate(config: dict[str, Any], x_train: np.ndarray, y_train: np.ndarray, seed: int) -> Any:
-    requested = str(config.get("surrogate", {}).get("model", "gp")).lower()
-    if requested in {"gp", "kriging", "gaussian_process"} and GaussianProcessRegressor is not None and len(x_train) >= 3:
-        return GpKrigingSurrogate(config, seed=seed).fit(x_train, y_train)
-    if requested in {"gp", "kriging", "gaussian_process"} and GaussianProcessRegressor is None:
-        print("[surrogate] scikit-learn is unavailable; falling back to RBF-ridge ensemble.")
-    return RbfRidgeEnsemble(config, seed=seed).fit(x_train, y_train)
+    model, fallback = surrogate_choice(config)
+    reason = _gp_unavailable(x_train) if model == "gp" else ""
+    if not reason:
+        return (GpKrigingSurrogate(config, seed=seed) if model == "gp"
+                else RbfRidgeEnsemble(config, seed=seed)).fit(x_train, y_train)
+    if fallback == NO_FALLBACK or (fallback == "gp" and _gp_unavailable(x_train)):
+        raise RuntimeError(f"Surrogate {model} unavailable ({reason}) and fallback_model={fallback!r} cannot replace it.")
+    print(f"[surrogate] {reason}; using fallback_model {fallback}.")
+    return (GpKrigingSurrogate(config, seed=seed) if fallback == "gp"
+            else RbfRidgeEnsemble(config, seed=seed)).fit(x_train, y_train)
 
 
 def pairwise_distances(a: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -1173,11 +1240,9 @@ def _run_loop(args: argparse.Namespace, config: dict[str, Any]) -> None:
             config['_ehvi_reference']=reference.tolist()
             diagnostics=pd.read_csv(diagnostics_csv_path(config)) if diagnostics_csv_path(config).exists() else pd.DataFrame()
             surrogate=refinement.ConditionalSurrogate(config,success,fit_surrogate,seed+iteration,diagnostics)
-            regions=refinement.local_regions(config,df) if hasattr(refinement,'local_regions') else []
+            regions=refinement.local_regions(config,df)
             nsga=nsga2_candidates(config,baseline,surrogate,existing,seed+iteration*17,regions=regions)
-            pool,sources=refinement.candidate_pool(config,baseline,df,seed+iteration*31,regions) if hasattr(refinement,'candidate_pool') else (
-                np.array(valid_random_samples(config,baseline,runtime['candidate_pool_size'],seed+iteration*31,existing)),
-                ['random_pool']*runtime['candidate_pool_size'])
+            pool,sources=refinement.candidate_pool(config,baseline,df,seed+iteration*31,regions)
             candidates=np.vstack([nsga,pool]) if len(pool) else nsga
             selected=select_acquisition(config,baseline,candidates,['nsga_local' if regions else 'nsga']*len(nsga)+sources,
                                           surrogate,existing,success[OBJECTIVE_COLUMNS].to_numpy(float),batch)
