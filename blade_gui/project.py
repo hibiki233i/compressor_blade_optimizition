@@ -106,6 +106,10 @@ def validate_config(config: dict[str, Any]) -> list[Issue]:
         cli_module().surrogate_choice(config)
     except (ValueError, TypeError, AttributeError) as exc:
         issues.append(Issue("error", f"代理模型设置无效：{exc}"))
+    try:
+        refinement_module().diagnostic_min_coverage(config)
+    except (ValueError, TypeError, AttributeError) as exc:
+        issues.append(Issue("error", f"诊断门设置无效：{exc}"))
 
     variables = config.get("variables")
     if not isinstance(variables, list) or not variables:

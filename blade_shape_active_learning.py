@@ -5,6 +5,7 @@ import csv
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -21,7 +22,7 @@ from blade_shape_local_config import apply_local_paths
 import blade_shape_refinement as refinement
 from blade_shape_acquisition import expected_hvi
 import blade_shape_pending as pending
-from blade_shape_runtime import output_lock, file_identity, atomic_json, case_reservations
+from blade_shape_runtime import output_lock, file_identity, atomic_json, case_reservations, stream_seed
 
 try:
     from scipy.stats import qmc
@@ -104,6 +105,7 @@ def load_config(path: str | Path) -> dict[str, Any]:
     geometry_indices(payload)
     surrogate_choice(payload)
     refinement.active_indices(payload)
+    refinement.diagnostic_min_coverage(payload)
     return payload
 
 
@@ -1010,7 +1012,50 @@ def write_candidate_files(
     return candidate_path
 
 
+class GeometryScriptOutdated(RuntimeError):
+    """The configured geometry script copy predates a parameter the CLI passes."""
+
+
+def script_parameters(text: str) -> set[str]:
+    """Lower-case names declared in a PowerShell script's top-level ``param(...)`` block."""
+    code = re.sub(r"<#.*?#>", "", text, flags=re.S)
+    code = "\n".join(line.split("#", 1)[0] for line in code.splitlines()).lstrip("\ufeff \t\r\n")
+    # The script-level param block is the first statement, optionally after [CmdletBinding()].
+    code = re.sub(r"^(\[\s*CmdletBinding\s*\([^)]*\)\s*\]\s*)", "", code, flags=re.I)
+    match = re.match(r"param\s*\(", code, flags=re.I)
+    if not match:
+        return set()
+    depth, start = 1, match.end()
+    for end in range(start, len(code)):
+        depth += {"(": 1, ")": -1}.get(code[end], 0)
+        if depth == 0:
+            return {name.lower() for name in re.findall(r"\$(\w+)", code[start:end])}
+    return set()
+
+
+def check_geometry_script(config: dict[str, Any]) -> None:
+    """Refuse a geometry script copy that cannot take -BladeCount before any case starts.
+
+    A missing or unreadable script is left to run_geometry, which records it as
+    an environment failure as before.
+    """
+    path = Path(str(config["paths"].get("geometry_script_path") or ""))
+    if not path.is_file():
+        return
+    try:
+        text = path.read_text(encoding="utf-8-sig", errors="replace")
+    except OSError:
+        return
+    if "bladecount" not in script_parameters(text):
+        raise GeometryScriptOutdated(
+            f"{path} does not declare a BladeCount parameter: this script copy is older than the repository. "
+            "Copy Run-BladeShapeGeometryMeshing.ps1 from the repository to paths.geometry_script_path. "
+            "The script path and SHA-256 are part of the physical signature, so a pending queue or boundary "
+            "plan created with the old copy will then refuse to resume; inspect it before continuing.")
+
+
 def run_geometry(config: dict[str, Any], candidate_path: Path, dry_run: bool = False) -> tuple[bool, str]:
+    check_geometry_script(config)
     paths = config["paths"]
     cmd = [
         str(paths["powershell_exe"]),
@@ -1033,12 +1078,9 @@ def run_geometry(config: dict[str, Any], candidate_path: Path, dry_run: bool = F
         "-TurboGridTemplate",
         str(paths["turbogrid_template"]),
     ]
-    # The mesh periodicity must match the count CFX uses to scale MassFlow/Power.
-    # The script used to hard-code 10; only pass the flag when it differs, so an
-    # older script copy still works for 10 blades and fails loudly otherwise.
-    n_blades = int(config["runtime"]["n_blades"])
-    if n_blades != 10:
-        cmd += ["-BladeCount", str(n_blades)]
+    # The mesh periodicity must match the count CFX uses to scale MassFlow/Power;
+    # check_geometry_script has refused script copies without this parameter.
+    cmd += ["-BladeCount", str(int(config["runtime"]["n_blades"]))]
     if dry_run:
         cmd.append("-DryRun")
     log_path = candidate_path.parent / ("geometry_dry_run.log" if dry_run else "geometry.log")
@@ -1124,6 +1166,7 @@ def evaluate_true_cfd(
             row.update(failure_stage='geometry',message='Unverified legacy geometry/CFX artifacts; no geometry completion receipt.')
             append_row(config,row)
             return CaseResult(row,False)
+        check_geometry_script(config)
         atomic_json(receipt_path,{'signature':signature,'status':'running'})
         try:
             ok,msg = run_geometry(config,candidate_path,dry_run=False)
@@ -1187,6 +1230,7 @@ def evaluate_true_cfd(
 
 def run_loop(args: argparse.Namespace) -> None:
     config = load_config(args.config)
+    check_geometry_script(config)
     with output_lock(output_dir(config)):
         _run_loop(args, config)
 
@@ -1220,7 +1264,7 @@ def _run_loop(args: argparse.Namespace, config: dict[str, Any]) -> None:
                 initial.append(x)
                 existing = np.vstack([existing,x[None,:]]) if existing.size else x[None,:]
         if len(initial) < needed:
-            initial.extend(valid_random_samples(config,baseline,needed-len(initial),seed+1000,existing))
+            initial.extend(valid_random_samples(config,baseline,needed-len(initial),stream_seed(seed,'doe_fallback'),existing))
         candidates = fallback_selections(initial, 'doe')
         index = next_case_index(config,df)
         pending.enqueue(config,candidates,[{'sample_phase':'doe','doe_index':index+i} for i in range(len(candidates))])
@@ -1239,18 +1283,18 @@ def _run_loop(args: argparse.Namespace, config: dict[str, Any]) -> None:
             reference=refinement.hv_reference(config,df)
             config['_ehvi_reference']=reference.tolist()
             diagnostics=pd.read_csv(diagnostics_csv_path(config)) if diagnostics_csv_path(config).exists() else pd.DataFrame()
-            surrogate=refinement.ConditionalSurrogate(config,success,fit_surrogate,seed+iteration,diagnostics)
+            surrogate=refinement.ConditionalSurrogate(config,success,fit_surrogate,stream_seed(seed,'surrogate',iteration),diagnostics)
             regions=refinement.local_regions(config,df)
-            nsga=nsga2_candidates(config,baseline,surrogate,existing,seed+iteration*17,regions=regions)
-            pool,sources=refinement.candidate_pool(config,baseline,df,seed+iteration*31,regions)
+            nsga=nsga2_candidates(config,baseline,surrogate,existing,stream_seed(seed,'nsga2',iteration),regions=regions)
+            pool,sources=refinement.candidate_pool(config,baseline,df,stream_seed(seed,'candidate_pool',iteration),regions)
             candidates=np.vstack([nsga,pool]) if len(pool) else nsga
             selected=select_acquisition(config,baseline,candidates,['nsga_local' if regions else 'nsga']*len(nsga)+sources,
                                           surrogate,existing,success[OBJECTIVE_COLUMNS].to_numpy(float),batch)
             if len(selected)<batch:
-                extra=valid_random_samples(config,baseline,batch-len(selected),seed+iteration*97,existing)
+                extra=valid_random_samples(config,baseline,batch-len(selected),stream_seed(seed,'fallback_random',iteration),existing)
                 selected.extend(fallback_selections(extra,'fallback_random',len(selected)+1))
         else:
-            selected=fallback_selections(valid_random_samples(config,baseline,batch,seed+iteration*97,existing),'fallback_random')
+            selected=fallback_selections(valid_random_samples(config,baseline,batch,stream_seed(seed,'fallback_random',iteration),existing),'fallback_random')
         if not selected:
             raise RuntimeError('No feasible candidates could be generated; no CFD was started.')
         if len(success)>=4:
@@ -1276,7 +1320,8 @@ def write_candidate_command(args: argparse.Namespace) -> None:
     samples = lhs_samples(config, count, seed)
     x = samples[int(args.index)]
     if constraint_violations(config, baseline, x):
-        alternatives = valid_random_samples(config, baseline, 1, seed + int(args.index) + 100, np.empty((0, len(x))))
+        alternatives = valid_random_samples(config, baseline, 1, stream_seed(seed, 'write_candidate', int(args.index)),
+                                            np.empty((0, len(x))))
         if not alternatives:
             raise SystemExit("Could not generate a valid candidate.")
         x = alternatives[0]

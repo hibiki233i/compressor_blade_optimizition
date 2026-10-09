@@ -121,6 +121,14 @@ All outputs are under `blade_al_runs` by default:
 - `runtime.rpm`, `runtime.mass_flow` and `runtime.alpha0` are declared
   operating-point metadata. They are hashed into the physical signature but are
   not written to CFturbo or CFX; the CFX template owns the boundary conditions.
+- `runtime.n_blades` is always passed to the geometry script as `-BladeCount`
+  (TurboGrid periodicity) and scales per-passage MassFlow/Power. Before `run`,
+  `run-boundary` or any geometry call, the script at `paths.geometry_script_path`
+  must declare `BladeCount` in its `param(...)` block; an older copy stops with
+  "this script copy is older than the repository" before a case is started.
+  The script path and SHA-256 are part of the physical signature, so replacing
+  the copy makes a pending queue or frozen boundary plan created with the old one
+  refuse to resume ("Inputs changed"); finish or inspect those first.
 - A future 28-variable splitter-blade version needs a CFturbo baseline with
   splitter geometry enabled and visible in the XML.
 
@@ -163,7 +171,15 @@ Ordinary AL persists an objective reference in `hypervolume_reference.json`
 using initial successful DOE minima minus 5% of the DOE spans (a 1e-6 span floor),
 or the first available successes if DOE is absent. Acquisition and actual
 progress share this reference. The pure acquisition helper uses the current
-observed range if called directly without an explicit reference.
+observed range if called directly without an explicit reference. Both use
+`hv_reference_point` and `HV_REFERENCE_MARGIN = 0.05` in
+`blade_shape_acquisition.py`; an existing output directory keeps the reference
+already written to `hypervolume_reference.json`, so changing the constant only
+affects new runs.
+
+Random draws derive from `runtime.seed` through the `SEED_STREAMS` table in
+`blade_shape_runtime.py` (seed + offset + step × iteration). The offsets are
+frozen: changing one changes which candidates a resumed run regenerates.
 
 `refinement.local_search` controls up to three regions around same-slice true
 Pareto representatives: highest efficiency, highest flow and a balanced point.
@@ -203,12 +219,17 @@ No CFD is run. Outputs:
   MAE, RMSE, bias, +/-2sigma coverage and full interval width (4sigma), by role.
 - `local_diagnostic_gate.json`: EHVI-role minimum count, MAE/tolerance and coverage
   checks. The configured recent window is 18 points and minimum count is 6.
+  Coverage must reach `refinement.diagnostic_gate.min_coverage_2sigma` (default
+  5/6, i.e. one miss in six points); the threshold used is written to the JSON as
+  `min_coverage_2sigma` next to `minimum_points`.
   This is advisory for model-led decisions. It is not required for predefined
   boundary points and does not certify numerical CFD convergence.
 
 The primary std initially has scale 1. After at least six earlier prospective
 residuals of the same slice and model identifier, each objective uses
-`max(1, quantile(abs(error)/raw_std, 0.95)/2)`. The scale uses earlier data only.
+`max(1, quantile(abs(error)/raw_std, 0.95)/2)`, so the 2σ interval would have
+covered 95% of those residuals (`CALIBRATION_COVERAGE` and `INTERVAL_SIGMAS` in
+`blade_shape_refinement.py`). The scale uses earlier data only.
 Small-sample coverage and a wide interval do not imply accurate mean prediction.
 The challenger currently reports its own uncalibrated std. Compare model errors
 on common new cases; differing availability counts are not a fair model contest.
@@ -427,7 +448,10 @@ python -m unittest tests.test_gui -v   # runs offscreen; widget tests skip witho
 ```
 
 Old configs without this section use these defaults. The RMS target must be positive
-and no looser than 1e-5; the extra budget must be an integer between 1500 and 2000.
+and no looser than 1e-5 (`RMS_TARGET_MAX`); the extra budget must be an integer
+between 1500 and 2000 (`RESTART_ITERATIONS_RANGE`, empirical for this impeller:
+earlier restarts that reached the target did so within that many iterations). Both limits live in
+`blade_shape_convergence.py`, which the GUI field ranges and help text also read.
 The flow name must match the actual CFX analysis in the template. The first solve
 keeps the template iteration limit and explicitly applies the RMS target using a
 separate `convergence.ccl` overlay.
@@ -448,7 +472,7 @@ missing limit declaration or truncated output never triggers an automatic restar
 The continuation reads the last `.res` using `-initial-file`, with the same `.def`
 and boundary-condition overlay. It **resets the iteration counter**, rather than
 using `-continue-from-file` to inherit the previous history. This bounds the new run
-to exactly the configured maximum of 1500–2000 additional iterations, independent
+to exactly the configured maximum (within `RESTART_ITERATIONS_RANGE`, 1500–2000) additional iterations, independent
 of old accumulated counters. `restart_convergence.ccl` sets that limit and the RMS
 target. The flow field is reused; previous solver monitor/iteration history is not
 continued. Early convergence may stop the new run before its maximum.

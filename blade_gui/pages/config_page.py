@@ -45,6 +45,7 @@ from ..widgets import (
     tool_button,
 )
 from .base import Page
+from blade_shape_convergence import RESTART_ITERATIONS_RANGE, RMS_TARGET_MAX  # noqa: E402 - path set by ..project
 
 
 # --------------------------------------------------------------------------
@@ -120,8 +121,10 @@ PATH_FIELDS = [
 
 RUNTIME_FIELDS = [
     Field("runtime.cfx_cores", "CFX 核数", "int", minimum=1, maximum=512),
-    Field("cfx_convergence.rms_target", "CFX RMS 门槛", "float", minimum=0.000000000001, maximum=0.00001, decimals=12, step=0.000001),
-    Field("cfx_convergence.restart_iterations", "不收敛追加迭代数", "int", minimum=1500, maximum=2000),
+    Field("cfx_convergence.rms_target", "CFX RMS 门槛", "float", minimum=0.000000000001, maximum=RMS_TARGET_MAX,
+          decimals=12, step=0.000001),
+    Field("cfx_convergence.restart_iterations", "不收敛追加迭代数", "int",
+          minimum=RESTART_ITERATIONS_RANGE[0], maximum=RESTART_ITERATIONS_RANGE[1]),
     Field("cfx_convergence.flow_analysis", "CFX Flow 名称", "text"),
     Field("runtime.n_blades", "叶片数", "int", minimum=1, maximum=200),
     Field("runtime.rpm", "声明转速 (rpm)", "float", decimals=2, step=100.0),
@@ -167,6 +170,8 @@ REFINEMENT_FIELDS = [
     Field("refinement.challenger_min_samples", "挑战模型最小样本", "int", minimum=1, maximum=100000),
     Field("refinement.diagnostic_min_points", "诊断门最少点数", "int", minimum=1, maximum=100000),
     Field("refinement.diagnostic_window", "诊断窗口", "int", minimum=1, maximum=100000),
+    Field("refinement.diagnostic_gate.min_coverage_2sigma", "诊断门最低 2σ 覆盖率", "float",
+          minimum=0.01, maximum=1.0, decimals=4, step=0.05),
     Field("refinement.candidate_roles", "候选角色顺序", "csv", "逗号分隔"),
     Field("refinement.boundary_variables", "边界变量", "csv", "逗号分隔"),
     Field("refinement.extension.variable", "外推变量", "text"),
@@ -515,6 +520,11 @@ class ConfigPage(Page):
         defaults = ConvergencePolicy().to_dict()
         if isinstance(config.get("cfx_convergence", {}), dict):
             config["cfx_convergence"] = {**defaults, **config.get("cfx_convergence", {})}
+        from blade_shape_refinement import DEFAULT_MIN_COVERAGE_2SIGMA
+        refinement = config.get("refinement")
+        if isinstance(refinement, dict) and isinstance(refinement.get("diagnostic_gate", {}), dict):
+            refinement["diagnostic_gate"] = {"min_coverage_2sigma": DEFAULT_MIN_COVERAGE_2SIGMA,
+                                             **refinement.get("diagnostic_gate", {})}
         self._config_snapshot = config
         self._loaded_config_path = self.ctx.project.config_path
         for key, (spec, widget) in self._bindings.items():
@@ -565,6 +575,11 @@ class ConfigPage(Page):
             elif spec.kind == "int":
                 set_path(config, key, int(widget.value()))
             elif spec.kind == "float":
+                # The spin box rounds to its decimals; an untouched value (e.g. 5/6) keeps full precision.
+                original = get_path(config, key)
+                if (isinstance(original, (int, float)) and not isinstance(original, bool)
+                        and math.isfinite(original) and round(float(original), widget.decimals()) == widget.value()):
+                    continue
                 set_path(config, key, float(widget.value()))
             elif spec.kind == "choice":
                 set_path(config, key, widget.currentText())

@@ -5,18 +5,30 @@ import math
 import re
 from dataclasses import asdict, dataclass
 
+#: Loosest accepted final RMS residual (max over equations in the last .out
+#: block). 1e-5 is the usual "well converged" level for steady turbomachinery
+#: runs; configs may only tighten it.
+RMS_TARGET_MAX = 1e-5
+#: Inclusive bounds for the single bounded continuation after an initial solve
+#: exhausts its iterations without meeting the RMS target. Empirical, from this
+#: impeller: earlier non-converged cases that reached the RMS target from the
+#: restart did so within about 1500–2000 extra iterations; fewer rarely
+#: converged and more rarely helped. Revisit for a different machine or mesh.
+RESTART_ITERATIONS_RANGE = (1500, 2000)
+
 
 @dataclass(frozen=True)
 class ConvergencePolicy:
-    rms_target: float = 1e-5
-    restart_iterations: int = 2000
+    rms_target: float = RMS_TARGET_MAX
+    restart_iterations: int = RESTART_ITERATIONS_RANGE[1]
     flow_analysis: str = 'Flow Analysis 1'
 
     def __post_init__(self) -> None:
-        if not math.isfinite(self.rms_target) or not 0 < self.rms_target <= 1e-5:
-            raise ValueError('CFX RMS target must be positive and <= 1e-5')
-        if type(self.restart_iterations) is not int or not 1500 <= self.restart_iterations <= 2000:
-            raise ValueError('CFX restart_iterations must be an integer in [1500, 2000]')
+        if not math.isfinite(self.rms_target) or not 0 < self.rms_target <= RMS_TARGET_MAX:
+            raise ValueError(f'CFX RMS target must be positive and <= {RMS_TARGET_MAX:g}')
+        low, high = RESTART_ITERATIONS_RANGE
+        if type(self.restart_iterations) is not int or not low <= self.restart_iterations <= high:
+            raise ValueError(f'CFX restart_iterations must be an integer in [{low}, {high}]')
         if not re.fullmatch(r'[A-Za-z0-9 _.-]+', self.flow_analysis):
             raise ValueError('Invalid CFX flow analysis name')
 

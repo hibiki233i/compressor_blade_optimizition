@@ -74,11 +74,12 @@ class ParetoAndGeometryTests(unittest.TestCase):
             self.assertEqual(al.run_geometry(self.config, candidate)[0], True)
         argv = run.call_args.args[0]
         self.assertEqual(argv[argv.index('-BladeCount') + 1], '12')
-        # the script's own default; omitted so older script copies keep working
+        # passed even when it equals the script's own default
         self.config['runtime']['n_blades'] = 10
         with patch.object(al.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)) as run:
             al.run_geometry(self.config, candidate)
-        self.assertNotIn('-BladeCount', run.call_args.args[0])
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[argv.index('-BladeCount') + 1], '10')
 
     def test_powershell_script_declares_the_blade_count_parameter(self):
         script = (Path(al.__file__).with_name('Run-BladeShapeGeometryMeshing.ps1')).read_text(encoding='utf-8')

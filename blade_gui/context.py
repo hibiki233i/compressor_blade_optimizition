@@ -96,10 +96,6 @@ class AppContext(QObject):
         path = Path(chosen)
         self.write_setting("dialog/last_dir", str(path if is_dir else path.parent))
 
-    # kept for older callers
-    _read_setting = read_setting
-    _write_setting = write_setting
-
     # ------------------------------------------------------------- state
     def set_config_path(self, path: str | Path) -> None:
         self.config_path = Path(path)

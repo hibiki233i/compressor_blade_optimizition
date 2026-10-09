@@ -11,6 +11,12 @@ import html
 from dataclasses import dataclass
 from typing import Any
 
+from .project import CODE_DIR  # noqa: F401 - puts the repository modules on sys.path
+from blade_shape_convergence import RESTART_ITERATIONS_RANGE, RMS_TARGET_MAX  # noqa: E402
+
+_RMS = f"{RMS_TARGET_MAX:g}"
+_RESTART = f"{RESTART_ITERATIONS_RANGE[0]}–{RESTART_ITERATIONS_RANGE[1]}"
+
 # What else a change touches; appended to the entries that are part of it.
 PHYSICAL = ("属于物理签名（refinement.physical_signature）：存在未完成的待评估队列或冻结的边界方案时修改，"
             "续跑会报 “Inputs changed … inspect before resuming” 并停下；已完成的记录不受影响。")
@@ -37,16 +43,17 @@ HELP: dict[str, Help] = {
         "推荐：不超过本机物理核数（不算超线程）；单通道网格较小时分区过多反而变慢，每个分区宜保留数万个以上节点。",
         (CFX,)),
     "cfx_convergence.rms_target": Help(
-        "推荐 1e-5；上限 1e-5",
+        f"推荐 {_RMS}；上限 {_RMS}",
         "最终验收门槛：.out 中最后一次输出的各方程 RMS 残差的最大值必须 ≤ 此值，否则该算例记为失败，结果不进入训练集。"
-        "代码只接受 (0, 1e-5]。\n"
-        "推荐：1e-5 是叶轮机械稳态计算常用的“充分收敛”水平；要分辨很小的效率差可取 1e-6，但迭代数与失败率会上升。\n"
+        f"代码只接受 (0, {_RMS}]（blade_shape_convergence.RMS_TARGET_MAX）。\n"
+        f"推荐：{_RMS} 是叶轮机械稳态计算常用的“充分收敛”水平；要分辨很小的效率差可取 1e-6，但迭代数与失败率会上升。\n"
         "残差只是必要条件：效率、流量监测点是否走平以及进出口质量守恒仍需人工检查。",
         (CFX, PHYSICAL)),
     "cfx_convergence.restart_iterations": Help(
-        "1500–2000",
+        _RESTART,
         "首次求解用完模板中的最大迭代数仍未达到 RMS 门槛时，自动从该结果续算一次，续算的最大迭代数取此值。"
-        "只续算一次；代码限定为 1500–2000 的整数。",
+        f"只续算一次；代码限定为 {_RESTART} 的整数（blade_shape_convergence.RESTART_ITERATIONS_RANGE）。"
+        "该范围来自本叶轮的经验：此前未收敛的算例若能从续算达到门槛，基本在这一追加步数内；更少很少收敛，更多也很少有帮助。",
         (CFX, PHYSICAL)),
     "cfx_convergence.flow_analysis": Help(
         "与模板一致",
@@ -54,7 +61,7 @@ HELP: dict[str, Help] = {
         (CFX, PHYSICAL)),
     "runtime.n_blades": Help(
         "主叶片数",
-        "两个作用：① 不等于 10 时以 -BladeCount 传给 TurboGrid，决定周期面；② 把单通道的 MassFlow 和 Power 乘以此数，换算成整圈。\n"
+        "两个作用：① 始终以 -BladeCount 传给几何脚本，由其写入 TurboGrid，决定周期面（脚本副本未声明该参数时运行前即报错）；② 把单通道的 MassFlow 和 Power 乘以此数，换算成整圈。\n"
         "必须等于 CFturbo 模板中的主叶片数。当前模板未启用分流叶片。",
         (CFX, PHYSICAL)),
     "runtime.rpm": Help(
@@ -144,7 +151,7 @@ HELP: dict[str, Help] = {
         "≈ CFD 数值不确定度",
         "单位与 training_data.csv 中 Efficiency 列相同。它同时用于三处：\n"
         "① 工程 Pareto 的 ε；② uncertainty 角色中预测标准差的归一化尺度；"
-        "③ 诊断门：EHVI 点的预测 MAE ≤ 容差，且 2σ 覆盖率 ≥ 5/6 时才算通过。\n"
+        "③ 诊断门：EHVI 点的预测 MAE ≤ 容差，且 2σ 覆盖率 ≥ 诊断门最低覆盖率（默认 5/6）时才算通过。\n"
         "如何确定：取同一几何在可接受设置变化下 Efficiency 的差值，例如 RMS 1e-5 与 1e-6 两次计算之差、相邻两级网格之差（或 GCI），"
         "取其中较大者。不要小于 CFD 本身能分辨的差异。"),
     "pareto.tolerances.MassFlow": Help(
@@ -192,8 +199,16 @@ HELP: dict[str, Help] = {
     "refinement.diagnostic_min_points": Help(
         "推荐 6–10",
         "诊断窗口内的前瞻预测点（先预测、后经 CFD 验证）达到此数后，开始两件事："
-        "① 用残差放大预测标准差，使 2σ 覆盖率达标；② 判定诊断门（MAE ≤ 容差且 2σ 覆盖率 ≥ 5/6）。\n"
-        "覆盖率阈值是 5/6，因此至少需要 6 个点，才能做到“允许 1 个落在区间外”。"),
+        "① 用残差放大预测标准差，使 2σ 覆盖率达标；② 判定诊断门（MAE ≤ 容差且 2σ 覆盖率 ≥ 诊断门最低覆盖率）。\n"
+        "与最低覆盖率配套：默认阈值 5/6 时至少需要 6 个点，才能做到“允许 1 个落在区间外”。"),
+    "refinement.diagnostic_gate.min_coverage_2sigma": Help(
+        "默认 5/6",
+        "诊断门的覆盖率条件：最近窗口内 EHVI 点的真实值落在预测 ±2σ 区间内的比例须 ≥ 此值（同时 MAE ≤ 容差、点数 ≥ 诊断门最少点数）。"
+        "结果与所用阈值一起写入 local_diagnostic_gate.json。\n"
+        "与“诊断门最少点数”绑定：覆盖率只能取 k/n，默认 5/6 配 6 个点，即允许 1 个点落在区间外；"
+        "点数改为 12 时，5/6 允许 2 个。正态且校准良好的 2σ 区间理论覆盖约 95%，"
+        "5/6 是小样本下的放宽，避免一次偶然偏离就判失败。\n"
+        "推荐：保持 5/6；只有在增加最少点数后才考虑提高到 0.9 左右。取值范围 (0, 1]；未设置时按 5/6。"),
     "refinement.diagnostic_window": Help(
         "推荐 2–3 × 最少点数",
         "校准和诊断只使用本切片最近的 N 个前瞻预测。窗口越大，统计越稳定，但对模型改进的反应越慢。",
@@ -313,6 +328,15 @@ def live_hint(key: str, config: dict[str, Any], value: Any) -> str:
         return f"推荐 ≥ 10×{active} = {10 * active}"
     if key == "refinement.challenger_min_samples" and active:
         return f"推荐 ≈ 2×{active} = {2 * active}"
+    if key == "refinement.diagnostic_gate.min_coverage_2sigma" and number is not None and 0 < number <= 1:
+        refinement = config.get("refinement") if isinstance(config.get("refinement"), dict) else {}
+        try:
+            points = int(refinement.get("diagnostic_min_points", 6))
+        except (TypeError, ValueError):
+            points = 0
+        if points > 0:
+            misses = max(k for k in range(points + 1) if (points - k) / points >= number)
+            return f"{points} 点时允许 {misses} 个落在 2σ 外"
     if key == "runtime.batch_size" and number is not None:
         roles = (config.get("refinement") or {}).get("candidate_roles") if isinstance(config.get("refinement"), dict) else None
         count = len(roles) if isinstance(roles, list) and roles else 3
