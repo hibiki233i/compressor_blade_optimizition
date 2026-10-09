@@ -86,6 +86,9 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(1180, 760)
         self.resize(1440, 900)
         self.setWindowIcon(icons.brand_icon(64))
+        geometry = ctx.read_bytes("window/geometry")
+        if geometry is not None:
+            self.restoreGeometry(geometry)
 
         self._build()
         self.ctx.project_reloaded.connect(self._on_project_reloaded)
@@ -102,7 +105,10 @@ class MainWindow(QMainWindow):
 
         self._on_project_reloaded()
         self._sync_busy()
-        self._select_page(0)
+        page = self.ctx.read_setting("window/page", "0")
+        self._select_page(int(page) if page.isdigit() and int(page) < len(self.pages) else 0)
+        if self.ctx.project.config_path is None:
+            self.ctx.report("尚未选择配置文件 · 点击侧栏「配置…」选择 JSON；之后会自动记住")
 
     # ------------------------------------------------------------- layout
     def _build(self) -> None:
@@ -297,6 +303,7 @@ class MainWindow(QMainWindow):
                 button.set_active(position == index)
         page.on_show()
         page.refresh()
+        self.ctx.write_setting("window/page", str(index))
 
     def _on_case_requested(self, run_id: str) -> None:
         for index, page in enumerate(self.pages):
@@ -319,11 +326,15 @@ class MainWindow(QMainWindow):
             f"尝试 {summary.attempts} · 成功 {summary.successes}\n"
             f"Pareto {summary.pareto_count} · 失败 {summary.failures}"
         )
-        self.data_chip.set_text(f"输出 {project.output_dir}", f"数据目录：{project.output_dir}")
         valid = project.config_valid
+        if project.config_path is None and project.data_dir_override is None:
+            self.data_chip.set_text("输出 未配置", "选择配置文件或数据目录后显示")
+        else:
+            self.data_chip.set_text(f"输出 {project.output_dir}", f"数据目录：{project.output_dir}")
+        config_name = project.config_path.name if project.config_path else "未选择配置"
         self.config_chip.set_text(
-            project.config_path.name + ("" if valid else " · 有错误"),
-            f"配置文件：{project.config_path}",
+            config_name + ("" if valid or project.config_path is None else " · 有错误"),
+            f"配置文件：{project.config_path or '未选择'}",
             "text_dim" if valid else "bad",
         )
         override = project.data_dir_override is not None
@@ -331,7 +342,7 @@ class MainWindow(QMainWindow):
         if override:
             self.override_chip.set_text("只读数据视图", "运行命令仍写入配置中的 paths.output_dir", "amber")
         self.status_right.setText(
-            f"配置 {project.config_path.name} · {'' if valid else '存在校验错误 · '}"
+            f"配置 {config_name} · {'' if valid or project.config_path is None else '存在校验错误 · '}"
             f"记录 {summary.attempts} 条"
         )
 
@@ -358,10 +369,12 @@ class MainWindow(QMainWindow):
 
     # ----------------------------------------------------------- actions
     def _choose_config(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self, "选择配置文件", str(self.ctx.project.config_path.parent), "JSON (*.json)"
-        )
-        if not path or Path(path).resolve() == self.ctx.project.config_path.resolve():
+        current = self.ctx.project.config_path
+        start = str(current.parent) if current else self.ctx.dialog_start()
+        path, _ = QFileDialog.getOpenFileName(self, "选择配置文件", start, "JSON (*.json)")
+        if path:
+            self.ctx.remember_dialog(path)
+        if not path or (current is not None and Path(path).resolve() == current.resolve()):
             return
         config_page = next(page for page in self.pages if isinstance(page, ConfigPage))
         if not config_page.confirm_discard_changes("切换配置文件"):
@@ -370,9 +383,9 @@ class MainWindow(QMainWindow):
         self.ctx.report(f"已切换配置文件：{path}")
 
     def _choose_data_dir(self) -> None:
-        start = str(self.ctx.project.output_dir)
-        if not Path(start).exists():
-            start = str(Path.home())
+        start = str(self.ctx.project.output_dir) if self.ctx.project.config_path or self.ctx.data_dir else ""
+        if not start or not Path(start).exists():
+            start = self.ctx.dialog_start()
         directory = QFileDialog.getExistingDirectory(self, "选择数据目录（包含 training_data.csv）", start)
         if not directory:
             return
@@ -388,3 +401,9 @@ class MainWindow(QMainWindow):
         if answer == QMessageBox.Cancel:
             return
         self.ctx.set_data_dir(directory if answer == QMessageBox.Yes else None)
+
+    # ------------------------------------------------------------ closing
+    def closeEvent(self, event) -> None:  # noqa: N802 - Qt API
+        self.ctx.write_setting("window/geometry", self.saveGeometry())
+        self.ctx.sync_settings()
+        super().closeEvent(event)

@@ -5,6 +5,7 @@ the right-hand viewer only reads the files that CLI writes.
 """
 from __future__ import annotations
 
+import json
 import math
 import time
 from html import escape
@@ -35,6 +36,7 @@ from PySide6.QtWidgets import (
 
 from .. import theme
 from ..commands import VALIDATION_OPTIONS, build_validation
+from ..persist import remember
 from ..project import CODE_DIR, Project
 from ..runner import CommandRunner, default_python
 from ..validation_data import case_validation_inputs, suggest_new_path
@@ -44,13 +46,13 @@ from .base import Page
 from .incidence_view import IncidenceView
 
 ACTIONS = [('init', '准备验证配置（可用字段预填）'), ('extract', '提取展向攻角'),
-           ('sweep', '截面 / 分带敏感性'), ('legacy', '复现报告20点指标'),
+           ('sweep', '截面 / 分带敏感性'), ('aca', '导出 ACA 20 点 CSV'), ('legacy', '复现报告20点指标'),
            ('compare', '基准 / 目标工况对比'), ('plan', '生成进口角敏感性方案'),
            ('run', '运行敏感性 CFD')]
 LABELS = {'res': '目标 .res', 'geometry_source': '几何来源 .cft / .cft-batch / candidate.json',
           'output': '新输出文件', 'spec': '验证配置 JSON', 'post_exe': 'CFX-Post 程序',
           'output_dir': '新输出目录', 'stations': '前缘上游截面', 'bands': '展向分带数',
-          'csv': '原始 ACA CSV', 'hub_beta_deg': 'hub 前缘金属角 (°)',
+          'session': '保存的 ACA session (.cse)', 'csv': '原始 ACA CSV', 'hub_beta_deg': 'hub 前缘金属角 (°)',
           'shroud_beta_deg': 'shroud 前缘金属角 (°)', 'baseline': '基准 summary.json',
           'target': '目标 summary.json', 'flow_tolerance': '流量相对差容差',
           'config': '目标工程配置 JSON', 'candidate': 'candidate.json（可选）',
@@ -63,6 +65,8 @@ DESCRIPTIONS = {
     'extract': ('只读后处理', 'good', '用 CFX-Post 在前缘上游 Blade Aligned 截面按等宽叶高带积分，'
                 '得到正向质量加权的来流角 β_f、线性叶片角 β_b 与几何攻角 i = β_b − β_f。'),
     'sweep': ('只读后处理', 'good', '对同一 .res 依次改变截面位置与分带数，检验攻角统计量对测量定义的敏感性；失败即停。'),
+    'aca': ('只读后处理', 'good', '用保存的 Turbo 展向测量线 session 让 CFX-Post 读取已有 .res，导出 20 点面积周向平均 '
+            'Velocity Beta ACA，检查点数、j/19 叶高与单位后整理为 span,beta_cfx_deg 两列 CSV；成功后自动填入「复现报告20点指标」。'),
     'legacy': ('写新目录', 'info', '用原始 20 点 Velocity Beta ACA 曲线复现报告的算术平均攻角，仅限已确认的 [-90°, 0°] 象限。'),
     'compare': ('写新文件', 'info', '比较两个同方法、同测量定义的提取结果；检查声明工况与整轮净流量差，给出能否作同工况诊断。'),
     'plan': ('写新目录', 'info', '冻结 hub/shroud 前缘角 ±step 的五点设计（可选背压扫描）及全部输入身份；不启动 CFD。'),
@@ -74,13 +78,15 @@ PATH_FILTERS = {
     'candidate': 'candidate.json (*.json)',
     'spec': '验证配置 (*.json)',
     'post_exe': '程序 (*.exe cfx5post*);;所有文件 (*)',
+    'session': 'CFX-Post session (*.cse);;所有文件 (*)',
     'csv': 'CSV (*.csv)',
     'baseline': 'summary.json (summary.json *.json)',
     'target': 'summary.json (summary.json *.json)',
     'config': '配置 (*.json)',
     'plan': 'plan.json (plan.json *.json)',
 }
-NEW_DIR_STEMS = {'extract': 'extract', 'sweep': 'measurement_sweep', 'legacy': 'legacy', 'plan': 'endpoint_study'}
+NEW_DIR_STEMS = {'extract': 'extract', 'sweep': 'measurement_sweep', 'aca': 'aca', 'legacy': 'legacy',
+                 'plan': 'endpoint_study'}
 
 
 def _friendly(exc: Exception) -> str:
@@ -103,7 +109,6 @@ class ValidationPage(Page):
         super().__init__(ctx, parent)
         self.runner = CommandRunner(CODE_DIR, self)
         ctx.command_runners.append(self.runner)
-        self._default_config = ''
         self._started_at = 0.0
         self._running_action = ''
         self._build()
@@ -112,6 +117,15 @@ class ValidationPage(Page):
         self.runner.finished.connect(self.finished)
         self.runner.failed.connect(lambda text: self.set_running(False, '启动失败：' + text))
         self.refresh()
+        self._remember_inputs()
+
+    def _remember_inputs(self) -> None:
+        """Every field starts empty (or at its neutral default) and keeps what was typed last."""
+        remember(self.ctx, 'validation/action', self.action_box)
+        remember(self.ctx, 'validation/splitter', self._splitter)
+        for action, fields in self.forms.items():
+            for key, widget in fields.items():
+                remember(self.ctx, f'validation/{action}/{key}', widget)
 
     # ------------------------------------------------------------- layout
     def _build(self) -> None:
@@ -120,6 +134,7 @@ class ValidationPage(Page):
         root.setSpacing(10)
         splitter = QSplitter(Qt.Horizontal)
         root.addWidget(splitter, 1)
+        self._splitter = splitter
 
         # ================================================ left: command form
         column = QWidget()
@@ -355,20 +370,22 @@ class ValidationPage(Page):
 
     def browse(self, widget: QLineEdit, key: str, action: str = '') -> None:
         current = widget.text().strip()
-        start = current or str(self._configured_project().output_dir)
+        start = self.ctx.dialog_start(current)
         if key == 'output_dir':
             parent = QFileDialog.getExistingDirectory(self, '选择父目录（将在其中新建输出子目录）',
-                                                      str(Path(start).parent if current else start))
+                                                      str(Path(start).parent) if current else start)
             if parent:
+                self.ctx.remember_dialog(parent, is_dir=True)
                 widget.setText(suggest_new_path(parent, NEW_DIR_STEMS.get(action, 'validation')))
             return
         if key == 'output':
             suffix_name = 'comparison.json' if action == 'compare' else 'spec.json'
-            path, _ = QFileDialog.getSaveFileName(self, '新输出文件', current or str(Path(start) / suffix_name),
+            path, _ = QFileDialog.getSaveFileName(self, '新输出文件', current or str(Path(start or '.') / suffix_name),
                                                   'JSON (*.json)')
         else:
-            path, _ = QFileDialog.getOpenFileName(self, LABELS[key], current, PATH_FILTERS.get(key, '所有文件 (*)'))
+            path, _ = QFileDialog.getOpenFileName(self, LABELS[key], start, PATH_FILTERS.get(key, '所有文件 (*)'))
         if path:
+            self.ctx.remember_dialog(path)
             widget.setText(path)
 
     def open_file(self, path) -> None:
@@ -429,7 +446,7 @@ class ValidationPage(Page):
         elif output is not None and output.text().strip() and Path(output.text().strip()).exists() \
                 and action != 'init':
             self.guard.set_level('error', f'输出已存在：{output.text().strip()}。CLI 拒绝覆盖，请换一个新路径。')
-        elif action in {'extract', 'sweep'} and fields['post_exe'].text().strip() \
+        elif action in {'extract', 'sweep', 'aca'} and fields['post_exe'].text().strip() \
                 and not Path(fields['post_exe'].text().strip()).is_file():
             self.guard.set_level('info', '本机找不到 CFX-Post；提取须在装有 ANSYS 的 Windows 主机上运行。')
         elif action == 'init':
@@ -438,15 +455,14 @@ class ValidationPage(Page):
             self.guard.set_level('', '')
 
     def refresh(self) -> None:
-        widget = self.forms['plan']['config']
-        if not widget.text() or widget.text() == self._default_config:
-            widget.setText(str(self.ctx.project.config_path))
-        self._default_config = str(self.ctx.project.config_path)
+        # suggestions only: paths stay empty until typed or browsed, then are remembered
+        config = self.ctx.project.config_path
+        self.forms['plan']['config'].setPlaceholderText(f'例如当前配置 {config}' if config else '')
         paths = self.ctx.project.config.get('paths')
         paths = paths if isinstance(paths, dict) else {}
-        for action in ('extract', 'sweep'):
-            if not self.forms[action]['post_exe'].text() and paths.get('cfx_bin_dir'):
-                self.forms[action]['post_exe'].setText(str(Path(paths['cfx_bin_dir']) / 'cfx5post.exe'))
+        hint = f"例如 {Path(paths['cfx_bin_dir']) / 'cfx5post.exe'}" if paths.get('cfx_bin_dir') else ''
+        for action in ('extract', 'sweep', 'aca'):
+            self.forms[action]['post_exe'].setPlaceholderText(hint)
         self._sync_cases()
         self.update_preview()
 
@@ -491,8 +507,12 @@ class ValidationPage(Page):
 
     def finished(self, code: int, reason: str) -> None:
         action = self._running_action or self.action_box.currentData()
+        aca_csv = self._aca_csv() if action == 'aca' and code == 0 and reason == 'normal' else ''
         if code == 0 and reason == 'normal' and action == 'init':
             message = '已保存待核对配置；请打开 JSON 补齐日志列出的字段后再提取'
+        elif aca_csv:
+            self.forms['legacy']['csv'].setText(aca_csv)
+            message = 'ACA CSV 已导出并填入「复现报告20点指标」；仍须填写同一 .res 几何的 hub/shroud 前缘金属角'
         elif code == 0 and reason == 'normal':
             message = '完成'
         elif code == 2:
@@ -504,6 +524,20 @@ class ValidationPage(Page):
         self.ctx.report('验证：' + message)
         self._load_output(action, code)
         self._refresh_guard()
+
+    def _aca_csv(self) -> str:
+        """The two-column CSV recorded by a completed ``aca`` run, if any."""
+        summary = Path(self.forms['aca']['output_dir'].text().strip()) / 'extraction_summary.json'
+        try:
+            data = json.loads(summary.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            return ''
+        path = data.get('aca_csv') if isinstance(data, dict) and data.get('status') == 'complete' else None
+        if not path or not Path(path).is_file():
+            return ''
+        if data.get('legacy_aca_quadrant_ok') is False:
+            self._append('ACA 角度不全在 [-90°, 0°]：CSV 已保存，但旧 20 点指标会拒绝该象限。', 'warn')
+        return str(path)
 
     def _load_output(self, action: str, code: int) -> None:
         """Show what the finished command wrote (also failures that kept evidence)."""

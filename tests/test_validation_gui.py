@@ -11,6 +11,7 @@ class ValidationCommandsTests(unittest.TestCase):
             'init':dict(res='D:/a b/x.res',geometry_source='D:/a b/x.cft',output='D:/new/spec.json'),
             'extract':dict(spec='spec.json',post_exe='post.exe',output_dir='out'),
             'sweep':dict(spec='spec.json',post_exe='post.exe',output_dir='out',stations='.2 .22 .24',bands='20,40'),
+            'aca':dict(res='D:/a b/x.res',post_exe='post.exe',session='extract_aca.cse',output_dir='aca'),
             'legacy':dict(csv='old.csv',hub_beta_deg=0.,shroud_beta_deg=30.,output_dir='out'),
             'compare':dict(baseline='a.json',target='b.json',flow_tolerance=.01,output='c.json'),
             'plan':dict(config='config.json',step_deg=.25,output_dir='study'),
@@ -49,7 +50,7 @@ class ValidationWidgetTests(ProjectFixture):
 
     def test_validation_page_paints_and_dispatches_init(self):
         self.assertEqual(self.page.nav_label,'验证')
-        self.assertEqual(self.page.action_box.count(),7)
+        self.assertEqual(self.page.action_box.count(),8)
         fields=self.page.forms['init']
         for key,value in dict(res='D:/target.res',geometry_source='D:/target.cft',output='D:/spec.json').items():
             fields[key].setText(value)
@@ -61,7 +62,7 @@ class ValidationWidgetTests(ProjectFixture):
 
     def test_real_cfd_form_passes_budget_and_resume(self):
         from PySide6.QtWidgets import QMessageBox
-        self.page.action_box.setCurrentIndex(6)
+        self.page.action_box.setCurrentIndex(self.page.action_box.findData('run'))
         fields=self.page.forms['run'];fields['plan'].setText('D:/study/plan.json')
         fields['max_new_cfd'].setValue(2);fields['resume'].setChecked(True)
         with patch.object(QMessageBox,'question',return_value=QMessageBox.Yes),patch.object(self.page.runner,'start') as start:

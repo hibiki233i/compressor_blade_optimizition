@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import commands, theme
+from ..persist import remember
 from ..project import CODE_DIR, Project, config_errors, external_tools
 from ..runner import CommandRunner, default_python
 from ..widgets import (
@@ -70,6 +71,9 @@ class RunPage(Page):
         self._timer.timeout.connect(self._tick)
         self._build()
         self.refresh()
+        for key, widget in (("action", self.action_box), ("plan_path", self.plan_path),
+                            ("boundary_plan", self.boundary_plan), ("splitter", self._splitter)):
+            remember(ctx, f"run/{key}", widget)
 
     # ------------------------------------------------------------- layout
     def _build(self) -> None:
@@ -79,6 +83,7 @@ class RunPage(Page):
 
         splitter = QSplitter(Qt.Horizontal)
         root.addWidget(splitter, 1)
+        self._splitter = splitter
 
         # =============================================== left: command form
         left = QWidget()
@@ -274,7 +279,8 @@ class RunPage(Page):
         holder_layout.setContentsMargins(0, 0, 0, 0)
         holder_layout.setSpacing(6)
         holder_layout.addWidget(self.plan_center, 1)
-        self.plan_path = QLineEdit("boundary_plan_v2.json")
+        self.plan_path = QLineEdit()
+        self.plan_path.setPlaceholderText("留空 = boundary_plan_v2.json")
         browse = tool_button("", "folder", "ghost", "选择保存位置")
         browse.setFixedWidth(36)
         browse.clicked.connect(self._pick_plan_save)
@@ -400,8 +406,6 @@ class RunPage(Page):
             if current:
                 self.boundary_plan.setCurrentText(current)
             self.boundary_plan.blockSignals(blocked)
-        if not self.plan_path.text().strip() and plans:
-            self.plan_path.setText(plans[0])
 
     def _refresh_environment(self) -> None:
         clear_layout(self.env_body)
@@ -433,6 +437,8 @@ class RunPage(Page):
 
     def _build_spec(self) -> commands.CommandSpec:
         config_path = self.ctx.project.config_path
+        if config_path is None:
+            raise ValueError("尚未选择配置文件")
         action = self._current_action()
         if action == "run":
             return commands.build_run(
@@ -660,14 +666,16 @@ class RunPage(Page):
 
     def _pick_plan_open(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "选择边界方案", str(self._configured_project().output_dir), "JSON (*.json)"
+            self, "选择边界方案", self.ctx.dialog_start(self.boundary_plan.currentText().strip()), "JSON (*.json)"
         )
         if path:
+            self.ctx.remember_dialog(path)
             self.boundary_plan.setCurrentText(path)
 
     def _pick_plan_save(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
-            self, "保存边界方案", str(self._configured_project().output_dir / "boundary_plan_v2.json"), "JSON (*.json)"
+            self, "保存边界方案", self.ctx.dialog_start(self.plan_path.text().strip()), "JSON (*.json)"
         )
         if path:
+            self.ctx.remember_dialog(path)
             self.plan_path.setText(path)

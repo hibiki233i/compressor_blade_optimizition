@@ -178,7 +178,8 @@ REFINEMENT_FIELDS = [
 ]
 
 SECTIONS: list[Section] = [
-    Section("路径配置", "外部程序与模板位置；在本机不存在时仅告警，不阻止保存。", PATH_FIELDS),
+    Section("路径配置", "本机路径：JSON 中留空的项读写配置旁的 blade_shape_local.ini（不入库）；"
+            "在本机不存在时仅告警，不阻止保存。", PATH_FIELDS),
     Section("运行参数", "CFD 工况与运行预算。", RUNTIME_FIELDS),
     Section("代理模型", "筛选候选的代理模型与 EHVI 采样设置。", SURROGATE_FIELDS),
     Section("Pareto 容差", "工程容差只影响 pareto_front.csv，严格前沿始终另存。", PARETO_FIELDS),
@@ -486,7 +487,7 @@ class ConfigPage(Page):
             else:
                 widget.setText(str(value))
         self.variable_table.load(config)
-        self.path_label.setText(f"配置文件：{self.ctx.project.config_path}")
+        self.path_label.setText(f"配置文件：{self.ctx.project.config_path or '未选择（保存时另存为）'}")
         self._set_dirty(False)
         self._update_validation(config, saved=True)
 
@@ -497,7 +498,7 @@ class ConfigPage(Page):
         self.reload_from_context()
 
     def on_show(self) -> None:
-        self.path_label.setText(f"配置文件：{self.ctx.project.config_path}")
+        self.path_label.setText(f"配置文件：{self.ctx.project.config_path or '未选择（保存时另存为）'}")
 
     # ----------------------------------------------------------- validate
     def _collect(self) -> dict[str, Any]:
@@ -566,6 +567,9 @@ class ConfigPage(Page):
     def save(self) -> None:
         if not self._form_matches_current_config():
             return
+        if self.ctx.project.config_path is None:
+            self.save_as()
+            return
         config = self._collect()
         issues = self._update_validation(config, saved=False)
         errors = config_errors(issues)
@@ -593,11 +597,13 @@ class ConfigPage(Page):
         if issues:
             QMessageBox.warning(self, "无法保存", "请先修正校验错误。")
             return
+        current = self.ctx.project.config_path
         target, _ = QFileDialog.getSaveFileName(
-            self, "另存为", str(self.ctx.project.config_path), "JSON (*.json)"
+            self, "另存为", str(current) if current else self.ctx.dialog_start(), "JSON (*.json)"
         )
         if not target:
             return
+        self.ctx.remember_dialog(target)
         try:
             save_config(target, config, keep_backup=False)
         except Exception as exc:  # noqa: BLE001

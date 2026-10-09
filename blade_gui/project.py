@@ -27,6 +27,12 @@ CODE_DIR = Path(__file__).resolve().parent.parent
 if str(CODE_DIR) not in sys.path:  # allow `python -m blade_gui` from anywhere
     sys.path.insert(0, str(CODE_DIR))
 
+from blade_shape_local_config import META_KEY as LOCAL_META_KEY  # noqa: E402
+from blade_shape_local_config import (  # noqa: E402
+    apply_local_paths, local_ini_path, split_local_paths, write_local_paths,
+)
+
+#: the tracked example config (shareable settings only; paths come from the local INI)
 DEFAULT_CONFIG_PATH = CODE_DIR / "blade_shape_config.json"
 
 OBJECTIVES = ["Efficiency", "MassFlow"]
@@ -52,6 +58,11 @@ def refinement_module():
 # --------------------------------------------------------------------------
 # configuration
 # --------------------------------------------------------------------------
+def _ini_hint(config: dict[str, Any]) -> str:
+    meta = config.get(LOCAL_META_KEY)
+    return Path(meta["ini"]).name if isinstance(meta, dict) and meta.get("ini") else "本机 blade_shape_local.ini"
+
+
 def read_config_file(path: str | Path) -> dict[str, Any]:
     """Read a config file *without* validating it."""
     config_path = Path(path)
@@ -59,7 +70,7 @@ def read_config_file(path: str | Path) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError(f"{config_path} 的顶层必须是一个 JSON 对象。")
     payload["_config_path"] = str(config_path.resolve())
-    return payload
+    return apply_local_paths(payload, config_path)
 
 
 @dataclass
@@ -153,13 +164,13 @@ def validate_config(config: dict[str, Any]) -> list[Issue]:
                 "template_cfx", "template_cse", "powershell_exe", "cfturbo_exe", "turbogrid_exe"):
         value = config.get("paths", {}).get(key)
         if not value:
-            issues.append(Issue("warning", f"paths.{key} 未配置。"))
+            issues.append(Issue("warning", f"paths.{key} 未配置（填在 {_ini_hint(config)}）。"))
         elif not Path(str(value)).exists():
             issues.append(Issue("warning", f"paths.{key} 在本机不存在：{value}"))
 
     out = config.get("paths", {}).get("output_dir")
     if not out:
-        issues.append(Issue("error", "paths.output_dir 未配置。"))
+        issues.append(Issue("error", f"paths.output_dir 未配置（填在 {_ini_hint(config)}）。"))
     return issues
 
 
@@ -170,7 +181,11 @@ def config_errors(issues: list[Issue]) -> list[Issue]:
 def save_config(path: str | Path, config: dict[str, Any], *, keep_backup: bool = True) -> Path:
     """Atomically write ``config`` to ``path``, keeping one ``.bak`` copy."""
     config_path = Path(path)
-    payload = {key: value for key, value in config.items() if not key.startswith("_")}
+    # machine paths go back to the local INI next to the (possibly new) config file
+    shared, local = split_local_paths(config)
+    if local:
+        write_local_paths(local_ini_path(config_path), local)
+    payload = {key: value for key, value in shared.items() if not key.startswith("_")}
     text = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
     if keep_backup and config_path.exists():
         stamp = time.strftime("%Y%m%d-%H%M%S")
@@ -245,7 +260,8 @@ class Project:
     """Read-only view over one configuration + its output directory."""
 
     def __init__(self, config_path: str | Path | None = None, data_dir: str | Path | None = None):
-        self.config_path = Path(config_path or DEFAULT_CONFIG_PATH)
+        # ``None`` = nothing chosen yet; the GUI then shows an empty project
+        self.config_path = Path(config_path) if config_path else None
         self.data_dir_override = Path(data_dir) if data_dir else None
         self._cache: dict[str, tuple[float, Any]] = {}
         self.config: dict[str, Any] = {}
@@ -258,6 +274,11 @@ class Project:
         self._cache.clear()
         self.issues = []
         self.load_error = ""
+        if self.config_path is None:
+            self.config = {"paths": {}, "runtime": {}, "variables": []}
+            self.load_error = "尚未选择配置文件"
+            self.issues = [Issue("error", "尚未选择配置文件：点击侧栏「配置…」选择 blade_shape_config.json。")]
+            return
         try:
             self.config = read_config_file(self.config_path)
         except Exception as exc:  # noqa: BLE001
@@ -538,8 +559,8 @@ class Project:
 
     def available_plans(self) -> list[Path]:
         candidates: list[Path] = []
-        for base in (self.output_dir, CODE_DIR, self.config_path.parent):
-            if base.is_dir():
+        for base in (self.output_dir, CODE_DIR, self.config_path.parent if self.config_path else None):
+            if base is not None and base.is_dir():
                 candidates.extend(sorted(base.glob("boundary_plan*.json")))
         seen: dict[str, Path] = {}
         for item in candidates:

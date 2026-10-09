@@ -311,7 +311,8 @@ def _run_cfx_pipeline(
 
 
 def _load_config(path: str | Path) -> dict[str, object]:
-    return json.loads(Path(path).read_text(encoding="utf-8"))
+    from blade_shape_local_config import apply_local_paths
+    return apply_local_paths(json.loads(Path(path).read_text(encoding="utf-8")), path)
 
 
 def check_cfx_pre_inputs(config_path: str | Path, working_dir: str | Path) -> int:

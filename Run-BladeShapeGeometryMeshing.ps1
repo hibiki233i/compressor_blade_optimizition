@@ -1,11 +1,12 @@
 param (
     [Parameter(Mandatory=$true)][string]$CandidateJson,
     [string]$WorkingDir = "",
-    [string]$CFturboExe = "C:\Program Files\CFturbo 2025.2.2\CFturbo.exe",
-    [string]$TurboGridExe = "D:\ANSYS Inc\v251\TurboGrid\bin\cfxtg.exe",
-    [string]$CftBatchTemplate = "D:\blade optizamation\Templates\BaseModel.cft-batch",
-    [string]$BaseCft = "D:\blade optizamation\Templates\0908-2.cft",
-    [string]$TurboGridTemplate = "D:\blade optizamation\Templates\BaseMeshing.tst",
+    # Machine paths come from the caller (paths.* in blade_shape_local.ini); no built-in defaults.
+    [Parameter(Mandatory=$true)][string]$CFturboExe,
+    [Parameter(Mandatory=$true)][string]$TurboGridExe,
+    [Parameter(Mandatory=$true)][string]$CftBatchTemplate,
+    [Parameter(Mandatory=$true)][string]$BaseCft,
+    [Parameter(Mandatory=$true)][string]$TurboGridTemplate,
     # Must match runtime.n_blades: CFX scales per-passage MassFlow/Power by it.
     [ValidateRange(1, 200)][int]$BladeCount = 10,
     [switch]$DryRun

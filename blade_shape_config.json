@@ -1,17 +1,17 @@
 {
   "paths": {
-    "powershell_exe": "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
-    "geometry_script_path": "D:\\blade optizamation\\Run-BladeShapeGeometryMeshing.ps1",
-    "cfturbo_exe": "C:\\Program Files\\CFturbo 2025.2.2\\CFturbo.exe",
-    "turbogrid_exe": "D:\\ANSYS Inc\\v251\\TurboGrid\\bin\\cfxtg.exe",
-    "cfx_bin_dir": "D:\\ANSYS Inc\\v251\\CFX\\bin",
-    "template_dir": "D:\\blade optizamation\\Templates",
-    "base_cft": "D:\\blade optizamation\\Templates\\0908-2_modified.cft",
-    "cft_batch_template": "D:\\blade optizamation\\Templates\\0908-2_modified.cft-batch",
-    "turbogrid_template": "D:\\blade optizamation\\Templates\\BaseMeshing.tst",
-    "template_cfx": "D:\\blade optizamation\\Templates\\BaseModel.cfx",
-    "template_cse": "D:\\blade optizamation\\Templates\\Extract_Results.cse",
-    "output_dir": "D:\\blade optizamation\\blade_al_runs"
+    "powershell_exe": "",
+    "geometry_script_path": "",
+    "cfturbo_exe": "",
+    "turbogrid_exe": "",
+    "cfx_bin_dir": "",
+    "template_dir": "",
+    "base_cft": "",
+    "cft_batch_template": "",
+    "turbogrid_template": "",
+    "template_cfx": "",
+    "template_cse": "",
+    "output_dir": ""
   },
   "cfx_convergence": {
     "rms_target": 0.00001,

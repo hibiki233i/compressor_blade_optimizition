@@ -3,6 +3,9 @@ __pycache__/
 *.py[cod]
 *.pyo
 
+# Machine-specific settings (copy blade_shape_local.ini.example)
+*.ini
+
 # Local Git worktrees
 .worktrees/
 

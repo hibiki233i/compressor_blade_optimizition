@@ -14,11 +14,12 @@
 | `blade_shape_pending.py`、`blade_shape_runtime.py` | 待评估队列、断点恢复、算例预留、原子状态文件和进程锁 |
 | `Run-BladeShapeGeometryMeshing.ps1` | 将候选写入 CFturbo batch，并调用 CFturbo、TurboGrid |
 | `blade_shape_cfx_runner.py` | CFX-Pre、求解、后处理、结果解析及阶段恢复 |
+| `blade_shape_incidence_validation.py`、`blade_shape_aca_extraction.py` | 独立展向攻角验证；`aca` 子命令用保存的 session 从 `.res` 导出 20 点 ACA CSV 供 `legacy` 使用 |
 | `blade_shape_flow_diagnostics.py` | 对已有 `.res` 做只读熵增及近叶片角度诊断；评估见 `README_flow_diagnostics.md` |
 | `blade_gui/` | PySide6 界面；`project.py` 读取配置/CSV/算例，`validation_data.py` 只读解析攻角验证产物，`commands.py` 组装 CLI 参数，`runner.py` 通过子进程执行 CLI |
 | `tests/` | 算法、恢复与界面测试；`fixtures/synthetic_meanline.cft-batch` 仅用于测试 |
 
-GUI 是 CLI 的控制台和结果视图。新增运行能力应先放在 CLI/共享模块，再通过 `blade_gui/commands.py` 接入；不要在页面中重做优化或 CFD 逻辑。`blade_gui/project.py` 不依赖 Qt，负责数据读取与配置校验。`--data-dir` 只改变 GUI 的只读数据视图，运行仍写到配置的 `paths.output_dir`。
+GUI 是 CLI 的控制台和结果视图。新增运行能力应先放在 CLI/共享模块，再通过 `blade_gui/commands.py` 接入；不要在页面中重做优化或 CFD 逻辑。`blade_gui/project.py` 不依赖 Qt，负责数据读取与配置校验。`--data-dir` 只改变 GUI 的只读数据视图，运行仍写到配置的 `paths.output_dir`。GUI 不内置工程路径：首次启动不加载配置，表单输入与窗口布局经 `blade_gui/persist.py` 写入用户 INI 文件；新增表单字段用 `remember()` 绑定，测试通过 `BLADE_GUI_SETTINGS` 隔离。
 
 ## 必须维持的行为
 
@@ -31,10 +32,10 @@ GUI 是 CLI 的控制台和结果视图。新增运行能力应先放在 CLI/共
 
 ## 修改与验证方式
 
-在仓库根目录执行命令。项目使用 Python 3.10+、NumPy、Pandas；SciPy 和 scikit-learn 是相应采样/GP 功能的可选依赖；GUI 另需 `requirements-gui.txt` 中的 PySide6。真实几何、网格和 CFD 需要 Windows、PowerShell 7、CFturbo、TurboGrid、CFX 及未入库的 `Templates/`。当前 JSON 路径指向特定机器，运行前先检查 `paths`，不要假设本机可用。
+在仓库根目录执行命令。项目使用 Python 3.10+、NumPy、Pandas；SciPy 和 scikit-learn 是相应采样/GP 功能的可选依赖；GUI 另需 `requirements-gui.txt` 中的 PySide6。真实几何、网格和 CFD 需要 Windows、PowerShell 7、CFturbo、TurboGrid、CFX 及未入库的 `Templates/`。本机路径不写进 JSON：`blade_shape_config.json` 的 `paths.*` 留空，由 `blade_shape_local_config.py` 从配置旁未入库的 `blade_shape_local.ini` 补齐（非空 JSON 值优先），模板为 `blade_shape_local.ini.example`；运行前先检查该 INI，不要假设本机可用，也不要把机器路径提交回 JSON 或 PowerShell 默认值。
 
 ```powershell
-python -m py_compile blade_shape_active_learning.py blade_shape_acquisition.py blade_shape_refinement.py blade_shape_pending.py blade_shape_runtime.py blade_shape_cfx_runner.py
+python -m py_compile blade_shape_active_learning.py blade_shape_acquisition.py blade_shape_refinement.py blade_shape_pending.py blade_shape_runtime.py blade_shape_cfx_runner.py blade_shape_incidence_validation.py blade_shape_aca_extraction.py blade_shape_local_config.py
 python -m unittest discover -s tests -v
 ```
 
