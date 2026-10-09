@@ -32,7 +32,7 @@ GUI 是 CLI 的控制台和结果视图。新增运行能力应先放在 CLI/共
 
 ## 修改与验证方式
 
-在仓库根目录执行命令。项目使用 Python 3.10+、NumPy、Pandas；SciPy 和 scikit-learn 是相应采样/GP 功能的可选依赖；GUI 另需 `requirements-gui.txt` 中的 PySide6。真实几何、网格和 CFD 需要 Windows、PowerShell 7、CFturbo、TurboGrid、CFX 及未入库的 `Templates/`。本机路径不写进 JSON：`blade_shape_config.json` 的 `paths.*` 留空，由 `blade_shape_local_config.py` 从配置旁未入库的 `blade_shape_local.ini` 补齐（非空 JSON 值优先），模板为 `blade_shape_local.ini.example`；运行前先检查该 INI，不要假设本机可用，也不要把机器路径提交回 JSON 或 PowerShell 默认值。
+在仓库根目录执行命令。项目使用 Python 3.10+、NumPy、Pandas；SciPy 和 scikit-learn 是相应采样/GP 功能的可选依赖；GUI 另需 `requirements-gui.txt` 中的 PySide6。真实几何、网格和 CFD 需要 Windows、PowerShell 7、CFturbo、TurboGrid、CFX 及未入库的 `Templates/`。本机路径不写进 JSON：`blade_shape_config.json` 的 `paths.*` 留空，由 `blade_shape_local_config.py` 从配置旁未入库的 `blade_shape_local.ini` 补齐（非空 JSON 值优先），`cfx_bin_dir` / `turbogrid_exe` 两处都空时由 `AWP_ROOT<版本>` 推导（多个版本须在 `[ansys] version` 指定），模板为 `blade_shape_local.ini.example`；运行前先检查该 INI，不要假设本机可用，也不要把机器路径提交回 JSON 或 PowerShell 默认值。
 
 ```powershell
 python -m py_compile blade_shape_active_learning.py blade_shape_acquisition.py blade_shape_refinement.py blade_shape_pending.py blade_shape_runtime.py blade_shape_cfx_runner.py blade_shape_incidence_validation.py blade_shape_aca_extraction.py blade_shape_local_config.py

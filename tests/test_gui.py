@@ -629,6 +629,22 @@ class TestGuiWidgets(ProjectFixture):
         self.assertEqual(run_page.plan_center.count(), 3)
         self.assertIs(run_page.ctx.project, self.ctx.project)
 
+    def test_config_page_explains_every_advanced_field(self) -> None:
+        from blade_gui.field_help import HELP
+        from blade_gui.pages.config_page import ConfigPage, SECTIONS
+
+        page = next(p for p in self.window.pages if isinstance(p, ConfigPage))
+        undocumented = [spec.key for section in SECTIONS for spec in section.fields
+                        if spec.kind != "path" and spec.key not in HELP]
+        self.assertEqual(undocumented, [])
+        row = page._rows["constraints.duplicate_distance_norm"]
+        self.assertIn("归一化", row.label.toolTip())
+        self.assertTrue(row.hint.text().startswith("单变量 ≈ "))
+        before = row.hint.text()
+        page._bindings["constraints.duplicate_distance_norm"][1].setValue(0.05)
+        self.assertNotEqual(row.hint.text(), before)
+        self.assertTrue(page._dirty)
+
 
 if __name__ == "__main__":
     unittest.main()
