@@ -54,7 +54,9 @@ python blade_shape_incidence_validation.py extract --spec "$TargetSpec" --post-e
 
 这是流动诊断，不是最小损失攻角标定。`numerical_acceptance_verified=false`、`min_loss_angle_calibrated=false` 始终明确保留。`quality_ok` 不验证残差、网格独立性、物性适用性或稳定裕度。禁止把经验 Stanitz 修正直接作为已验证的真实最优角。
 
-CFX session 复用现有 Turbo 初始化与截面生成器。新增积分表达式尚需 Windows CFX-Post 25.1 的真实结果验证；离线测试只检查公式、命令和失败路径。
+CFX session 复用现有 Turbo 初始化与截面生成器。分带 `if()` 的零值使用积分前通量密度单位：质量通量为 `kg m^-2 s^-1`，速度加权通量为 `kg m^-1 s^-2`；`areaInt()` 后才按 `kg s^-1` 和 `kg m s^-2` 归一化。若误用积分后单位，CFX-Post 会报 `The 'true' and 'false' expressions have inconsistent dimensions`。提取异常会显示返回码、日志路径及首条错误，失败目录保留，修复后应选择新目录重新提取。
+
+2026-10-08 已对本机 `case_000000/Impeller_001.res` 使用 CFX-Post 25.1 完成一次真实的 20 带、0.22 截面提取，返回码为 0，分带质量闭合与诊断质量检查通过。这证明该算例的表达式可执行；仍需对照 CFD-Post 手工积分、速度三角形与几何角度约定，才能形成工程结论。离线测试检查公式、命令和失败路径。
 
 ## 3. 复现报告的 20 点旧指标
 

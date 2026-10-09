@@ -66,6 +66,17 @@ class IncidenceTests(unittest.TestCase):
         s=spec(); s['measurement']['normal_sign']=0
         with self.assertRaises(ValueError): v.validate_spec(s)
 
+    def test_cel_zero_uses_flux_density_units_before_area_integration(self):
+        expressions = v.profile_expressions(spec())
+        for key in ('forward', 'reverse', 'span_flux'):
+            expression = expressions[f'b000_{key}']
+            self.assertIn('0 [kg m^-2 s^-1]))', expression)
+            self.assertTrue(expression.endswith('/ 1 [kg s^-1]'))
+        for key in ('ws_flux', 'wt_flux'):
+            expression = expressions[f'b000_{key}']
+            self.assertIn('0 [kg m^-1 s^-2]))', expression)
+            self.assertTrue(expression.endswith('/ 1 [kg m s^-2]'))
+
     def test_legacy_reproduction_and_grid_validation(self):
         rows=[{'span': j/19, 'beta_cfx_deg': -30.} for j in range(20)]
         result, summary=v.legacy_profile(rows, 60., 60.)
@@ -113,6 +124,25 @@ class IncidenceTests(unittest.TestCase):
             self.assertTrue((root/'out/profile.csv').exists())
             self.assertEqual((case/'synthetic.res').read_text(),'test only')
             with self.assertRaises(FileExistsError):v.extract(s,root/'post.exe',root/'out')
+
+    def test_zero_exit_with_cel_error_reports_cause_and_retains_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp); case=root/'case'; case.mkdir(); s=spec()
+            for name in ('synthetic.res', 'synthetic.cft'): (case/name).touch()
+            (root/'post.exe').touch()
+            s.update(res_path=str(case/'synthetic.res'), geometry_source=str(case/'synthetic.cft'))
+            message="ExpressionEvaluator - Error in 'if': inconsistent dimensions."
+            def post(command, **kwargs):
+                (kwargs['cwd']/'cfdpost_error.log').write_text('2026/10/08\n'+message)
+                return subprocess.CompletedProcess(command, 0, stdout='post returned zero')
+            with patch.object(v.subprocess, 'run', side_effect=post):
+                with self.assertRaisesRegex(RuntimeError, 'inconsistent dimensions') as caught:
+                    v.extract(s, root/'post.exe', root/'out')
+            self.assertIn(str(root/'out/cfdpost_error.log'), str(caught.exception))
+            state=json.loads((root/'out/state.json').read_text())
+            self.assertEqual(state['status'], 'failed')
+            self.assertIn(message, state['message'])
+            self.assertFalse((root/'out/summary.json').exists())
 
 
 class SensitivityPlanTests(unittest.TestCase):
