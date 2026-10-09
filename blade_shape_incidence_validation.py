@@ -250,15 +250,17 @@ streamwise/circumferential plane, not the magnitude of meridional velocity.
         low, high = j/m['bands'], (j+1)/m['bands']
         operator = '<=' if j == m['bands']-1 else '<'
         condition = f'Span Normalized >= {low:.10f} && Span Normalized {operator} {high:.10f}'
-        for key, quantity, unit in (
-            ('forward', forward, 'kg s^-1'),
-            ('reverse', reverse, 'kg s^-1'),
-            ('ws_flux', f'({forward}) * Velocity Streamwise', 'kg m s^-2'),
-            ('wt_flux', f'({forward}) * Velocity Circumferential', 'kg m s^-2'),
-            ('span_flux', f'({forward}) * Span Normalized', 'kg s^-1'),
+        # if() branches must share the integrand dimensions. areaInt adds m^2;
+        # only the normalization after integration uses the integrated unit.
+        for key, quantity, integrand_unit, unit in (
+            ('forward', forward, 'kg m^-2 s^-1', 'kg s^-1'),
+            ('reverse', reverse, 'kg m^-2 s^-1', 'kg s^-1'),
+            ('ws_flux', f'({forward}) * Velocity Streamwise', 'kg m^-1 s^-2', 'kg m s^-2'),
+            ('wt_flux', f'({forward}) * Velocity Circumferential', 'kg m^-1 s^-2', 'kg m s^-2'),
+            ('span_flux', f'({forward}) * Span Normalized', 'kg m^-2 s^-1', 'kg s^-1'),
         ):
             expressions[f'b{j:03d}_{key}'] = (
-                f'areaInt(if({condition}, {quantity}, 0 [{unit}]))\\@Near LE / 1 [{unit}]'
+                f'areaInt(if({condition}, {quantity}, 0 [{integrand_unit}]))\\@Near LE / 1 [{unit}]'
             )
     return expressions
 
@@ -424,8 +426,13 @@ def extract(spec: dict, post_exe: Path, output: Path) -> dict:
         (output/'cfxpost.log').write_text(process.stdout,encoding='utf-8')
         atomic_json(output/'returncode.json',{'returncode':process.returncode})
         error=output/'cfdpost_error.log'
-        if process.returncode or (error.exists() and error.read_text(errors='replace').strip()):
-            raise RuntimeError('CFX-Post failed; inspect retained logs')
+        error_text=error.read_text(errors='replace').strip() if error.exists() else ''
+        if process.returncode or error_text:
+            detail=next((line.strip() for line in error_text.splitlines()
+                         if 'Error' in line or 'error' in line), '')
+            raise RuntimeError(f'CFX-Post failed (returncode={process.returncode}); '
+                               f'logs: {output / "cfxpost.log"}, {error}'
+                               + (f'; {detail[:500]}' if detail else ''))
         values=parse_measurements((output/RAW_NAME).read_text(encoding='utf-8'),set(expressions))
         if identities != {str(p):file_identity(p) for p in (res,geometry)}:
             raise ValueError('Input files changed during extraction')
