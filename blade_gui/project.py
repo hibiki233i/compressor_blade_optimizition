@@ -102,6 +102,11 @@ def validate_config(config: dict[str, Any]) -> list[Issue]:
     except (ValueError, TypeError) as exc:
         issues.append(Issue("error", f"CFX 收敛设置无效：{exc}"))
 
+    try:
+        cli_module().surrogate_choice(config)
+    except (ValueError, TypeError, AttributeError) as exc:
+        issues.append(Issue("error", f"代理模型设置无效：{exc}"))
+
     variables = config.get("variables")
     if not isinstance(variables, list) or not variables:
         issues.append(Issue("error", "variables 不能为空。"))

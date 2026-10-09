@@ -58,18 +58,22 @@ HELP: dict[str, Help] = {
         "必须等于 CFturbo 模板中的主叶片数。当前模板未启用分流叶片。",
         (CFX, PHYSICAL)),
     "runtime.rpm": Help(
-        "仅记录，不写入 CFX",
+        "仅记录；check-pre --def 可核对",
         "当前代码不会把它传给 CFturbo 或 CFX：实际转速由 CFX 模板（BaseModel.cfx）决定。"
-        "它只进入物理签名，用来标明这批数据对应的工况。请填写与模板一致的值；在这里修改不会改变 CFD。",
+        "它只进入物理签名，用来标明这批数据对应的工况。请填写与模板一致的值；在这里修改不会改变 CFD。\n"
+        "核对：blade_shape_cfx_runner.py check-pre --def 已有算例的 Impeller.def，会用 cfx5cmds 只读导出其 CCL，"
+        "把各 Angular Velocity（数值或命名表达式，rpm 或 rad/s）与此值比较；不一致时返回 1，"
+        "无法解析的 CEL 表达式报告为 unverified。",
         (PHYSICAL,)),
     "runtime.mass_flow": Help(
         "仅记录，不写入 CFX",
         "当前代码不会把它传给 CFX：进口条件由模板决定，计算得到的 MassFlow 是结果而不是输入。"
-        "它只进入物理签名，用于记录设计工况；在这里修改不会改变 CFD。",
+        "它只进入物理签名，用于记录设计工况；在这里修改不会改变 CFD。check-pre --def 不比较此项。",
         (PHYSICAL,)),
     "runtime.alpha0": Help(
         "仅记录，不写入 CFX",
-        "当前代码不会把它传给 CFX：进口气流角由模板中的进口边界条件决定。它只进入物理签名；在这里修改不会改变 CFD。",
+        "当前代码不会把它传给 CFX：进口气流角由模板中的进口边界条件决定。它只进入物理签名；在这里修改不会改变 CFD。"
+        "check-pre --def 不比较此项。",
         (PHYSICAL,)),
     "runtime.p_out_pa": Help(
         "写入 MyBackPressure",
@@ -113,11 +117,14 @@ HELP: dict[str, Help] = {
     "surrogate.model": Help(
         "推荐 gp",
         "gp：高斯过程（Kriging，scikit-learn），给出校准较好的预测不确定度，EHVI 和 uncertainty 角色都依赖它。\n"
-        "rbf_ridge_ensemble：RBF 岭回归集成，用模型间的离散度近似不确定度。"
-        "以下情况会自动改用它：未安装 scikit-learn，或样本少于 3 个。"),
+        "rbf_ridge_ensemble：RBF 岭回归集成，用模型间的离散度近似不确定度。\n"
+        "gp 无法建立（未安装 scikit-learn，或样本少于 3 个）时改用“回退模型”。其他名称是配置错误，不会悄悄换成 RBF。"),
     "surrogate.fallback_model": Help(
-        "当前未被读取",
-        "当前代码没有读取此项：gp 不可用时总是回退到 rbf_ridge_ensemble。保留它只是为了配置兼容。"),
+        "gp 不可用时使用；none = 报错停止",
+        "主模型为 gp 但无法建立（未安装 scikit-learn，或样本少于 3 个）时改用此模型，并在日志打印原因。\n"
+        "rbf_ridge_ensemble（默认）：沿用以往行为。none：不换模型，直接报错停止，适合要求全程同一代理模型的对比实验。"
+        "选 gp 作为回退没有意义，gp 不可用时同样报错。\n"
+        "诊断记录中的 surrogate_model 列记下实际使用的模型，预测校准只用同一模型的历史残差。"),
     "surrogate.ehvi_y_samples": Help(
         "推荐 256",
         "EHVI（期望超体积改进）用蒙特卡洛估计：对每个候选，从预测分布抽取若干目标值样本，求平均超体积增量。"

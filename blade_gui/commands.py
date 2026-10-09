@@ -121,12 +121,15 @@ def build_run_boundary(
     return CommandSpec("run-boundary", args, f"运行边界阶段：{stage}")
 
 
-def build_check_pre(config_path: str | Path, *, working_dir: str | Path) -> CommandSpec:
+def build_check_pre(config_path: str | Path, *, working_dir: str | Path,
+                    definition: str | Path | None = None) -> CommandSpec:
     args = [
         "check-pre",
         *_config_args(config_path),
         "--working-dir", str(working_dir),
     ]
+    if definition:
+        args += ["--def", str(definition)]
     return CommandSpec("check-pre", args, "生成并检查 CFX-Pre 输入（不求解）", script=CFX_SCRIPT)
 
 
