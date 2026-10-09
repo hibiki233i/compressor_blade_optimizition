@@ -139,6 +139,12 @@ class ExtractTests(unittest.TestCase):
                 self.assertTrue((out / 'cfxpost.log').is_file())
                 self.assertEqual(list(out.glob('*_beta_aca_20.csv')), [])
 
+    def test_zero_exit_with_post_error_reports_cause(self):
+        out = self.root / 'post_error'
+        with self.fake_post(raw_export(), error='2026/10/09\nExpressionEvaluator - Error in Beta'), \
+                self.assertRaisesRegex(RuntimeError, 'returncode=0.*Error in Beta'):
+            aca.extract_aca(self.res, self.post, self.session, out)
+
     def test_input_changed_during_extraction_fails(self):
         def run(command, **kwargs):
             (Path(kwargs['cwd']) / 'aca_raw.csv').write_text(raw_export())

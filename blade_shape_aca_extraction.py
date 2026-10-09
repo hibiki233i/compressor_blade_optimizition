@@ -140,9 +140,12 @@ def extract_aca(res: Path, post_exe: Path, session: Path, output: Path) -> dict[
         raw, error = (output / raw_name).resolve(), output / 'cfdpost_error.log'
         if output not in raw.parents:
             raise ValueError(f'Export File resolves outside the output directory: {raw}')
-        if (process.returncode or not raw.is_file()
-                or (error.exists() and error.read_text(errors='replace').strip())):
-            raise RuntimeError(f'CFX-Post export failed; logs retained at {output}')
+        error_text = error.read_text(errors='replace').strip() if error.exists() else ''
+        if process.returncode or error_text or not raw.is_file():
+            # same reporting as `extract`: CFX-Post may exit 0 and only log the CEL error
+            detail = next((line.strip() for line in error_text.splitlines() if 'error' in line.lower()), '')
+            raise RuntimeError(f'CFX-Post export failed (returncode={process.returncode}); logs retained at {output}'
+                               + (f'; {detail[:500]}' if detail else ''))
         if identities != {str(path): file_identity(path) for path in (res, session)}:
             raise ValueError('Input changed during extraction')
         rows, checks = tidy_export(*parse_generic_export(raw.read_text(encoding='utf-8-sig', errors='replace')))
