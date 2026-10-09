@@ -1,0 +1,18 @@
+# 本机路径：复制为 blade_shape_local.ini（已被 .gitignore 忽略）后按本机修改。
+# blade_shape_config.json 中 paths.* 留空的项从这里读取；JSON 中写了非空值的以 JSON 为准。
+# 值按原样使用（相对路径相对于命令的工作目录），建议写绝对路径；不要加引号。
+# 以下为原 blade_shape_config.json 中的取值。保持字符串完全一致，已有运行的输入签名与续跑才不受影响。
+
+[paths]
+powershell_exe = C:\Program Files\PowerShell\7\pwsh.exe
+geometry_script_path = D:\blade optizamation\Run-BladeShapeGeometryMeshing.ps1
+cfturbo_exe = C:\Program Files\CFturbo 2025.2.2\CFturbo.exe
+turbogrid_exe = D:\ANSYS Inc\v251\TurboGrid\bin\cfxtg.exe
+cfx_bin_dir = D:\ANSYS Inc\v251\CFX\bin
+template_dir = D:\blade optizamation\Templates
+base_cft = D:\blade optizamation\Templates\0908-2_modified.cft
+cft_batch_template = D:\blade optizamation\Templates\0908-2_modified.cft-batch
+turbogrid_template = D:\blade optizamation\Templates\BaseMeshing.tst
+template_cfx = D:\blade optizamation\Templates\BaseModel.cfx
+template_cse = D:\blade optizamation\Templates\Extract_Results.cse
+output_dir = D:\blade optizamation\blade_al_runs

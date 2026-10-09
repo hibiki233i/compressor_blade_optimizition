@@ -132,6 +132,10 @@ class ProjectFixture(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name)
         self.out = self.root / "runs"
+        # GUI settings (remembered inputs, window geometry) never touch the user's real file
+        settings = patch.dict(os.environ, {"BLADE_GUI_SETTINGS": str(self.root / "gui_settings.ini")})
+        settings.start()
+        self.addCleanup(settings.stop)
         (self.out / "cases").mkdir(parents=True)
         for run_id in ("case_000000", "case_000001", "case_000002", "case_000003"):
             (self.out / "cases" / run_id).mkdir()

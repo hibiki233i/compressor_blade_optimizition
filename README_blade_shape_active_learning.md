@@ -16,8 +16,10 @@ from successful CFD evaluations.
   the CFturbo batch XML and runs CFturbo and TurboGrid.
 - `blade_shape_cfx_runner.py` imports the generated `Impeller_Mesh.gtm` into the
   CFX template, solves, runs CFX-Post, and reads `CFX_Results.txt`.
-- `blade_shape_config.json` stores paths, runtime settings, constraints, and
-  variable bounds.
+- `blade_shape_config.json` stores runtime settings, constraints, and variable
+  bounds. Its `paths.*` are left empty and filled from the untracked
+  `blade_shape_local.ini` beside it (copy `blade_shape_local.ini.example`); a
+  non-empty JSON path takes precedence.
 
 ## Variables
 

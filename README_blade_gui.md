@@ -47,7 +47,8 @@ python -m blade_gui --data-dir "D:\blade optizamation\blade_al_runs"
 python -m blade_gui --config D:\other\cfg.json --data-dir D:\copied\results
 ```
 
-- `--config`：配置文件路径，缺省用 `code/blade_shape_config.json`。
+- `--config`：配置文件路径。省略时使用上次在界面中选择的配置；首次启动不加载任何配置，
+  需在侧栏「配置…」中选择（之后会记住）。
 - `--data-dir`：**只读覆盖** `paths.output_dir`。当你在非 CFD 主机上查看别人拷回来的
   `training_data.csv` / `pareto_front.csv` 时用它，不必改配置。
 
@@ -55,6 +56,12 @@ python -m blade_gui --config D:\other\cfg.json --data-dir D:\copied\results
 也按该实际运行目录显示。设置只读数据目录后，看板和算例浏览仍显示只读目录中的结果。
 
 界面内 左下角「设置数据目录…」等价于 `--data-dir`，会记住选择。
+
+**记住的内容**：界面不内置任何工程路径。所选配置、数据目录、运行控制与验证页各表单中填写的路径和数值、
+当前动作、分栏宽度、上次打开的页面、窗口位置/大小，以及文件对话框最近使用的目录，都在每次修改时写入本机 INI 文件：
+Windows 为 `%APPDATA%\BladeShape\ActiveLearningGUI.ini`，macOS/Linux 为 `~/.config/BladeShape/ActiveLearningGUI.ini`。
+删除该文件即恢复为空白状态；环境变量 `BLADE_GUI_SETTINGS` 可指向另一个 INI 文件（测试与便携使用）。
+CFX-Post 程序等字段只把配置推导的路径作为灰色提示，不会自动填入。
 
 ## 界面结构
 
@@ -141,7 +148,7 @@ python -m blade_gui --config D:\other\cfg.json --data-dir D:\copied\results
 
 ### 6. 验证（展向几何攻角诊断）
 
-“验证”页（`Ctrl+6`）左侧是七项入口的表单：待核对配置准备、展向攻角提取、截面/分带敏感性、20点旧指标复现、基准/目标工况对比、进口角敏感性方案生成与真实CFD执行。每个动作都标注影响范围（只读后处理 / 写新文件 / 真实 CFD），路径可手填或浏览；选择「新输出目录」的父目录后会自动追加带时间戳、尚不存在的子目录名，已存在的输出会提前提示（CLI 拒绝覆盖）。准备配置时可「从优化算例填入」：按 `cfx_state.json` 的完成凭据找到已接受的 `.res`，并填入 `candidate.json`；没有凭据时只提示，不替你确认。
+“验证”页（`Ctrl+6`）左侧是八项入口的表单：待核对配置准备、展向攻角提取、截面/分带敏感性、ACA 20 点 CSV 导出、20点旧指标复现、基准/目标工况对比、进口角敏感性方案生成与真实CFD执行。每个动作都标注影响范围（只读后处理 / 写新文件 / 真实 CFD），路径可手填或浏览；选择「新输出目录」的父目录后会自动追加带时间戳、尚不存在的子目录名，已存在的输出会提前提示（CLI 拒绝覆盖）。准备配置时可「从优化算例填入」：按 `cfx_state.json` 的完成凭据找到已接受的 `.res`，并填入 `candidate.json`；没有凭据时只提示，不替你确认。
 
 右侧「攻角诊断」标签页只读显示 CLI 写出的结果，命令结束（含退出码 2 的质量未通过）后自动载入对应输出，也可手动打开任意结果目录：
 
@@ -150,6 +157,7 @@ python -m blade_gui --config D:\other\cfg.json --data-dir D:\copied\results
 | `extract` 目录 | RMS / 平均 / 最大 \|i\|、整轮净流量、逆流占比与质量闭合；叶片角 β_b 与来流角 β_f 的展向分布、几何攻角 i(span)（含 ±RMS 参考线）、正向流量份额与逐带逆流占比（含阈值）、相对速度分量 W_s / W_θ；分带明细表（攻角列按正负着色） |
 | 叠加基准 | 仅当方法与测量定义（截面、分带、方向约定、逆流阈值）完全一致才允许，规则与 `compare` 一致；叠加后显示基准曲线与逐带 Δi，否则拒绝并说明原因 |
 | `sweep` 目录 | RMS vs 截面位置（按分带数分线）、各测量定义的 i(span) 叠加、RMS 范围与极差、`sensitivity.csv` |
+| `aca` 导出 | 不进入查看器；成功后把两列 CSV 自动填入「复现报告20点指标」的「原始 ACA CSV」，象限不满足时在日志中警告 |
 | `legacy` 目录 | 20 点旧指标的 β_b / β_f / i 与原始 β_cfx；标明与质量加权指标不可混比 |
 | `compare` 结果 | CLI 写出的匹配结论、流量相对差与 ΔRMS；可一键叠加两侧的展向分布 |
 | `plan` 目录 | 方案点状态、Efficiency / MassFlow 随前缘角偏移的变化、已完成点之间的有限差分斜率与曲率 |

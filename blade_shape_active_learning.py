@@ -17,6 +17,7 @@ import pandas as pd
 
 from blade_shape_cfx_runner import run_cfx_pipeline
 from blade_shape_convergence import ConvergencePolicy
+from blade_shape_local_config import apply_local_paths
 import blade_shape_refinement as refinement
 from blade_shape_acquisition import expected_hvi
 import blade_shape_pending as pending
@@ -87,6 +88,12 @@ def load_config(path: str | Path) -> dict[str, Any]:
     config_path = Path(path)
     payload = json.loads(config_path.read_text(encoding="utf-8"))
     payload["_config_path"] = str(config_path.resolve())
+    apply_local_paths(payload, config_path)
+    local = payload.get("_local_paths", {})
+    empty = [key for key in local.get("keys", []) if not payload["paths"].get(key)]
+    if empty:
+        where = local["ini"] if local.get("found") else f"{local['ini']} (not found; copy blade_shape_local.ini.example)"
+        print(f"Warning: empty paths {', '.join(empty)}; set them in {where}", file=sys.stderr)
     ConvergencePolicy.from_config(payload)
     refinement.active_indices(payload)
     return payload
@@ -231,7 +238,12 @@ def constraint_violations(config: dict[str, Any], baseline: BaselineShape, x: np
 
 
 def output_dir(config: dict[str, Any]) -> Path:
-    return Path(config["paths"]["output_dir"])
+    value = str(config["paths"].get("output_dir") or "").strip()
+    if not value:
+        # Path('') would silently mean the current directory
+        ini = config.get("_local_paths", {}).get("ini", "blade_shape_local.ini")
+        raise ValueError(f"paths.output_dir is empty; set it in {ini} (see blade_shape_local.ini.example)")
+    return Path(value)
 
 
 def training_csv_path(config: dict[str, Any]) -> Path:

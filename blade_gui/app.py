@@ -12,7 +12,6 @@ from PySide6.QtWidgets import QApplication
 from . import icons, theme
 from .context import APP_NAME, ORG_NAME, AppContext
 from .main_window import MainWindow
-from .project import DEFAULT_CONFIG_PATH
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -20,7 +19,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="blade_gui",
         description="Blade-shape active-learning desktop console.",
     )
-    parser.add_argument("--config", default=None, help=f"配置文件路径（默认 {DEFAULT_CONFIG_PATH}）")
+    parser.add_argument("--config", default=None, help="配置文件路径（省略时使用上次选择的配置；首次启动为空）")
     parser.add_argument("--data-dir", default=None, help="覆盖 paths.output_dir，只读已有结果")
     return parser
 

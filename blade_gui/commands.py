@@ -135,6 +135,7 @@ VALIDATION_OPTIONS = {
     'init': ('res', 'geometry_source', 'candidate', 'output'),
     'extract': ('spec', 'post_exe', 'output_dir'),
     'sweep': ('spec', 'post_exe', 'stations', 'bands', 'output_dir'),
+    'aca': ('res', 'post_exe', 'session', 'output_dir'),
     'legacy': ('csv', 'hub_beta_deg', 'shroud_beta_deg', 'output_dir'),
     'compare': ('baseline', 'target', 'flow_tolerance', 'output'),
     'plan': ('config', 'candidate', 'step_deg', 'pressures_pa', 'output_dir'),

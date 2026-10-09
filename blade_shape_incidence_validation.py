@@ -1,6 +1,6 @@
 """Independent, auditable spanwise incidence validation; never an optimizer label.
 
-Use --help for path-based preparation, CFX-Post extraction, legacy reproduction,
+Use --help for path-based preparation, CFX-Post extraction, ACA export, legacy reproduction,
 matched-point comparison and budgeted endpoint-angle sensitivity experiments.
 """
 from __future__ import annotations
@@ -607,6 +607,10 @@ def main(argv: list[str] | None = None) -> int:
     sweep.add_argument('--output-dir',type=Path,required=True)
     sweep.add_argument('--stations',type=float,nargs='+',required=True)
     sweep.add_argument('--bands',type=int,nargs='+',required=True)
+    aca=commands.add_parser('aca',help='CFX-Post only: export the 20-point ACA Beta CSV with a saved session')
+    aca.add_argument('--res',type=Path,required=True);aca.add_argument('--post-exe',type=Path,required=True)
+    aca.add_argument('--session',type=Path,required=True,help='Saved extract_aca.cse defining the spanwise line')
+    aca.add_argument('--output-dir',type=Path,required=True)
     legacy=commands.add_parser('legacy',help='Reproduce confirmed-quadrant ACA 20-point report metric')
     legacy.add_argument('--csv',type=Path,required=True);legacy.add_argument('--hub-beta-deg',type=float,required=True)
     legacy.add_argument('--shroud-beta-deg',type=float,required=True);legacy.add_argument('--output-dir',type=Path,required=True)
@@ -640,6 +644,10 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command=='sweep':
         rows=measurement_sweep(load_spec(args.spec),args.post_exe,args.output_dir,args.stations,args.bands)
         return 0 if all(row['quality_ok'] for row in rows) else 2
+    elif args.command=='aca':
+        from blade_shape_aca_extraction import extract_aca
+        print(f'Output: {args.output_dir.resolve()}');print('Reading result in CFX-Post...',flush=True)
+        print(json.dumps(extract_aca(args.res,args.post_exe,args.session,args.output_dir),indent=2))
     elif args.command=='legacy':
         with args.csv.open(encoding='utf-8-sig',newline='') as stream: rows=list(csv.DictReader(stream))
         rows,summary=legacy_profile(rows,args.hub_beta_deg,args.shroud_beta_deg)

@@ -310,7 +310,8 @@ def main() -> int:
     if args.post_exe is not None:
         post_exe = args.post_exe
     else:
-        config = json.loads(args.config.read_text(encoding="utf-8"))
+        from blade_shape_local_config import apply_local_paths
+        config = apply_local_paths(json.loads(args.config.read_text(encoding="utf-8")), args.config)
         post_exe = Path(config["paths"]["cfx_bin_dir"]) / "cfx5post.exe"
     rows = [
         analyze_res(

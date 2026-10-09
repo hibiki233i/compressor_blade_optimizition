@@ -28,6 +28,7 @@
 | `blade_shape_pending.py`、`blade_shape_runtime.py` | 待处理队列、恢复与运行时保护 |
 | `blade_shape_flow_diagnostics.py` | 对已有 `.res` 做只读熵增和近叶片流向角诊断；不改变优化目标 |
 | `blade_shape_incidence_validation.py` | 可变目标路径的展向攻角验证、旧指标复现、工况比较及预算化进口角敏感性试验 |
+| `blade_shape_aca_extraction.py` | 用保存的 CFX-Post session 从已有 `.res` 导出 20 点 Velocity Beta ACA，并整理为 `legacy` 所需的两列 CSV |
 | `blade_gui/` | 六页桌面控制台：总览、分析、设置、运行、算例浏览、验证 |
 | `tests/` | Python 与离屏 GUI 测试；合成模板仅供测试 |
 
@@ -35,13 +36,19 @@
 
 进出口熵增与叶片角匹配的初步实测、独立提取命令和单位问题见 [流动诊断评估](README_flow_diagnostics.md)。目前该诊断不会修改现有训练数据、Pareto 前沿或 CFD 续跑状态。
 
-目标叶轮的验证入口和可变路径示例见 [展向攻角验证](README_incidence_validation.md)。支持 `init`、`extract`、`sweep`、`legacy`、`compare`、`plan`、`run`，真实敏感性计算复用原 CFD 链并写独立目录；需明确 `--max-new-cfd`。
+目标叶轮的验证入口和可变路径示例见 [展向攻角验证](README_incidence_validation.md)。支持 `init`、`extract`、`sweep`、`aca`、`legacy`、`compare`、`plan`、`run`，真实敏感性计算复用原 CFD 链并写独立目录；需明确 `--max-new-cfd`。
 
 ## 运行条件与配置
 
 - Python 3.10+；核心 Python 依赖为 NumPy、Pandas。SciPy、scikit-learn 用于相应的采样与 GP/Kriging 实现；缺少 scikit-learn 时，代码会回退到 RBF-ridge 集成代理。
 - 桌面界面额外需要 PySide6，可通过 `requirements-gui.txt` 安装。
-- **真实几何、网格和 CFD 流程**需要 Windows、PowerShell 7、CFturbo、ANSYS TurboGrid 和 ANSYS CFX。仓库配置当前指向 CFturbo 2025.2.2 与 ANSYS 2025 R1 的本机安装路径；运行前须按实际机器修改 `blade_shape_config.json` 的 `paths`。
+- **真实几何、网格和 CFD 流程**需要 Windows、PowerShell 7、CFturbo、ANSYS TurboGrid 和 ANSYS CFX。本机路径不入库：`blade_shape_config.json` 的 `paths.*` 留空，由同目录下未跟踪的 `blade_shape_local.ini` 的 `[paths]` 段补齐（JSON 中写了非空值的以 JSON 为准；环境变量 `BLADE_SHAPE_LOCAL_INI` 可指向别处）。首次使用先复制模板并按本机修改：
+
+  ```powershell
+  Copy-Item blade_shape_local.ini.example blade_shape_local.ini
+  ```
+
+  模板里是原先写在 JSON 中的 CFturbo 2025.2.2 / ANSYS 2025 R1 路径。保持字符串完全一致时，已有运行记录的输入签名不变，可照常续跑。界面「项目设置」保存时也把这些路径写回该 INI，而不是 JSON。`*.ini` 已加入 `.gitignore`。
 - `Templates/` 中的基准工程与求解器生成文件不随仓库提供。运行候选生成前，至少要准备配置所指向的 `cft_batch_template`；完整流程还需要其余模板与软件路径。
 
 在仓库根目录安装 Python 依赖：
@@ -98,7 +105,7 @@ python -m blade_gui --data-dir "D:\copied\blade_al_runs"
 
 ## 主要输出与结果边界
 
-输出位置由 `blade_shape_config.json` 的 `paths.output_dir` 决定：
+输出位置由 `paths.output_dir` 决定（通常在 `blade_shape_local.ini` 中设置）：
 
 | 文件或目录 | 内容 |
 | --- | --- |

@@ -62,6 +62,23 @@ CFX session 复用现有 Turbo 初始化与截面生成器。分带 `if()` 的�
 
 把原始导出的目标曲线整理成严格的两列 CSV：`span,beta_cfx_deg`。要求 20 行、按 `j/19` 从 0 到 1 排序；叶高精度至少 6 位小数。这里读取的是原始 `Velocity Beta ACA` 数据，不是当前模块产生的质量加权流角，也不是旧报告中已计算出的攻角。
 
+### 从 `.res` 自动导出 ACA CSV
+
+`aca` 子命令让 CFX-Post 在已有 `.res` 上重放**保存的** Turbo 展向测量线 session（原流程的 `extract_aca.cse`：`R1`、Blade Aligned `0.251`、Hub→Shroud 20 点含边界、Equal Distance、Area 周向平均、`Beta = 90 [degree] - Velocity Flow Angle`），不生成几何、网格，也不求解：
+
+```powershell
+python blade_shape_incidence_validation.py aca --res 'D:\Kn\sliptip_las_temre_007.res' `
+  --post-exe 'D:\ANSYS Inc\v251\CFD-Post\bin\cfx5post.exe' `
+  --session 'D:\compressor_blade_optimizition\ansys_work\legacy_aca_20261001_181929\extract_aca.cse' `
+  --output-dir "$ValidationRoot\aca_007"
+```
+
+session 是测量定义的唯一来源：程序复制它到新输出目录，从中解析并记录 `Streamwise Location`、`Span Points`、`Turbo Domain List`、平均方式等设置，而不是写死这些元数据；`Export File` 必须是相对路径（落在输出目录内）。改测量定义时只需换 session。session 未随仓库分发，换机器时需一并拷贝。
+
+成功前要求：返回码 0、导出文件存在、`cfdpost_error.log` 不存在或为空、`.res` 与 session 前后 SHA-256 一致、表头为 `Span Normalized` 与 `Velocity Beta ACA on <线名> [ degree ]`、恰好 20 个有限点且 `|span_j - j/19| ≤ 1e-6`。数值按原文本写入 `<res主体>_beta_aca_20.csv`，不换算、不插值。`legacy_aca_quadrant_ok=false` 时仍写 CSV（`legacy` 会拒绝该象限）。输出目录另含 `extract_aca.cse`、`extraction_inputs.json`、`cfxpost.log`、`returncode.json`、原始导出与 `extraction_summary.json`（`status` 为 `running` / `failed` / `complete`）；失败时保留全部日志。`status=complete` 只表示导出与格式检查完成，不代表攻角复现适用或 CFD 质量已接受。测量线名称含 `LE` 不能证明其恰在前缘，换几何时应核对实际位置。
+
+GUI「验证 → 导出 ACA 20 点 CSV」执行同一命令，成功后自动把 CSV 填入「复现报告20点指标」。
+
 ```powershell
 $LegacyCsv = 'D:\my_project\exports\target_beta_aca.csv'
 $HubBeta = 70.356
