@@ -23,6 +23,8 @@ class LocalPathsTests(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
         os.environ.pop(local.LOCAL_INI_ENV, None)
+        for key in [key for key in os.environ if local.ANSYS_ROOT_ENV.fullmatch(key)]:
+            del os.environ[key]
 
     def test_ini_fills_only_empty_json_paths(self):
         self.ini.write_text('# machine\n[paths]\ncfx_bin_dir = D:\\ANSYS Inc\\v251\\CFX\\bin\n'
@@ -47,6 +49,81 @@ class LocalPathsTests(unittest.TestCase):
         os.environ[local.LOCAL_INI_ENV] = str(other)
         config = local.apply_local_paths({'paths': {'cfx_bin_dir': ''}}, self.config_path)
         self.assertEqual(config['paths']['cfx_bin_dir'], '/opt/cfx')
+
+    def test_ansys_tools_derived_from_awp_root(self):
+        cfx, tg = os.path.join('/ansys/v251', 'CFX', 'bin'), os.path.join('/ansys/v251', 'TurboGrid', 'bin', 'cfxtg.exe')
+        empty = lambda: {'paths': {'cfx_bin_dir': '', 'turbogrid_exe': '', 'base_cft': ''}}
+        os.environ['AWP_ROOT251'] = '/ansys/v251'
+        # no INI, a single install: used without a version
+        config = local.apply_local_paths(empty(), self.config_path)
+        self.assertEqual((config['paths']['cfx_bin_dir'], config['paths']['turbogrid_exe']), (cfx, tg))
+        self.assertEqual(config[local.META_KEY]['sources'], {'cfx_bin_dir': 'AWP_ROOT251', 'turbogrid_exe': 'AWP_ROOT251'})
+        # an explicit INI path wins; a non-empty JSON path is never replaced
+        self.ini.write_text('[paths]\nturbogrid_exe = D:\\tg.exe\n')
+        config = local.apply_local_paths({'paths': {'cfx_bin_dir': 'C:\\json', 'turbogrid_exe': ''}}, self.config_path)
+        self.assertEqual(config['paths'], {'cfx_bin_dir': 'C:\\json', 'turbogrid_exe': 'D:\\tg.exe'})
+        # several installs: only an explicit version selects one
+        os.environ['AWP_ROOT242'] = '/ansys/v242'
+        config = local.apply_local_paths(empty(), self.config_path)
+        self.assertEqual(config['paths']['cfx_bin_dir'], '')
+        self.assertIn('242、251', config[local.META_KEY]['ansys_problem'])
+        self.ini.write_text('[ansys]\nversion = v251\n')
+        config = local.apply_local_paths(empty(), self.config_path)
+        self.assertEqual(config['paths']['cfx_bin_dir'], cfx)
+        self.assertEqual(config[local.META_KEY]['ansys_problem'], '')
+        self.ini.write_text('[ansys]\nversion = 252\n')
+        config = local.apply_local_paths(empty(), self.config_path)
+        self.assertEqual(config['paths']['cfx_bin_dir'], '')
+        self.assertIn('AWP_ROOT252', config[local.META_KEY]['ansys_problem'])
+
+    def test_diagnostics_explain_why_ini_is_not_used(self):
+        misnamed = self.root / (local.LOCAL_INI_NAME + '.txt')
+        misnamed.write_text('[paths]\ncfx_bin_dir = D:\\cfx\n')
+        config = local.apply_local_paths({'paths': {'cfx_bin_dir': ''}}, self.config_path)
+        self.assertEqual(config['paths']['cfx_bin_dir'], '')
+        self.assertIn('改名', local.describe_local_paths(config)[0][1])
+        misnamed.rename(self.ini)
+        config = local.apply_local_paths({'paths': {'cfx_bin_dir': 'C:\\json'}}, self.config_path)
+        levels = dict((message.split('：')[0], level) for level, message in local.describe_local_paths(config))
+        self.assertEqual(levels['本机路径文件'], 'info')
+        self.assertEqual(config[local.META_KEY]['ignored'], ['cfx_bin_dir'])
+        self.assertTrue(any('未生效' in m for _, m in local.describe_local_paths(config)))
+        from blade_gui.project import validate_config
+        self.assertTrue(any('未生效' in item.message and item.level == 'warning' for item in validate_config(config)))
+
+    def test_save_writes_only_edited_paths_and_never_derived_ones(self):
+        from blade_gui.project import read_config_file, save_config
+        os.environ['AWP_ROOT251'] = '/ansys/v251'
+        self.config_path.write_text(json.dumps({'paths': {'cfx_bin_dir': '', 'turbogrid_exe': '', 'base_cft': '',
+                                                          'output_dir': ''}, 'runtime': {}}))
+        self.ini.write_text('# mine\n[paths]\nbase_cft = D:\\b.cft\noutput_dir = D:\\runs\n\n[ansys]\nversion = 251\n')
+        before = self.ini.read_bytes()
+        config = read_config_file(self.config_path)
+        save_config(self.config_path, config, keep_backup=False)
+        self.assertEqual(self.ini.read_bytes(), before)
+        config['paths']['output_dir'] = 'E:\\runs'
+        save_config(self.config_path, config, keep_backup=False)
+        self.assertEqual(local.read_local_paths(self.ini), {'base_cft': 'D:\\b.cft', 'output_dir': 'E:\\runs'})
+        self.assertIn('version = 251', self.ini.read_text())
+        # "save as" copies the INI values but leaves the derived ANSYS paths to the new location
+        target = self.root / 'copy' / 'cfg.json'
+        target.parent.mkdir()
+        save_config(target, config, keep_backup=False)
+        self.assertEqual(local.read_local_paths(target.parent / local.LOCAL_INI_NAME),
+                         {'base_cft': 'D:\\b.cft', 'output_dir': 'E:\\runs'})
+
+    def test_report_command_prints_sources(self):
+        import contextlib
+        import io
+        os.environ['AWP_ROOT251'] = '/ansys/v251'
+        self.config_path.write_text(json.dumps({'paths': {'cfx_bin_dir': '', 'output_dir': 'shared'}}))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(local.main([str(self.config_path)]), 0)
+        text = out.getvalue()
+        self.assertIn('AWP_ROOT251', text)
+        self.assertRegex(text, r'output_dir\s+json\s+shared')
+        self.assertFalse(self.ini.exists())
 
     def test_write_keeps_comments_and_other_sections(self):
         self.ini.write_text('; keep me\n[other]\na = 1\n\n[paths]\n# note\ncfx_bin_dir = old\n\n[tail]\nb = 2\n')

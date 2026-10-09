@@ -48,7 +48,15 @@
   Copy-Item blade_shape_local.ini.example blade_shape_local.ini
   ```
 
-  模板里是原先写在 JSON 中的 CFturbo 2025.2.2 / ANSYS 2025 R1 路径。保持字符串完全一致时，已有运行记录的输入签名不变，可照常续跑。界面「项目设置」保存时也把这些路径写回该 INI，而不是 JSON。`*.ini` 已加入 `.gitignore`。
+  模板里是原先写在 JSON 中的 CFturbo 2025.2.2 / ANSYS 2025 R1 路径。保持字符串完全一致时，已有运行记录的输入签名不变，可照常续跑。界面「项目设置」保存时只把改动过的路径写回该 INI，而不是 JSON。`*.ini` 已加入 `.gitignore`。
+
+  `cfx_bin_dir` 和 `turbogrid_exe` 在 JSON 与 INI 中都留空（或删掉这两行）时，由 ANSYS 安装程序设置的环境变量 `AWP_ROOT<版本>` 推导为 `<根目录>\CFX\bin` 与 `<根目录>\TurboGrid\bin\cfxtg.exe`。版本用 INI 的 `[ansys] version = 251` 指定；不写时只在本机恰好装了一个版本时自动采用，装了多个版本则不推导并提示指定，以免新装一个版本就悄悄换掉求解器（`cfx_bin_dir` 属于 CFX 续跑签名）。
+
+  INI 没有生效时，用下面的只读命令查看每个路径的实际取值与来源（`ini`、`AWP_ROOT251` 或 `json`），以及 INI 是否被找到、是否被 JSON 非空值覆盖、是否被 Windows 存成了 `blade_shape_local.ini.txt`；界面「项目设置 → 路径配置」也显示同样的说明：
+
+  ```powershell
+  python blade_shape_local_config.py blade_shape_config.json
+  ```
 - `Templates/` 中的基准工程与求解器生成文件不随仓库提供。运行候选生成前，至少要准备配置所指向的 `cft_batch_template`；完整流程还需要其余模板与软件路径。
 
 在仓库根目录安装 Python 依赖：

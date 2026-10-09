@@ -29,7 +29,7 @@ if str(CODE_DIR) not in sys.path:  # allow `python -m blade_gui` from anywhere
 
 from blade_shape_local_config import META_KEY as LOCAL_META_KEY  # noqa: E402
 from blade_shape_local_config import (  # noqa: E402
-    apply_local_paths, local_ini_path, split_local_paths, write_local_paths,
+    apply_local_paths, describe_local_paths, local_ini_path, split_local_paths, write_local_paths,
 )
 
 #: the tracked example config (shareable settings only; paths come from the local INI)
@@ -159,6 +159,7 @@ def validate_config(config: dict[str, Any]) -> list[Issue]:
         except (TypeError, ValueError):
             issues.append(Issue("error", f"constraints.{key} 必须是数字。"))
 
+    issues += [Issue(level, message) for level, message in describe_local_paths(config)]
     # path existence is a warning: the GUI is often opened off the CFD host
     for key in ("geometry_script_path", "base_cft", "cft_batch_template", "turbogrid_template",
                 "template_cfx", "template_cse", "powershell_exe", "cfturbo_exe", "turbogrid_exe"):
@@ -182,10 +183,10 @@ def save_config(path: str | Path, config: dict[str, Any], *, keep_backup: bool =
     """Atomically write ``config`` to ``path``, keeping one ``.bak`` copy."""
     config_path = Path(path)
     # machine paths go back to the local INI next to the (possibly new) config file
-    shared, local = split_local_paths(config)
+    ini = local_ini_path(config_path)
+    shared, local = split_local_paths(config, ini)
     payload = {key: value for key, value in shared.items() if not key.startswith("_")}
     text = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
-    ini = local_ini_path(config_path)
     previous = ini.read_bytes() if local and ini.is_file() else None
     if local:
         write_local_paths(ini, local)

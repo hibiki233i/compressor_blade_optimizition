@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..project import Issue, config_errors, save_config, validate_config
+from ..project import Issue, config_errors, describe_local_paths, save_config, validate_config
 from ..widgets import (
     Badge,
     Card,
@@ -382,6 +382,13 @@ class ConfigPage(Page):
 
         for section in SECTIONS:
             card = Card(section.title, section.hint)
+            if section.fields is PATH_FIELDS:
+                # where each machine path came from (INI, AWP_ROOT, or why it is missing)
+                self.local_note = QLabel()
+                self.local_note.setObjectName("CardHint")
+                self.local_note.setWordWrap(True)
+                self.local_note.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                card.body.addWidget(self.local_note)
             form = QVBoxLayout()
             form.setSpacing(7)
             for spec in section.fields:
@@ -487,6 +494,9 @@ class ConfigPage(Page):
             else:
                 widget.setText(str(value))
         self.variable_table.load(config)
+        self.local_note.setText("\n".join(("⚠ " if level == "warning" else "") + message
+                                           for level, message in describe_local_paths(config)))
+        self.local_note.setVisible(bool(self.local_note.text()))
         self.path_label.setText(f"配置文件：{self.ctx.project.config_path or '未选择（保存时另存为）'}")
         self._set_dirty(False)
         self._update_validation(config, saved=True)

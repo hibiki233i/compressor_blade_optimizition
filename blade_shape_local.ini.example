@@ -2,6 +2,8 @@
 # blade_shape_config.json 中 paths.* 留空的项从这里读取；JSON 中写了非空值的以 JSON 为准。
 # 值按原样使用（相对路径相对于命令的工作目录），建议写绝对路径；不要加引号。
 # 以下为原 blade_shape_config.json 中的取值。保持字符串完全一致，已有运行的输入签名与续跑才不受影响。
+# 新电脑可删掉 cfx_bin_dir 与 turbogrid_exe 两行，改由下方 [ansys] 的版本从环境变量 AWP_ROOT<版本> 推导。
+# 排查：python blade_shape_local_config.py blade_shape_config.json 显示每个路径的取值与来源。
 
 [paths]
 powershell_exe = C:\Program Files\PowerShell\7\pwsh.exe
@@ -16,3 +18,8 @@ turbogrid_template = D:\blade optizamation\Templates\BaseMeshing.tst
 template_cfx = D:\blade optizamation\Templates\BaseModel.cfx
 template_cse = D:\blade optizamation\Templates\Extract_Results.cse
 output_dir = D:\blade optizamation\blade_al_runs
+
+[ansys]
+# 对应环境变量 AWP_ROOT<version>，例如 251 → AWP_ROOT251 = D:\ANSYS Inc\v251。
+# 留空时仅在本机只装了一个 ANSYS 版本时自动采用；[paths] 中写明的 cfx_bin_dir / turbogrid_exe 优先。
+version = 251

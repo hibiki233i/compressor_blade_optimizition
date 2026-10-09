@@ -20,6 +20,9 @@ from successful CFD evaluations.
   bounds. Its `paths.*` are left empty and filled from the untracked
   `blade_shape_local.ini` beside it (copy `blade_shape_local.ini.example`); a
   non-empty JSON path takes precedence.
+  `cfx_bin_dir` / `turbogrid_exe` left empty in both are derived from the
+  ANSYS `AWP_ROOT<version>` variable (`[ansys] version`, or the only installed
+  version); `python blade_shape_local_config.py <config>` prints each path's source.
 
 ## Variables
 
