@@ -238,7 +238,12 @@ def constraint_violations(config: dict[str, Any], baseline: BaselineShape, x: np
 
 
 def output_dir(config: dict[str, Any]) -> Path:
-    return Path(config["paths"]["output_dir"])
+    value = str(config["paths"].get("output_dir") or "").strip()
+    if not value:
+        # Path('') would silently mean the current directory
+        ini = config.get("_local_paths", {}).get("ini", "blade_shape_local.ini")
+        raise ValueError(f"paths.output_dir is empty; set it in {ini} (see blade_shape_local.ini.example)")
+    return Path(value)
 
 
 def training_csv_path(config: dict[str, Any]) -> Path:

@@ -44,7 +44,8 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(settings['Streamwise Location'], ['0.251'])
         self.assertEqual(settings['Turbo Domain List'], ['R1'])
         self.assertEqual(aca.export_name(settings), 'aca_raw.csv')
-        for bad in ('D:\\exports\\aca_raw.csv', '/tmp/aca.csv', '../aca.csv'):
+        for bad in ('D:\\exports\\aca_raw.csv', '/tmp/aca.csv', '../aca.csv', '\\exports\\aca_raw.csv',
+                    'D:aca_raw.csv', 'sub\\..\\..\\aca.csv'):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 aca.export_name({'Export File': [bad]})
         with self.assertRaises(ValueError):

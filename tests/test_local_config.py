@@ -79,6 +79,28 @@ class LocalPathsTests(unittest.TestCase):
         save_config(target, config, keep_backup=False)
         self.assertEqual(local.read_local_paths(target.parent / local.LOCAL_INI_NAME), {'cfx_bin_dir': 'E:\\cfx'})
 
+    def test_failed_json_save_rolls_back_ini(self):
+        from blade_gui.project import read_config_file, save_config
+        self.config_path.write_text(json.dumps({'paths': {'output_dir': ''}, 'runtime': {}}))
+        self.ini.write_text('# mine\n[paths]\noutput_dir = D:\\old\n')
+        before = self.ini.read_bytes()
+        config = read_config_file(self.config_path)
+        config['paths']['output_dir'] = 'D:\\new'
+        with patch('blade_gui.project.shutil.copy2', side_effect=PermissionError('backup')), \
+                self.assertRaises(PermissionError):
+            save_config(self.config_path, config)
+        self.assertEqual(self.ini.read_bytes(), before)
+        self.ini.unlink()
+        with patch('blade_gui.project.shutil.copy2', side_effect=PermissionError('backup')), \
+                self.assertRaises(PermissionError):
+            save_config(self.config_path, config)
+        self.assertFalse(self.ini.exists())
+
+    def test_empty_output_dir_is_rejected_not_cwd(self):
+        import blade_shape_active_learning as al
+        with self.assertRaisesRegex(ValueError, 'output_dir is empty'):
+            al.output_dir({'paths': {'output_dir': ''}})
+
     def test_cli_loader_uses_ini(self):
         import blade_shape_active_learning as al
         config = json.loads((ROOT / 'blade_shape_config.json').read_text())

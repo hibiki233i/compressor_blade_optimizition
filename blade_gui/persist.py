@@ -29,10 +29,17 @@ def remember(ctx, key: str, widget: QWidget) -> None:
             widget.setCurrentText(stored)
         widget.currentTextChanged.connect(lambda text: ctx.write_setting(key, text))
     elif isinstance(widget, QComboBox):
-        index = widget.findData(stored) if stored is not None else -1
+        index = -1
+        if stored is not None:
+            index = widget.findData(stored)
+            index = index if index >= 0 else widget.findText(stored)
         if index >= 0:
             widget.setCurrentIndex(index)
-        widget.currentIndexChanged.connect(lambda i: ctx.write_setting(key, str(widget.itemData(i))))
+
+        def store(i: int) -> None:
+            data = widget.itemData(i)
+            ctx.write_setting(key, widget.itemText(i) if data is None else str(data))
+        widget.currentIndexChanged.connect(store)
     elif isinstance(widget, QCheckBox):
         if stored is not None:
             widget.setChecked(stored.lower() in {"true", "1"})

@@ -52,6 +52,28 @@ class RememberedSettingsTests(ProjectFixture):
         finally:
             self.close(window)
 
+    def test_first_config_choice_copies_run_defaults(self):
+        ctx, window = self.open_window()
+        try:
+            run = window.pages[3]
+            ctx.set_config_path(self.config_path)
+            self.app.processEvents()
+            self.assertEqual(run.run_max.value(), 2)
+            self.assertIn('--max-new-cfd 2', run.preview.toPlainText())
+            run.run_max.setValue(1)
+            run.boundary_stage.setCurrentText('extension')
+            run.cand_offline.setChecked(True)
+        finally:
+            self.close(window)
+        ctx, window = self.open_window()
+        try:
+            run = window.pages[3]
+            self.assertEqual(run.run_max.value(), 1)
+            self.assertEqual(run.boundary_stage.currentText(), 'extension')
+            self.assertTrue(run.cand_offline.isChecked())
+        finally:
+            self.close(window)
+
     def test_inputs_layout_and_config_survive_restart(self):
         ctx, window = self.open_window()
         ctx.set_config_path(self.config_path)

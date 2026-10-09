@@ -71,8 +71,10 @@ class RunPage(Page):
         self._timer.timeout.connect(self._tick)
         self._build()
         self.refresh()
-        for key, widget in (("action", self.action_box), ("plan_path", self.plan_path),
-                            ("boundary_plan", self.boundary_plan), ("splitter", self._splitter)):
+        # remembered values win over the config defaults copied by refresh(); 「重置」 restores those
+        remember(ctx, "run/action", self.action_box)
+        remember(ctx, "run/splitter", self._splitter)
+        for key, widget in self._remembered_widgets().items():
             remember(ctx, f"run/{key}", widget)
 
     # ------------------------------------------------------------- layout
@@ -320,6 +322,17 @@ class RunPage(Page):
         form.addRow("", self.boundary_resume)
         return page
 
+    def _remembered_widgets(self) -> dict[str, QWidget]:
+        return {
+            "initial_samples": self.run_initial, "iterations": self.run_iterations,
+            "batch_size": self.run_batch, "max_new_cfd": self.run_max, "seed": self.run_seed,
+            "resume": self.run_resume, "candidate_index": self.cand_index, "candidate_seed": self.cand_seed,
+            "candidate_dry_run": self.cand_dry, "candidate_offline": self.cand_offline,
+            "plan_center": self.plan_center, "plan_path": self.plan_path,
+            "boundary_plan": self.boundary_plan, "boundary_stage": self.boundary_stage,
+            "boundary_max_new_cfd": self.boundary_max, "boundary_resume": self.boundary_resume,
+        }
+
     def _parameter_widgets(self) -> list[QWidget]:
         return [
             self.run_initial, self.run_iterations, self.run_batch, self.run_max, self.run_seed,
@@ -341,7 +354,8 @@ class RunPage(Page):
     # ------------------------------------------------------------ refresh
     def refresh(self) -> None:
         self._run_project = None
-        if not self._params_initialized:
+        # an empty first launch has no defaults to copy; wait for the first chosen config
+        if not self._params_initialized and self.ctx.project.config_path is not None:
             self.apply_config_defaults()
             self._params_initialized = True
         self._sync_center_runs()

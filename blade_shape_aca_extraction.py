@@ -14,7 +14,7 @@ import math
 import re
 import shutil
 import subprocess
-from pathlib import Path, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from blade_shape_runtime import atomic_json, file_identity
@@ -51,8 +51,10 @@ def export_name(settings: dict[str, list[str]]) -> str:
     if len(names) != 1:
         raise ValueError(f'Session must declare exactly one Export File; found {names or "none"}')
     name = names[0].strip('"\'')
-    path = Path(name)
-    if not name or path.is_absolute() or PureWindowsPath(name).is_absolute() or '..' in path.parts:
+    windows, posix = PureWindowsPath(name), PurePosixPath(name)
+    # drive-relative (D:x.csv) and rooted (\\x.csv) names escape a joined directory on Windows
+    if (not name or windows.drive or windows.root or posix.root
+            or '..' in windows.parts or '..' in posix.parts):
         raise ValueError(f'Export File must be a relative path inside the output directory: {name!r}')
     return name
 
@@ -135,7 +137,9 @@ def extract_aca(res: Path, post_exe: Path, session: Path, output: Path) -> dict[
                                  text=True, encoding='utf-8', errors='replace', check=False)
         (output / 'cfxpost.log').write_text(process.stdout or '', encoding='utf-8')
         atomic_json(output / 'returncode.json', {'returncode': process.returncode})
-        raw, error = output / raw_name, output / 'cfdpost_error.log'
+        raw, error = (output / raw_name).resolve(), output / 'cfdpost_error.log'
+        if output not in raw.parents:
+            raise ValueError(f'Export File resolves outside the output directory: {raw}')
         if (process.returncode or not raw.is_file()
                 or (error.exists() and error.read_text(errors='replace').strip())):
             raise RuntimeError(f'CFX-Post export failed; logs retained at {output}')

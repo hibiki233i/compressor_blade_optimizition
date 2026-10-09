@@ -183,18 +183,28 @@ def save_config(path: str | Path, config: dict[str, Any], *, keep_backup: bool =
     config_path = Path(path)
     # machine paths go back to the local INI next to the (possibly new) config file
     shared, local = split_local_paths(config)
-    if local:
-        write_local_paths(local_ini_path(config_path), local)
     payload = {key: value for key, value in shared.items() if not key.startswith("_")}
     text = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
-    if keep_backup and config_path.exists():
-        stamp = time.strftime("%Y%m%d-%H%M%S")
-        backup_dir = config_path.parent / "config_backups"
-        backup_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(config_path, backup_dir / f"{config_path.name}.{stamp}.bak")
-    temp = config_path.with_suffix(config_path.suffix + ".tmp")
-    temp.write_text(text, encoding="utf-8")
-    temp.replace(config_path)
+    ini = local_ini_path(config_path)
+    previous = ini.read_bytes() if local and ini.is_file() else None
+    if local:
+        write_local_paths(ini, local)
+    try:
+        if keep_backup and config_path.exists():
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            backup_dir = config_path.parent / "config_backups"
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(config_path, backup_dir / f"{config_path.name}.{stamp}.bak")
+        temp = config_path.with_suffix(config_path.suffix + ".tmp")
+        temp.write_text(text, encoding="utf-8")
+        temp.replace(config_path)
+    except BaseException:
+        # a failed save must not leave half of it (the machine paths) applied
+        if local and previous is not None:
+            ini.write_bytes(previous)
+        elif local:
+            ini.unlink(missing_ok=True)
+        raise
     return config_path
 
 
