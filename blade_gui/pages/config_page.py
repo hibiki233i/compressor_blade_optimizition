@@ -171,7 +171,7 @@ REFINEMENT_FIELDS = [
     Field("refinement.diagnostic_min_points", "诊断门最少点数", "int", minimum=1, maximum=100000),
     Field("refinement.diagnostic_window", "诊断窗口", "int", minimum=1, maximum=100000),
     Field("refinement.diagnostic_gate.min_coverage_2sigma", "诊断门最低 2σ 覆盖率", "float",
-          minimum=0.01, maximum=1.0, decimals=4, step=0.05),
+          minimum=0.0001, maximum=1.0, decimals=4, step=0.05),
     Field("refinement.candidate_roles", "候选角色顺序", "csv", "逗号分隔"),
     Field("refinement.boundary_variables", "边界变量", "csv", "逗号分隔"),
     Field("refinement.extension.variable", "外推变量", "text"),
@@ -344,6 +344,8 @@ class ConfigPage(Page):
     def __init__(self, ctx, parent: QWidget | None = None):
         super().__init__(ctx, parent)
         self._bindings: dict[str, tuple[Field, QWidget]] = {}
+        # what each numeric widget showed right after loading (see _collect)
+        self._shown: dict[str, Any] = {}
         self._rows: dict[str, FormRow] = {}
         self._dirty = False
         self._build()
@@ -527,6 +529,7 @@ class ConfigPage(Page):
                                              **refinement.get("diagnostic_gate", {})}
         self._config_snapshot = config
         self._loaded_config_path = self.ctx.project.config_path
+        self._shown = {}
         for key, (spec, widget) in self._bindings.items():
             value = get_path(config, key)
             if value is None:
@@ -538,6 +541,7 @@ class ConfigPage(Page):
                     widget.setValue(type(widget.value())(value))
                 except (TypeError, ValueError):
                     continue
+                self._shown[key] = widget.value()
             elif spec.kind == "choice":
                 index = widget.findText(str(value))
                 if index >= 0:
@@ -572,15 +576,16 @@ class ConfigPage(Page):
         for key, (spec, widget) in self._bindings.items():
             if spec.kind == "bool":
                 set_path(config, key, bool(widget.isChecked()))
-            elif spec.kind == "int":
-                set_path(config, key, int(widget.value()))
-            elif spec.kind == "float":
-                # The spin box rounds to its decimals; an untouched value (e.g. 5/6) keeps full precision.
+            elif spec.kind in {"int", "float"}:
+                # A spin box rounds to its decimals and clamps to its range; a value the
+                # user has not changed (5/6, a threshold below the widget minimum)
+                # stays as the config holds it, and validation judges that value.
                 original = get_path(config, key)
-                if (isinstance(original, (int, float)) and not isinstance(original, bool)
-                        and math.isfinite(original) and round(float(original), widget.decimals()) == widget.value()):
+                if (key in self._shown and widget.value() == self._shown[key]
+                        and isinstance(original, (int, float)) and not isinstance(original, bool)
+                        and math.isfinite(original)):
                     continue
-                set_path(config, key, float(widget.value()))
+                set_path(config, key, (int if spec.kind == "int" else float)(widget.value()))
             elif spec.kind == "choice":
                 set_path(config, key, widget.currentText())
             elif spec.kind == "path":

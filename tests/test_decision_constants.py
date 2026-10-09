@@ -314,6 +314,22 @@ class ConfigPageConstantTests(ProjectFixture):
         widget.setValue(.9)
         self.assertEqual(self.page._collect()['refinement']['diagnostic_gate']['min_coverage_2sigma'], .9)
 
+    def test_values_the_widget_cannot_show_survive_an_unrelated_save(self):
+        config = json.loads(self.config_path.read_text())
+        config['refinement']['diagnostic_gate'] = {'min_coverage_2sigma': 0.00005}
+        config['runtime']['cfx_cores'] = 1024
+        self.config_path.write_text(json.dumps(config))
+        self.ctx.project.reload()
+        self.page.reload_from_context()
+        self.page._bindings['runtime.seed'][1].setValue(7)
+        collected = self.page._collect()
+        self.assertEqual(collected['refinement']['diagnostic_gate']['min_coverage_2sigma'], 0.00005)
+        self.assertEqual(collected['runtime']['cfx_cores'], 1024)
+        self.assertEqual(collected['runtime']['seed'], 7)
+        # an edit still wins, within the widget's range
+        self.page._bindings['runtime.cfx_cores'][1].setValue(8)
+        self.assertEqual(self.page._collect()['runtime']['cfx_cores'], 8)
+
     def test_settings_alias_is_gone(self):
         self.assertFalse(hasattr(self.ctx, '_read_setting') or hasattr(self.ctx, '_write_setting'))
         self.assertEqual(self.ctx.read_setting('missing', 'x'), 'x')
