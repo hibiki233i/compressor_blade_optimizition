@@ -134,6 +134,12 @@ def validate_config(config: dict[str, Any]) -> list[Issue]:
 
     if len(names) != len(set(names)):
         issues.append(Issue("error", "变量名必须唯一。"))
+    elif names and len(names) == len(variables):
+        # Same name -> CFturbo mapping rule as the CLI's load_config.
+        try:
+            cli_module().geometry_indices(config)
+        except ValueError as exc:
+            issues.append(Issue("error", f"设计变量与几何映射不符：{exc}"))
 
     # Delegate the active/fixed partition + slice tolerance checks to the CLI.
     try:

@@ -44,9 +44,16 @@ VARIABLES = [
     {"name": "shroud_beta_0_deg_offset", "lower": -3.0, "upper": 3.0},
     {"name": "hub_theta_deg_offset", "lower": -1.5, "upper": 1.5},
 ]
+# The rest of the 12 meanline offsets, held at 0, so the config maps onto the geometry.
+FIXED_ZERO = [
+    *(f"hub_beta_{i}_deg_offset" for i in range(1, 5)),
+    *(f"shroud_beta_{i}_deg_offset" for i in range(1, 5)),
+    "shroud_theta_deg_offset",
+]
+VARIABLES += [{"name": name, "lower": -1.0, "upper": 1.0} for name in FIXED_ZERO]
 
 TRAINING_HEADER = [
-    "hub_beta_0_deg_offset", "shroud_beta_0_deg_offset", "hub_theta_deg_offset",
+    "hub_beta_0_deg_offset", "shroud_beta_0_deg_offset", "hub_theta_deg_offset", *FIXED_ZERO,
     "Efficiency", "PressureRatio", "MassFlow", "Power", "totalpressureratio",
     "sample_phase", "doe_index", "al_iteration", "batch_index", "selection_rank",
     "selection_source", "experiment_id", "design_role", "status", "failure_stage",
@@ -59,6 +66,8 @@ TRAINING_ROWS = [
     [0.9, 0.0, 0.2, 0.81, 1.09, 3.40, 99.0, 1.09, "active_learning", "", 0, 1, 1, "ehvi", "", "", "success", "", "", "case_000002", "case_000002"],
     [1.2, 0.3, -0.1, "", "", "", "", "", "active_learning", "", 0, 2, 2, "uncertainty", "", "", "failed", "mesh", "TurboGrid failed", "case_000003", "case_000003"],
 ]
+
+TRAINING_ROWS = [row[:3] + [0.0] * len(FIXED_ZERO) + row[3:] for row in TRAINING_ROWS]
 
 DIAGNOSTIC_HEADER = [
     "iteration", "run_id", "status", "selection_source", "candidate_role",
@@ -109,7 +118,7 @@ def make_config(output_dir: Path) -> dict:
         "variables": VARIABLES,
         "search": {
             "active_variables": ["hub_beta_0_deg_offset", "hub_theta_deg_offset"],
-            "fixed_variables": {"shroud_beta_0_deg_offset": -0.2},
+            "fixed_variables": {"shroud_beta_0_deg_offset": -0.2, **{name: 0.0 for name in FIXED_ZERO}},
             "slice_tolerance_norm": 1e-8,
         },
         "refinement": {
@@ -234,6 +243,17 @@ class TestConfigLayer(ProjectFixture):
         messages = " ".join(item.message for item in errors)
         self.assertIn("lower", messages)
         self.assertIn("搜索空间", messages)
+
+    def test_unmapped_variable_name_is_an_error(self) -> None:
+        # A consistent rename passes the search-space check but would never reach CFturbo.
+        renamed = json.loads(json.dumps(self.config))
+        renamed["variables"][-1]["name"] = "splitter_theta_deg_offset"
+        fixed = renamed["search"]["fixed_variables"]
+        fixed["splitter_theta_deg_offset"] = fixed.pop("shroud_theta_deg_offset")
+        messages = " ".join(item.message for item in config_errors(validate_config(renamed)))
+        self.assertIn("几何映射", messages)
+        self.assertIn("splitter_theta_deg_offset", messages)
+        self.assertNotIn("搜索空间", messages)
 
     def test_missing_paths_are_warnings_not_errors(self) -> None:
         issues = validate_config(self.config)
@@ -411,12 +431,12 @@ class TestGuiWidgets(ProjectFixture):
         self.window._select_page(2)
         self._settle()
         page = self.window.pages[2]
-        self.assertEqual(page.variable_table.rowCount(), 3)
+        self.assertEqual(page.variable_table.rowCount(), len(VARIABLES))
         collected = page._collect()
         self.assertEqual(collected["runtime"]["iterations"], 1)
         self.assertEqual(collected["variables"][0]["upper"], 4.0)
         self.assertEqual(collected["search"]["fixed_variables"],
-                         {"shroud_beta_0_deg_offset": -0.2})
+                         {"shroud_beta_0_deg_offset": -0.2, **{name: 0.0 for name in FIXED_ZERO}})
         self.assertEqual(collected["refinement"]["local_search"]["fraction"], 0.7)
         self.assertEqual([item.level for item in validate_config(collected) if item.level == "error"], [])
 
