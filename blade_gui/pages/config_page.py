@@ -16,6 +16,8 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QDoubleSpinBox,
     QFileDialog,
     QHBoxLayout,
@@ -27,10 +29,12 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
+    QTextBrowser,
     QVBoxLayout,
     QWidget,
 )
 
+from ..field_help import HELP, help_document_html, live_hint, tooltip_html
 from ..project import Issue, config_errors, describe_local_paths, save_config, validate_config
 from ..widgets import (
     Badge,
@@ -335,6 +339,7 @@ class ConfigPage(Page):
     def __init__(self, ctx, parent: QWidget | None = None):
         super().__init__(ctx, parent)
         self._bindings: dict[str, tuple[Field, QWidget]] = {}
+        self._rows: dict[str, FormRow] = {}
         self._dirty = False
         self._build()
         self.reload_from_context()
@@ -361,6 +366,9 @@ class ConfigPage(Page):
         save_as = tool_button("另存为…", "file")
         save_as.clicked.connect(self.save_as)
         bar.addWidget(save_as)
+        help_button = tool_button("参数说明", "info", tooltip="所有参数的含义、推荐值与确定方法")
+        help_button.clicked.connect(self.show_help)
+        bar.addWidget(help_button)
         reload_button = tool_button("放弃并重载", "refresh")
         reload_button.clicked.connect(self._confirm_reload)
         bar.addWidget(reload_button)
@@ -393,7 +401,7 @@ class ConfigPage(Page):
             form.setSpacing(7)
             for spec in section.fields:
                 widget = self._make_widget(spec)
-                form.addWidget(FormRow(spec.label, widget, spec.hint))
+                form.addWidget(self._form_row(spec, widget))
             card.body.addLayout(form)
             body.addWidget(card)
 
@@ -413,6 +421,42 @@ class ConfigPage(Page):
         note.setWordWrap(True)
         card.body.addWidget(note)
         return card
+
+    def _form_row(self, spec: Field, widget: QWidget) -> FormRow:
+        """A row whose label, value and hint all carry the field's explanation."""
+        entry = HELP.get(spec.key)
+        row = FormRow(spec.label + (" ⓘ" if entry else ""), widget, entry.hint if entry else spec.hint)
+        row.hint.setWordWrap(True)
+        if entry:
+            tip = tooltip_html(spec.key, spec.label)
+            for target in (row.label, row.hint, widget):
+                target.setToolTip(tip)
+        self._rows[spec.key] = row
+        return row
+
+    def _refresh_hints(self) -> None:
+        """Recompute hints that depend on the form (degrees for normalised values, counts)."""
+        if not hasattr(self, "_config_snapshot"):
+            return
+        config = self._collect()
+        for key, row in self._rows.items():
+            entry = HELP.get(key)
+            if entry is not None:
+                row.hint.setText(live_hint(key, config, get_path(config, key)) or entry.hint)
+
+    def show_help(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("项目设置参数说明")
+        dialog.resize(760, 680)
+        layout = QVBoxLayout(dialog)
+        browser = QTextBrowser()
+        browser.setHtml(help_document_html(
+            [(section.title, [(spec.key, spec.label) for spec in section.fields]) for section in SECTIONS]))
+        layout.addWidget(browser)
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        dialog.exec()
 
     def _make_widget(self, spec: Field) -> QWidget:
         if spec.kind == "bool":
@@ -458,6 +502,7 @@ class ConfigPage(Page):
         if not self._dirty:
             self._dirty = True
             self.dirty_badge.setVisible(True)
+        self._refresh_hints()
 
     def _set_dirty(self, value: bool) -> None:
         self._dirty = value
@@ -497,6 +542,7 @@ class ConfigPage(Page):
         self.local_note.setText("\n".join(("⚠ " if level == "warning" else "") + message
                                            for level, message in describe_local_paths(config)))
         self.local_note.setVisible(bool(self.local_note.text()))
+        self._refresh_hints()
         self.path_label.setText(f"配置文件：{self.ctx.project.config_path or '未选择（保存时另存为）'}")
         self._set_dirty(False)
         self._update_validation(config, saved=True)
