@@ -1,6 +1,6 @@
 # 项目协作指南
 
-本文件适用于仓库根目录及其子目录。先阅读 `README.md` 了解目标；涉及算法、恢复或边界实验时再查 `README_blade_shape_active_learning.md`，涉及桌面界面时查 `README_blade_gui.md`。以当前代码和配置为准，历史对话总结仅作背景资料。
+本文件适用于仓库根目录及其子目录。先阅读 `README.md` 了解目标；涉及算法、恢复或边界实验时再查 `docs/optimization.md`，涉及桌面界面时查 `docs/gui.md`，涉及攻角验证与流动诊断时查 `docs/validation.md`。以当前代码和配置为准。
 
 ## 项目与代码入口
 
@@ -15,7 +15,7 @@
 | `Run-BladeShapeGeometryMeshing.ps1` | 将候选写入 CFturbo batch，并调用 CFturbo、TurboGrid |
 | `blade_shape_cfx_runner.py` | CFX-Pre、求解、后处理、结果解析及阶段恢复 |
 | `blade_shape_incidence_validation.py`、`blade_shape_aca_extraction.py` | 独立展向攻角验证；`aca` 子命令用保存的 session 从 `.res` 导出 20 点 ACA CSV 供 `legacy` 使用 |
-| `blade_shape_flow_diagnostics.py` | 对已有 `.res` 做只读熵增及近叶片角度诊断；评估见 `README_flow_diagnostics.md` |
+| `blade_shape_flow_diagnostics.py` | 对已有 `.res` 做只读熵增及近叶片角度诊断；评估见 `docs/validation.md` |
 | `blade_gui/` | PySide6 界面；`project.py` 读取配置/CSV/算例，`validation_data.py` 只读解析攻角验证产物，`commands.py` 组装 CLI 参数，`runner.py` 通过子进程执行 CLI |
 | `tests/` | 算法、恢复与界面测试；`fixtures/synthetic_meanline.cft-batch` 仅用于测试 |
 

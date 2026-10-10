@@ -198,8 +198,8 @@ class ValidationPage(Page):
         edit = tool_button('打开验证配置', 'file', 'ghost', '用系统关联程序打开 spec JSON')
         edit.clicked.connect(self.open_spec)
         extras.addWidget(edit, 1)
-        help_button = tool_button('使用说明', 'info', 'ghost', 'README_incidence_validation.md')
-        help_button.clicked.connect(lambda: self.open_file(CODE_DIR / 'README_incidence_validation.md'))
+        help_button = tool_button('使用说明', 'info', 'ghost', 'docs/validation.md')
+        help_button.clicked.connect(lambda: self.open_file(CODE_DIR / 'docs/validation.md'))
         extras.addWidget(help_button, 1)
         left.addLayout(extras)
 
