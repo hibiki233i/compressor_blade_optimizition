@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from blade_shape_convergence import ConvergencePolicy, assess_out, convergence_ccl
 import blade_shape_cfx_runner as cfx
-from tests.cfx_output_samples import output
+from tests.cfx_output_samples import output, real_output
 
 
 class ResidualTests(unittest.TestCase):
@@ -23,6 +23,28 @@ class ResidualTests(unittest.TestCase):
         for text in [output().replace('CFD Solver finished','broken'),output('NaN'),
                      output().replace('H-Energy','Other'),output()+'OUTER LOOP ITERATION = 101\n']:
             with self.subTest(text=text),self.assertRaises(ValueError):assess_out(text,ConvergencePolicy())
+
+    def test_real_cfx_layout_with_notice_boxes_inside_residual_table(self):
+        result=assess_out(real_output(),ConvergencePolicy())
+        self.assertEqual(result['iteration'],138)
+        self.assertEqual(result['rms'],{'u-mom':4.9e-6,'v-mom':6.2e-6,'w-mom':9.9e-6,'p-mass':3.4e-6,
+                                        'h-energy':3.7e-6,'k-turbke':7.5e-6,'o-turbfreq':2.2e-5})
+        # Accepted like CFX itself: turbulence (O-TurbFreq 2.2E-05) is recorded, not gated.
+        self.assertTrue(result['converged']);self.assertFalse(result['iteration_limit_reached'])
+        self.assertEqual(result['max_rms'],9.9e-6)
+        self.assertEqual(result['checked_equations'],['h-energy','p-mass','u-mom','v-mom','w-mom'])
+        self.assertTrue(assess_out(real_output('3.0E-03'),ConvergencePolicy())['converged'])
+
+    def test_main_equation_above_target_is_not_converged(self):
+        text=real_output().replace('| 0.98 | 9.9E-06 |','| 0.98 | 1.2E-05 |')
+        result=assess_out(text,ConvergencePolicy())
+        self.assertFalse(result['converged']);self.assertEqual(result['max_rms'],1.2e-5)
+
+    def test_residual_table_cut_before_required_equations_is_rejected(self):
+        text=real_output()
+        text=text[:text.index(' +----------------------+------+---------+---------+------------------+\n | H-Energy')]+'\n'+text[text.index(' CFD Solver finished'):]
+        with self.assertRaisesRegex(ValueError,'Missing final RMS equations'):
+            assess_out(text,ConvergencePolicy())
 
     def test_policy_and_additional_budget(self):
         for extra in [1499,2001,1500.5]:
