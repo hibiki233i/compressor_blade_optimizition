@@ -29,9 +29,16 @@ class ResidualTests(unittest.TestCase):
         self.assertEqual(result['iteration'],138)
         self.assertEqual(result['rms'],{'u-mom':4.9e-6,'v-mom':6.2e-6,'w-mom':9.9e-6,'p-mass':3.4e-6,
                                         'h-energy':3.7e-6,'k-turbke':7.5e-6,'o-turbfreq':2.2e-5})
-        # CFX stopped on its own target, so this is neither accepted nor restartable.
-        self.assertFalse(result['converged']);self.assertFalse(result['iteration_limit_reached'])
-        self.assertTrue(assess_out(real_output('8.0E-06'),ConvergencePolicy())['converged'])
+        # Accepted like CFX itself: turbulence (O-TurbFreq 2.2E-05) is recorded, not gated.
+        self.assertTrue(result['converged']);self.assertFalse(result['iteration_limit_reached'])
+        self.assertEqual(result['max_rms'],9.9e-6)
+        self.assertEqual(result['checked_equations'],['h-energy','p-mass','u-mom','v-mom','w-mom'])
+        self.assertTrue(assess_out(real_output('3.0E-03'),ConvergencePolicy())['converged'])
+
+    def test_main_equation_above_target_is_not_converged(self):
+        text=real_output().replace('| 0.98 | 9.9E-06 |','| 0.98 | 1.2E-05 |')
+        result=assess_out(text,ConvergencePolicy())
+        self.assertFalse(result['converged']);self.assertEqual(result['max_rms'],1.2e-5)
 
     def test_residual_table_cut_before_required_equations_is_rejected(self):
         text=real_output()

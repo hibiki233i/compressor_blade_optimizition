@@ -42,6 +42,10 @@ class ConvergencePolicy:
 
 
 ITERATION = re.compile(r'OUTER\s+LOOP\s+ITERATION\s*=\s*(\d+)(?:\s*\(\s*(\d+)\s*\))?', re.I)
+#: Equations that must appear in the final table and meet rms_target. This
+#: matches CFX's own stopping test, which leaves turbulence out: a real run
+#: reported "All target criteria reached" at W-Mom 9.9E-06 with O-TurbFreq
+#: 2.2E-05. Turbulence and any other reported equations are recorded only.
 REQUIRED = {'u-mom', 'v-mom', 'w-mom', 'p-mass', 'h-energy'}
 
 
@@ -100,9 +104,11 @@ def assess_out(text: str, policy: ConvergencePolicy) -> dict:
     declared_limit = int(limits[-1]) if limits else None
     current_iteration = int(last.group(2) or last.group(1))
     exhausted = bool(limit_stop and declared_limit is not None and current_iteration >= declared_limit)
-    converged = max(values.values()) <= policy.rms_target
+    max_rms = max(values[name] for name in REQUIRED)
+    converged = max_rms <= policy.rms_target
     return dict(iteration=int(last.group(1)), run_iteration=int(last.group(2) or last.group(1)),
-                rms=values, max_rms=max(values.values()), rms_target=policy.rms_target,
+                rms=values, checked_equations=sorted(REQUIRED), max_rms=max_rms,
+                rms_target=policy.rms_target,
                 converged=converged, iteration_limit_reached=exhausted,
                 declared_iteration_limit=declared_limit)
 
