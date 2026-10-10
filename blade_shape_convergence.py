@@ -46,21 +46,28 @@ REQUIRED = {'u-mom', 'v-mom', 'w-mom', 'p-mass', 'h-energy'}
 
 
 def _residuals(block: str) -> dict[str, float]:
-    values = {}; in_table = False
+    """Read the first equation residual table in ``block``.
+
+    Real CFX output can insert one-column ``****** Notice ******`` boxes between
+    rows of the table and follows it with other ``|`` tables (e.g. "Locations
+    of Maximum Residuals"). Rows whose column count differs from the header are
+    skipped, and the table ends at the first blank line or plain text. A table
+    cut short is still rejected by the required-equation check.
+    """
+    values = {}; width = None
     for line in block.splitlines():
-        if 'RMS Res' in line and 'Equation' in line:
-            in_table = True
+        stripped = line.strip()
+        if width is None:
+            if 'RMS Res' in line and 'Equation' in line:
+                width = len(stripped.strip('|').split('|'))
             continue
-        if not in_table:
+        if not stripped or not stripped.startswith(('|', '+')):
+            break
+        if re.fullmatch(r'[+\-=|]+', stripped):
             continue
-        if not line.strip() or re.fullmatch(r'[\s+\-=|]+', line):
+        columns = [part.strip() for part in stripped.strip('|').split('|')]
+        if len(columns) != width or not columns[0]:
             continue
-        if not line.strip().startswith('|'):
-            in_table = False
-            continue
-        columns = [part.strip() for part in line.strip().strip('|').split('|')]
-        if len(columns) < 5 or not columns[0]:
-            raise ValueError('Incomplete final RMS table row')
         equation = re.sub(r'\s+', '', columns[0]).lower()
         try:
             residual = float(columns[2].replace('D', 'E').replace('d', 'e'))
@@ -79,7 +86,7 @@ def assess_out(text: str, policy: ConvergencePolicy) -> dict:
     last = matches[-1]
     final = text[last.end():]
     # A truncated output must not borrow a successful earlier residual table.
-    if not re.search(r'(?:CFD Solver finished|CFX[- ]Solver finished)', final, re.I):
+    if not re.search(r'(?:CFD Solver finished|CFX[- ]Solver (?:has )?finished)', final, re.I):
         raise ValueError('CFX .out lacks final solver-finished marker')
     values = _residuals(final)
     expected = set(REQUIRED)
