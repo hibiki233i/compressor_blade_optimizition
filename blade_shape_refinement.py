@@ -406,6 +406,11 @@ def _run_boundary(config: dict[str,Any], path: Path, stage: str, max_new: int, r
         raise ValueError('Create a version-2 plan; old plans are not silently migrated.')
     if plan.get('plan_id')!=digest(content):
         raise ValueError('Plan content changed after it was written; create a new plan.')
+    # Bounds, the fixed slice and step sizes are not physics, but they define what
+    # this experiment means (which points are "boundary" points).
+    if plan['slice_id']!=slice_id(config) or plan['boundary_levels']!=config['refinement'].get('boundary_levels',{}):
+        raise ValueError('Variable bounds, search slice or boundary levels changed since the plan was written; '
+                         'create a new plan.')
     if plan['extension']!=config['refinement']['extension']:
         raise ValueError('Extension configuration changed.')
     if not plan['stages'][stage]['valid']:
@@ -417,8 +422,13 @@ def _run_boundary(config: dict[str,Any], path: Path, stage: str, max_new: int, r
     if state['plan_id']!=plan['plan_id']:raise ValueError('State belongs to another plan.')
     if exists and not resume:raise ValueError('State exists. Use --resume to continue.')
     frame=b.load_training(config)
-    signatures.check(config,signatures.merge(signatures.training_records(config,frame),
-                                             {plan['signature']:[f"plan {plan['plan_id'][:12]}"]}),accept_input_change)
+    try:
+        signatures.check(config,signatures.merge(signatures.training_records(config,frame),
+                                                 {plan['signature']:[f"plan {plan['plan_id'][:12]}"]}),accept_input_change)
+    except signatures.InputsChanged:
+        b.write_pareto(config,frame)
+        raise
+    signatures.pin(config)
     reservations=case_reservations(config['paths']['output_dir'])
     for run_id,owner in reservations.items():
         if owner.get('plan_id')==plan['plan_id'] and owner['point_id'] not in state['points']:
@@ -458,6 +468,7 @@ def _run_boundary(config: dict[str,Any], path: Path, stage: str, max_new: int, r
         if saved.get('status')=='failed':
             raise ValueError('Failed point requires inspection and a new experiment; no automatic CFD retry.')
         if used>=max_new:break
+        signatures.ensure_pinned(config)
         cfg=point_config(config,p);x=np.array(p['x'])
         issues=b.constraint_violations(cfg,baseline,x)
         if issues:raise ValueError(f"Geometry rules failed: {p['point_id']}: {issues}")

@@ -1117,6 +1117,7 @@ def evaluate_true_cfd(
     experiment_id: str = "",
     design_role: str = "",
 ) -> CaseResult:
+    signatures.ensure_pinned(config)
     run_id = f"case_{case_index:06d}"
     sample = vector_to_sample(config, x)
     row: dict[str, Any] = {**sample, **{col: np.nan for col in RESULT_COLUMNS}}
@@ -1135,6 +1136,8 @@ def evaluate_true_cfd(
             "message": "",
             "case_dir": "",
             "run_id": run_id,
+            # the inputs this evaluation starts under; checked again before success is recorded
+            signatures.COLUMN: signatures.remember(config),
         }
     )
 
@@ -1157,14 +1160,16 @@ def evaluate_true_cfd(
         candidate_path = write_candidate_files(config, baseline, x, run_id)
     row['case_dir'] = str(case_dir)
     receipt_path = case_dir / 'geometry_state.json'
-    def receipt_signature(physical: str) -> str:
-        return refinement.digest({'physical':physical, 'x':x.tolist(), 'candidate':file_identity(candidate_path)})
-    signature = receipt_signature(signatures.physical_signature(config))
+    # Only inputs that shape the mesh: an accepted change of, e.g., the CFturbo
+    # template must not reuse a mesh made from the old one.
+    signature = refinement.digest({'geometry':signatures.geometry_signature(config), 'x':x.tolist(),
+                                   'candidate':file_identity(candidate_path)})
     receipt = json.loads(receipt_path.read_text()) if receipt_path.exists() else None
     if receipt is not None:
-        # A receipt written under accepted/older-formula inputs still names this exact case.
-        valid = {receipt_signature(physical) for physical in signatures.compatible(config)}
-        if receipt.get('signature') not in valid or receipt.get('status') != 'complete' or receipt.get('mesh') != file_identity(case_dir/'Impeller_Mesh.gtm'):
+        # receipts written before 2026-10 signed the whole old-formula physical signature
+        legacy = refinement.digest({'physical':signatures.legacy_physical_signature(config), 'x':x.tolist(),
+                                    'candidate':file_identity(candidate_path)})
+        if receipt.get('signature') not in {signature, legacy} or receipt.get('status') != 'complete' or receipt.get('mesh') != file_identity(case_dir/'Impeller_Mesh.gtm'):
             row.update(failure_stage='geometry',message='Geometry receipt is incomplete or inputs/mesh changed. Inspect this case.')
             append_row(config,row)
             return CaseResult(row,False)
@@ -1228,6 +1233,12 @@ def evaluate_true_cfd(
         row['message'] = 'Non-finite objective returned by CFX-Post.'
         append_row(config, row)
         return CaseResult(row, False)
+    if signatures.physical_signature(config) != row[signatures.COLUMN]:
+        row['failure_stage'] = 'environment'
+        row['message'] = ('Physical inputs changed on disk during this evaluation (template, geometry script or '
+                          'CFX installation); the result is not recorded as a label. Inspect this case.')
+        append_row(config, row)
+        return CaseResult(row, False)
     row["status"] = "success"
     row["failure_stage"] = ""
     row["message"] = cfx.message
@@ -1256,8 +1267,14 @@ def _run_loop(args: argparse.Namespace, config: dict[str, Any]) -> None:
     if not args.resume and (not df.empty or pending.load(config)['entries']):
         raise SystemExit('Existing training/pending data found. Use --resume.')
     pending.check_orphans(config, df)
-    signatures.check(config, signatures.merge(signatures.training_records(config, df), pending.records(config)),
-                     getattr(args, 'accept_input_change', None))
+    try:
+        signatures.check(config, signatures.merge(signatures.training_records(config, df), pending.records(config)),
+                         getattr(args, 'accept_input_change', None))
+    except signatures.InputsChanged:
+        # Leave fronts on disk that hold only current-input rows, even when stopping here.
+        write_pareto(config, df)
+        raise
+    signatures.pin(config)
     baseline = extract_baseline(config)
     seed, max_new = int(runtime['seed']), int(runtime['max_new_cfd'])
     recovered = pending.run(config, baseline, max_new)

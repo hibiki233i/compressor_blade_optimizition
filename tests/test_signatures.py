@@ -405,5 +405,193 @@ class SignatureTests(unittest.TestCase):
         pd.testing.assert_frame_equal(project.pareto(), pd.read_csv(self.out / 'pareto_front.csv'))
 
 
+    # ------------------------------------------------- review follow-ups
+    def test_legacy_formula_matches_the_digest_of_the_old_code(self):
+        # digest computed with master's refinement.physical_signature before this change
+        config = {'variables': [{'name': 'hub_beta_0_deg_offset', 'lower': -3.0, 'upper': 4.0}],
+                  'constraints': {'duplicate_distance_norm': 0.02},
+                  'search': {'active_variables': ['hub_beta_0_deg_offset'], 'fixed_variables': {}},
+                  'cfx_convergence': {'rms_target': 1e-05, 'restart_iterations': 2000},
+                  'runtime': {'n_blades': 9, 'rpm': 10000.0, 'mass_flow': 0.0036, 'p_out_pa': 12.0, 'alpha0': 21.8},
+                  'paths': {}}
+        self.assertEqual(s.legacy_physical_signature(config),
+                         '21f3de0b19a63daedf87923510e00ed040cca095108d2f6620fb2ba8a88b1855')
+
+    def geometry_case(self):
+        template = self.out / 'meanline.cft-batch'
+        template.write_bytes(Path(self.c['paths']['cft_batch_template']).read_bytes())
+        self.c['paths']['cft_batch_template'] = str(template)
+        baseline = b.BaselineShape(np.ones(5), np.ones(5), np.linspace(0, 1, 5), np.linspace(0, 1, 5), 0., 0.)
+
+        def mesh(config, candidate_path, dry_run=False):
+            (candidate_path.parent / 'Impeller_Mesh.gtm').write_text('mesh')
+            return True, 'ok'
+
+        class Interrupted(Exception):
+            pass
+        with patch.object(b, 'run_geometry', side_effect=mesh), \
+                patch.object(b, 'run_cfx_pipeline', side_effect=Interrupted):
+            with self.assertRaises(Interrupted):
+                b.evaluate_true_cfd(self.c, baseline, self.x, 0, sample_phase='doe')
+        return template, baseline
+
+    class Solved:
+        success = True
+        message = 'synthetic'
+        failure_stage = ''
+        metrics = {'Efficiency': .76, 'MassFlow': 4.2, 'PressureRatio': 2., 'Power': 1., 'totalpressureratio': 2.}
+
+    def test_geometry_receipt_is_not_reused_after_a_geometry_input_changes(self):
+        template, baseline = self.geometry_case()
+        template.write_text('edited CFturbo template')  # accepted or not, the old mesh is stale
+        with patch.object(b, 'run_geometry', side_effect=AssertionError('must not remesh silently')), \
+                patch.object(b, 'run_cfx_pipeline', return_value=self.Solved()):
+            result = b.evaluate_true_cfd(self.c, baseline, self.x, 0, sample_phase='doe')
+        self.assertFalse(result.success)
+        self.assertEqual(result.row['failure_stage'], 'geometry')
+
+    def test_geometry_receipt_survives_a_change_that_does_not_shape_the_mesh(self):
+        _, baseline = self.geometry_case()
+        self.c['runtime']['p_out_pa'] += 1
+        with patch.object(b, 'run_geometry', side_effect=AssertionError('geometry must be reused')), \
+                patch.object(b, 'run_cfx_pipeline', return_value=self.Solved()):
+            result = b.evaluate_true_cfd(self.c, baseline, self.x, 0, sample_phase='doe')
+        self.assertTrue(result.success, result.row['message'])
+
+    def test_inputs_changing_during_an_evaluation_do_not_produce_a_label(self):
+        template = self.out / 'meanline.cft-batch'
+        template.write_bytes(Path(self.c['paths']['cft_batch_template']).read_bytes())
+        self.c['paths']['cft_batch_template'] = str(template)
+        before = s.physical_signature(self.c)
+        baseline = b.BaselineShape(np.ones(5), np.ones(5), np.linspace(0, 1, 5), np.linspace(0, 1, 5), 0., 0.)
+
+        def mesh(config, candidate_path, dry_run=False):
+            (candidate_path.parent / 'Impeller_Mesh.gtm').write_text('mesh')
+            return True, 'ok'
+
+        def solve_while_edited(*args, **kwargs):
+            template.write_text('edited during the solve')
+            return self.Solved()
+        with patch.object(b, 'run_geometry', side_effect=mesh), \
+                patch.object(b, 'run_cfx_pipeline', side_effect=solve_while_edited):
+            result = b.evaluate_true_cfd(self.c, baseline, self.x, 0, sample_phase='doe')
+        self.assertFalse(result.success)
+        self.assertEqual(result.row['failure_stage'], 'environment')
+        self.assertEqual(b.load_training(self.c)[s.COLUMN].tolist(), [before])
+
+    def test_a_pinned_run_starts_no_new_cfd_after_inputs_change(self):
+        template = self.out / 'meanline.cft-batch'
+        template.write_bytes(Path(self.c['paths']['cft_batch_template']).read_bytes())
+        self.c['paths']['cft_batch_template'] = str(template)
+        self.c['runtime']['initial_samples'] = 3
+        args = self.run_args()
+        args.iterations, args.max_new_cfd = 0, 3
+        calls = []
+
+        def edits_template(config, baseline, x, index, **meta):
+            calls.append(index)
+            result = self.complete(config, baseline, x, index, **meta)
+            template.write_text('edited after the first case')
+            return result
+        with patch.object(b, 'extract_baseline', return_value=b.BaselineShape(
+                np.ones(5), np.ones(5), np.linspace(0, 1, 5), np.linspace(0, 1, 5), 0., 0.)), \
+                patch.object(b, 'evaluate_true_cfd', side_effect=edits_template), redirect_stdout(StringIO()):
+            with self.assertRaises(s.InputsChanged):
+                b.run_loop(args)
+        self.assertEqual(len(calls), 1)
+
+    def test_plan_refuses_changed_bounds_slice_or_levels(self):
+        self.rows(1)
+        plan_path = self.out / 'plan.json'
+        baseline = b.BaselineShape(np.ones(5), np.ones(5), np.linspace(0, 1, 5), np.linspace(0, 1, 5), 0., 0.)
+        names = b.variable_names(self.c)
+        self.c['refinement'].update(boundary_variables=[names[i] for i in [4, 5, 0, 10]],
+                                    extension={'variable': names[4], 'value': 5.0})
+        with patch.object(b, 'extract_baseline', return_value=baseline):
+            r.write_boundary_plan(self.c, 'case_000000', plan_path)
+            for change in (lambda c: c['variables'][4].update(upper=c['variables'][4]['upper'] + .5),
+                           lambda c: c['search'].update(slice_tolerance_norm=1e-6),
+                           lambda c: c['refinement'].update(boundary_levels={names[4]: {'step_deg': .3}})):
+                changed = copy.deepcopy(self.c)
+                change(changed)
+                with self.assertRaises(ValueError) as caught:
+                    r.run_boundary(changed, plan_path, 'singles', 1, False)
+                self.assertIn('create a new plan', str(caught.exception))
+
+    def test_a_stopped_run_still_rewrites_fronts_without_old_rows(self):
+        self.rows(3)
+        b.write_pareto(self.c, b.load_training(self.c))
+        self.assertFalse(pd.read_csv(self.out / 'pareto_front.csv').empty)
+        self.c['runtime']['p_out_pa'] += 1
+        with self.assertRaises(s.InputsChanged):
+            b.run_loop(self.run_args())
+        self.assertTrue(pd.read_csv(self.out / 'pareto_front.csv').empty)
+
+    def test_missing_cfx5solve_has_no_identity_and_cannot_solve(self):
+        work = self.out / 'case'
+        work.mkdir()
+        kw = self.cfx_kw(work)
+        (kw['cfx_bin_dir'] / 'cfx5solve.exe').unlink()
+        self.assertEqual(s.solver_identity(kw['cfx_bin_dir']), {'release': None, 'cfx5solve': None})
+        with patch.object(cfx, '_run_logged', side_effect=AssertionError('no external work')):
+            result = cfx.run_cfx_pipeline(work, 'case_0', **kw)
+        self.assertEqual((result.success, result.failure_stage), (False, 'environment'))
+
+    # ------------------------------------------------------------ viewer
+    def test_viewer_without_templates_compares_recorded_inputs(self):
+        from blade_gui.project import Project
+        template = self.out / 'meanline.cft-batch'
+        template.write_bytes(Path(self.c['paths']['cft_batch_template']).read_bytes())
+        self.c['paths']['cft_batch_template'] = str(template)
+        self.rows(2)  # signed with the template hash, inputs recorded
+        b.append_row(self.c, {**b.vector_to_sample(self.c, self.x), 'run_id': 'case_000002', 'status': 'success',
+                              'Efficiency': .7, 'MassFlow': 4., s.COLUMN: 'from-an-older-version'})
+        self.cp.write_text(json.dumps(self.c))
+        template.unlink()  # e.g. viewing synced results on a laptop
+        project = Project(self.cp)
+        self.assertEqual(project.input_classes().tolist(), ['current', 'current', 'unknown'])
+        summary = project.summary()
+        self.assertEqual((summary.other_inputs, summary.unverified_inputs), (0, 1))
+        self.assertEqual(len(project.results()), 3)
+        # a resolvable field that differs is still a different input
+        self.c['runtime']['p_out_pa'] += 1
+        self.cp.write_text(json.dumps(self.c))
+        project.reload()
+        self.assertEqual(project.input_classes().tolist(), ['other', 'other', 'unknown'])
+        # the CLI stays strict: an unreadable template is not the recorded one
+        self.c['runtime']['p_out_pa'] -= 1
+        self.assertNotIn(project.training()[s.COLUMN].iloc[0], s.compatible(self.c))
+
+    def test_viewer_reports_a_failed_check_instead_of_trusting_rows(self):
+        from blade_gui.project import Project
+        self.rows(2)
+        (self.out / s.REGISTRY).write_text(json.dumps({'version': 99}))
+        self.cp.write_text(json.dumps(self.c))
+        project = Project(self.cp)
+        summary = project.summary()
+        self.assertEqual((summary.other_inputs, summary.unverified_inputs), (0, 2))
+        self.assertIn('version', summary.input_check_error)
+
+    def test_viewer_run_guard_counts_queue_entries_and_the_plan(self):
+        from blade_gui.project import Project
+        self.rows(1)
+        registry = json.loads((self.out / s.REGISTRY).read_text())
+        for name, p_out in (('other', 1.0), ('another', 2.0)):
+            inputs = s.physical_inputs(self.c)
+            inputs['runtime']['p_out_pa'] = p_out
+            registry['signatures'][name] = inputs
+        (self.out / s.REGISTRY).write_text(json.dumps(registry))
+        (self.out / 'pending_evaluations.json').write_text(json.dumps({'version': 1, 'entries': [
+            {'run_id': 'case_000001', 'signature': 'other', 'finalized': False},
+            {'run_id': 'case_000000', 'signature': 'other', 'finalized': True}]}))
+        plan = self.out / 'plan.json'
+        plan.write_text(json.dumps({'signature': 'another'}))
+        self.cp.write_text(json.dumps(self.c))
+        project = Project(self.cp)
+        self.assertEqual(project.records_from_other_inputs(), 0)
+        self.assertEqual(project.blocking_records(), 1)
+        self.assertEqual(project.blocking_records(plan), 2)
+
+
 if __name__ == '__main__':
     unittest.main()

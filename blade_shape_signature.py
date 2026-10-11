@@ -41,7 +41,7 @@ _UNSIGNED_CONTENT = ('Efficiency', 'MassFlow', 'status')
 
 _RELEASE = re.compile(r'v\d{3}', re.IGNORECASE)  # ANSYS install tree: ...\ANSYS Inc\v251\CFX\bin
 
-_hash_cache: dict[tuple[str, int, int], str] = {}
+_hash_cache: dict[tuple[Any, ...], str] = {}
 
 
 class InputsChanged(ValueError):
@@ -53,7 +53,8 @@ def _sha256(value: Any) -> str | None:
     if not str(value or '').strip() or not path.is_file():
         return None
     stat = path.stat()
-    key = (str(path.resolve()), stat.st_size, stat.st_mtime_ns)
+    # ctime and inode change when a file is restored by a copy that keeps its mtime
+    key = (str(path.resolve()), stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_ino)
     if key not in _hash_cache:
         _hash_cache[key] = hashlib.sha256(path.read_bytes()).hexdigest()
     return _hash_cache[key]
@@ -63,7 +64,8 @@ def solver_identity(cfx_bin_dir: Any) -> dict[str, Any]:
     """The CFX release that solves, not where it is installed.
 
     Moving identical binaries keeps both the version folder and the solver
-    launcher content; another release changes them.
+    launcher content; another release changes them. Both are ``None`` only
+    when ``cfx5solve.exe`` is absent, and then the CFX stage refuses to solve.
     """
     text = str(cfx_bin_dir or '').strip()
     if not text:
@@ -84,6 +86,34 @@ def physical_inputs(config: dict[str, Any]) -> dict[str, Any]:
 
 def physical_signature(config: dict[str, Any]) -> str:
     return digest(physical_inputs(config))
+
+
+GEOMETRY_ASSETS = ('cft_batch_template', 'base_cft', 'turbogrid_template', 'geometry_script_path')
+
+
+def geometry_signature(config: dict[str, Any]) -> str:
+    """Inputs that shape the mesh of a given ``x``; a geometry receipt is valid only for these."""
+    paths = config.get('paths', {})
+    return digest({'variables': [v['name'] for v in config['variables']],
+                   'n_blades': config['runtime'].get('n_blades'),
+                   'assets': {k: _sha256(paths.get(k)) for k in GEOMETRY_ASSETS}})
+
+
+PIN = '_physical_signature'
+
+
+def pin(config: dict[str, Any]) -> str:
+    """Fix the signature a run was checked under; later evaluations must still match it."""
+    config[PIN] = remember(config)
+    return config[PIN]
+
+
+def ensure_pinned(config: dict[str, Any]) -> None:
+    """Stop before new CFD when inputs changed on disk after the run was checked."""
+    if config.get(PIN) and physical_signature(config) != config[PIN]:
+        raise InputsChanged('Physical inputs changed on disk while this run was in progress '
+                            '(template, geometry script or CFX installation); no new CFD was started. '
+                            'Inspect the change, then rerun.')
 
 
 def legacy_physical_signature(config: dict[str, Any]) -> str:
@@ -128,10 +158,8 @@ def remember(config: dict[str, Any]) -> str:
     return signature
 
 
-def compatible(config: dict[str, Any]) -> set[str]:
-    """Current signature, the old formula for unchanged inputs, and accepted predecessors."""
-    allowed = {physical_signature(config), legacy_physical_signature(config)}
-    accepted = load_registry(config)['accepted']
+def _closure(seeds: set[str], accepted: list[dict[str, Any]]) -> set[str]:
+    allowed = set(seeds)
     grown = True
     while grown:
         grown = False
@@ -140,6 +168,53 @@ def compatible(config: dict[str, Any]) -> set[str]:
                 allowed |= set(entry['from'])
                 grown = True
     return allowed
+
+
+def _unresolved(current: dict[str, Any]) -> set[tuple[str, str]]:
+    """Asset/solver fields this machine cannot read (no template copy, no CFX install)."""
+    return {(group, key) for group in ('assets', 'solver') for key, value in current[group].items() if value is None}
+
+
+def _matches(recorded: dict[str, Any], current: dict[str, Any], unknown: set[tuple[str, str]]) -> bool:
+    for group in set(recorded) | set(current):
+        before, after = recorded.get(group), current.get(group)
+        if isinstance(before, dict) and isinstance(after, dict):
+            if any(before.get(k) != after.get(k) for k in set(before) | set(after) if (group, k) not in unknown):
+                return False
+        elif before != after:
+            return False
+    return True
+
+
+def compatible(config: dict[str, Any], *, lenient: bool = False) -> set[str]:
+    """Current signature, the old formula for unchanged inputs, and accepted predecessors.
+
+    ``lenient`` (read-only views only) also matches recorded inputs on every
+    field this machine can read, so a viewer without the templates or CFX
+    still recognises results produced where they exist.
+    """
+    registry = load_registry(config)
+    seeds = {physical_signature(config), legacy_physical_signature(config)}
+    if lenient:
+        current = physical_inputs(config)
+        unknown = _unresolved(current)
+        if unknown:
+            seeds |= {signature for signature, inputs in registry['signatures'].items()
+                      if _matches(inputs, current, unknown)}
+    return _closure(seeds, registry['accepted'])
+
+
+def classify(config: dict[str, Any], signatures: Iterable[str]) -> list[str]:
+    """For read-only views: 'current', 'other', or 'unknown' when this machine cannot decide.
+
+    'unknown' is a signature without recorded inputs (older program version or
+    unsigned) while some asset or solver cannot be read here.
+    """
+    allowed = compatible(config, lenient=True)
+    recorded = load_registry(config)['signatures']
+    undecidable = bool(_unresolved(physical_inputs(config)))
+    return ['current' if signature in allowed else
+            'unknown' if undecidable and signature not in recorded else 'other' for signature in signatures]
 
 
 def row_signatures(config: dict[str, Any], frame: pd.DataFrame) -> pd.Series:

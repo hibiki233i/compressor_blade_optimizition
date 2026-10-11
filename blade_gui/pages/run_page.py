@@ -409,7 +409,8 @@ class RunPage(Page):
 
     def _sync_center_runs(self) -> None:
         current = self.plan_center.currentText()
-        df = self._configured_project().training()
+        # a centre must be a result under the current inputs
+        df = self._configured_project().results()
         runs: list[str] = []
         if not df.empty and "status" in df.columns and "run_id" in df.columns:
             status = df["status"].astype(str).str.strip().str.lower()
@@ -535,11 +536,12 @@ class RunPage(Page):
                 return
         if action in {"run", "run-boundary"}:
             accept = (self.run_accept if action == "run" else self.boundary_accept).text().strip()
-            other = self._configured_project().records_from_other_inputs()
+            plan = self.boundary_plan.currentText().strip() if action == "run-boundary" else None
+            other = self._configured_project().blocking_records(plan)
             if other and not accept:
                 self.guard.set_level(
                     "warn",
-                    f"有 {other} 条训练记录来自其他物理输入（工况、收敛设置或模板内容与当前配置不同），运行会停下并列出差异。"
+                    f"有 {other} 条记录（训练记录、未完成的待算点或边界方案）来自其他物理输入，运行会停下并列出差异。"
                     "另起研究请换输出目录；确认它们在当前输入下仍然有效时，在「确认输入变化」中填写原因。",
                 )
                 return

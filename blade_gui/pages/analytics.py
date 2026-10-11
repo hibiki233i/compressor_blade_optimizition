@@ -212,6 +212,8 @@ class AnalyticsPage(Page):
         df = self.ctx.project.results()
         success = _successful(df)
         diagnostics = self.ctx.project.diagnostics()
+        if "run_id" in diagnostics.columns and "run_id" in df.columns:
+            diagnostics = diagnostics.loc[diagnostics["run_id"].astype(str).isin(df["run_id"].astype(str))]
 
         self._sync_variable_box()
         self._refresh_correlation(success)

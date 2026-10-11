@@ -170,9 +170,10 @@ class ProjectFixture(unittest.TestCase):
         self.config = make_config(self.out)
         self.config_path = self.root / "config.json"
         self.config_path.write_text(json.dumps(self.config, indent=2), encoding="utf-8")
-        # rows carry the signature of the inputs they were computed under, as real runs write them
-        from blade_shape_signature import physical_signature
-        signed = physical_signature(self.config)
+        # rows carry the signature of the inputs they were computed under, and the
+        # inputs behind it are recorded in input_signatures.json, as real runs write them
+        from blade_shape_signature import remember
+        signed = remember(self.config)
         write_csv(self.out / "training_data.csv", [*TRAINING_HEADER, "physical_signature"],
                   [[*row, signed] for row in TRAINING_ROWS])
 

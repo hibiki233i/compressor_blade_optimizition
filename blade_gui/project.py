@@ -278,6 +278,9 @@ class Summary:
     last_modified: float = 0.0
     # training rows produced under other physical inputs; excluded from best values and fronts
     other_inputs: int = 0
+    # rows this machine cannot check (templates/CFX not readable here); kept in the views
+    unverified_inputs: int = 0
+    input_check_error: str = ""
 
     @property
     def success_rate(self) -> float:
@@ -300,6 +303,7 @@ class Project:
     # ---------------------------------------------------------------- load
     def reload(self) -> None:
         self._cache.clear()
+        self.input_check_error = ""
         self.issues = []
         self.load_error = ""
         if self.config_path is None:
@@ -380,29 +384,66 @@ class Project:
         # callers may add helper columns; hand out a copy so the cache stays clean
         return frame.copy()
 
-    def _evidence_mask(self, frame: pd.DataFrame) -> pd.Series:
-        """True for rows produced under the current physical inputs (all True when undecidable)."""
-        if frame.empty or not self.config_valid:
-            return pd.Series(True, index=frame.index)
+    def _signature_config(self) -> dict[str, Any]:
+        return {**self.config, "paths": {**self.config.get("paths", {}), "output_dir": str(self.output_dir)}}
+
+    def input_classes(self) -> pd.Series:
+        """Per training row: ``current``, ``other`` or ``unknown`` (cannot be decided here).
+
+        Read-only views on a machine without the templates or CFX compare the
+        inputs recorded in ``input_signatures.json`` instead of excluding every row.
+        """
+        frame = self.training()
+        if frame.empty:
+            return pd.Series(dtype=object)
+        if not self.config_valid:
+            return pd.Series("unknown", index=frame.index)
+        names = ("training_data.csv", "input_signatures.json", "pending_evaluations.json", "case_reservations.json")
+        stamp = tuple(self.path(name).stat().st_mtime_ns if self.path(name).exists() else 0 for name in names)
+        hit = self._cache.get("input_classes")
+        if hit and hit[0] == stamp:
+            return hit[1].copy()
         try:
             import blade_shape_signature as signatures
-            config = {**self.config, "paths": {**self.config.get("paths", {}), "output_dir": str(self.output_dir)}}
-            return signatures.evidence_mask(config, frame)
-        except Exception:  # noqa: BLE001 - an unreadable artefact must not kill the view
-            return pd.Series(True, index=frame.index)
+            config = self._signature_config()
+            classes = pd.Series(signatures.classify(config, signatures.row_signatures(config, frame)), index=frame.index)
+            self.input_check_error = ""
+        except Exception as exc:  # noqa: BLE001 - keep the rows visible but say they are unchecked
+            classes = pd.Series("unknown", index=frame.index)
+            self.input_check_error = str(exc)
+        self._cache["input_classes"] = (stamp, classes)
+        return classes.copy()
 
     def records_from_other_inputs(self) -> int:
-        """Training rows that stop run / run-boundary until the input change is accepted."""
-        return int((~self._evidence_mask(self.training())).sum())
+        """Training rows produced under other physical inputs."""
+        return int((self.input_classes() == "other").sum())
+
+    def blocking_records(self, plan: str | Path | None = None) -> int:
+        """Training rows, unfinished queue entries and the plan that would stop run / run-boundary."""
+        count = self.records_from_other_inputs()
+        try:
+            import blade_shape_signature as signatures
+            labels = [e.get("signature", "") for e in self.pending().get("entries", []) if not e.get("finalized")]
+            if plan:
+                path = Path(plan)
+                if not path.is_file() and (self.output_dir / path).is_file():
+                    path = self.output_dir / path
+                if path.is_file():
+                    labels.append(json.loads(path.read_text(encoding="utf-8")).get("signature", ""))
+            count += signatures.classify(self._signature_config(), labels).count("other")
+        except Exception:  # noqa: BLE001 - the CLI performs the authoritative check
+            pass
+        return count
 
     def results(self) -> pd.DataFrame:
         """Training rows that count as results under the current inputs.
 
         Result views (best values, fronts, correlations) use this; case history
-        uses :meth:`training`, which keeps every row.
+        uses :meth:`training`, which keeps every row. Rows that cannot be
+        checked on this machine stay in, and :class:`Summary` reports them.
         """
         frame = self.training()
-        return frame.loc[self._evidence_mask(frame)].copy()
+        return frame.loc[self.input_classes() != "other"].copy()
 
     def _front(self, name: str, strict: bool) -> pd.DataFrame:
         path = self.path(name)
@@ -487,8 +528,11 @@ class Project:
         out.successes = int((status == "success").sum())
         out.failures = int(out.attempts - out.successes)
 
-        evidence = self._evidence_mask(df)
-        out.other_inputs = int((~evidence).sum())
+        classes = self.input_classes()
+        evidence = classes != "other"
+        out.other_inputs = int((classes == "other").sum())
+        out.unverified_inputs = int((classes == "unknown").sum())
+        out.input_check_error = self.input_check_error
         numeric = df.copy()
         for col in OBJECTIVES + ["Power"]:
             if col in numeric.columns:

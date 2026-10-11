@@ -89,6 +89,7 @@ def run(config: dict[str,Any], baseline: Any, budget: int) -> dict[str,Any]:
             result=b.CaseResult(row.to_dict(),row['status']=='success')
         else:
             if used>=budget:break
+            signatures.ensure_pinned(config)
             if entry['status']=='pending':
                 entry['before_run_ids']=frame.run_id.tolist()
                 entry['status']='running'
