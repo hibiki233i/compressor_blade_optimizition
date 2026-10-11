@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from blade_shape_convergence import ConvergencePolicy, assess_out, convergence_ccl
 import blade_shape_cfx_runner as cfx
-from tests.cfx_output_samples import output, real_output
+from tests.cfx_output_samples import output, real_output, outer_iteration_limit_output
 
 
 class ResidualTests(unittest.TestCase):
@@ -58,6 +58,20 @@ class ResidualTests(unittest.TestCase):
         text=output('2E-4',100,True).replace('Maximum Number of Iterations = 100','Maximum Number of Iterations = 2000')
         self.assertFalse(assess_out(text,ConvergencePolicy())['iteration_limit_reached'])
 
+    def test_real_outer_iteration_limit_summary_requires_exhausted_budget(self):
+        text=outer_iteration_limit_output('1.4E-4')
+        result=assess_out(text,ConvergencePolicy())
+        self.assertFalse(result['converged'])
+        self.assertTrue(result['iteration_limit_reached'])
+        self.assertEqual(result['run_iteration'],2000)
+        self.assertEqual(result['declared_iteration_limit'],2000)
+        for other in [outer_iteration_limit_output(iteration=100),
+                      text.replace('Maximum number of outer iterations','Maximum elapsed time'),
+                      text.replace('Run duration reached','User interrupt'),
+                      text.replace('Maximum Number of Iterations = 2000\n','')]:
+            with self.subTest(text=other):
+                self.assertFalse(assess_out(other,ConvergencePolicy())['iteration_limit_reached'])
+
 
 class PipelineConvergenceTests(unittest.TestCase):
     def setUp(self):
@@ -67,7 +81,7 @@ class PipelineConvergenceTests(unittest.TestCase):
             (self.root/name).write_text('synthetic')
         self.kw=dict(p_out_pa=10,cfx_bin_dir=self.root,template_cfx=self.root/'template.cfx',template_cse=self.root/'extract.cse')
 
-    def run_case(self,residuals):
+    def run_case(self,residuals,*,exhausted_output=output,initial_iteration=100):
         calls=[];solves=0
         def command(cmd,cwd,log):
             nonlocal solves
@@ -76,7 +90,9 @@ class PipelineConvergenceTests(unittest.TestCase):
             elif name=='cfx5solve.exe':
                 rms,limit=residuals[solves];solves+=1
                 (cwd/f'Impeller_{solves:03}.res').write_text(f'result{solves}')
-                (cwd/f'Impeller_{solves:03}.out').write_text(output(rms,2000 if solves>1 else 100,limit))
+                render=exhausted_output if limit else output
+                iteration=2000 if solves>1 else initial_iteration
+                (cwd/f'Impeller_{solves:03}.out').write_text(render(rms,iteration,limit))
             else:(cwd/'CFX_Results.txt').write_text('.76,2,1,.42,2.1')
             return 0
         with patch.object(cfx,'_run_logged',side_effect=command):
@@ -108,6 +124,28 @@ class PipelineConvergenceTests(unittest.TestCase):
         result,calls=self.run_case([('2E-4',False)])
         self.assertFalse(result.success)
         self.assertEqual(sum(Path(c[0]).name=='cfx5solve.exe' for c in calls),1)
+
+    def test_real_outer_iteration_limit_summary_restarts_then_accepts(self):
+        result,calls=self.run_case([('1.4E-4',True),('2E-6',False)],
+                                  exhausted_output=outer_iteration_limit_output,initial_iteration=2000)
+        self.assertTrue(result.success)
+        solve=[c for c in calls if Path(c[0]).name=='cfx5solve.exe']
+        self.assertEqual(len(solve),2)
+        self.assertIn('-initial-file',solve[1])
+        self.assertTrue(solve[1][-1].endswith('Impeller_001.res'))
+        state=json.loads((self.root/'cfx_state.json').read_text())
+        self.assertEqual(state['restart']['iterations'],2000)
+        self.assertEqual(len(state['solve_attempts']),2)
+
+    def test_real_outer_iteration_limit_summary_still_discards_second_failure(self):
+        result,calls=self.run_case([('1.4E-4',True),('1.4E-4',True)],
+                                  exhausted_output=outer_iteration_limit_output,initial_iteration=2000)
+        self.assertFalse(result.success)
+        self.assertEqual(result.failure_stage,'solve')
+        self.assertEqual(sum(Path(c[0]).name=='cfx5solve.exe' for c in calls),2)
+        self.assertFalse(any(Path(c[0]).name=='cfx5post.exe' for c in calls))
+        with patch.object(cfx,'_run_logged',side_effect=AssertionError('must not retry failed CFD')):
+            self.assertFalse(cfx.run_cfx_pipeline(self.root,'case_0',**self.kw).success)
 
     def test_initial_convergence_requires_only_one_solve(self):
         result,calls=self.run_case([('1E-6',False)])

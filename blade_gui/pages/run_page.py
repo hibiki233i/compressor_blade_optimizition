@@ -564,7 +564,7 @@ class RunPage(Page):
         spec = self._build_spec()
         argv = spec.argv(default_python())
         self.log.clear()
-        self._append("info", f"$ {' '.join(argv)}")
+        self._append("info", f"$ {spec.preview(default_python())}")
         self.progress.setVisible(True)
         self.runner.start(argv)
         if not self.runner.running:

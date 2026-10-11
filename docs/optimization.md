@@ -137,6 +137,8 @@ python blade_shape_active_learning.py run --config blade_shape_config.json --res
 
 **续跑时的核对**：每个算例目录下有 `geometry_state.json` 和 `cfx_state.json`，记录了这个算例用的输入文件指纹和各阶段的完成情况。续跑时如果发现输入变了、或者某阶段没有完成记录，程序不会把残留文件当成成功，而是要求人工检查。
 
+真实前处理先将 CFX 模板复制为算例目录内的 `cfx_pre_template.cfx`，再让 CFX-Pre 加载该副本，避免更新网格或保存工程时改写原模板、使待处理队列的输入签名失效。原模板的身份仍参与续跑核对；如果旧运行的原模板已经被改写，需要恢复与记录指纹一致的原文件，不能通过修改队列签名绕过检查。
+
 **跑之前先检查输入**：`check-pre` 只生成 CFX-Pre 的输入文件并检查路径，不启动求解。请用一个独立的空目录：
 
 ```powershell

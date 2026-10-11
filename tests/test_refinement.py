@@ -61,6 +61,49 @@ class RefinementTests(unittest.TestCase):
         bad=copy.deepcopy(self.config);bad['search']['fixed_variables'][b.variable_names(bad)[0]]=0
         with self.assertRaises(ValueError):r.active_indices(bad)
 
+    def test_partition_and_hv_with_no_successful_history(self):
+        r=self.module()
+        # The first DOE attempt has this object-typed empty "before" table.
+        empty=b.load_training(self.config)
+        failed=pd.DataFrame([{**b.vector_to_sample(self.config,self.center),
+                             'run_id':'case_000000','status':'failed',
+                             'sample_phase':'doe','Efficiency':None,'MassFlow':None}])
+        for frame in [empty,failed]:
+            with self.subTest(rows=len(frame)):
+                history,local=r.training_partition(self.config,frame)
+                self.assertTrue(history.empty)
+                self.assertTrue(local.empty)
+                self.assertEqual(list(history.columns),list(frame.columns))
+                self.assertIsNone(r.hv_reference(self.config,frame))
+                self.assertEqual(r.improvement_metrics(self.config,frame,
+                                 {'status':'success','Efficiency':.76,'MassFlow':4.2}),{})
+                self.assertFalse((self.root/'hypervolume_reference.json').exists())
+
+    def test_partition_coerces_nullable_and_text_numbers_and_excludes_invalid_rows(self):
+        r=self.module();names=b.variable_names(self.config)
+        rows=[]
+        for number in range(7):
+            rows.append({**{n:str(v) for n,v in b.vector_to_sample(self.config,self.center).items()},
+                         'run_id':f'case_{number:06d}','status':'success',
+                         'Efficiency':.76,'MassFlow':4.2,'external_note':'keep'})
+        rows[1]['Efficiency']=pd.NA
+        rows[2]['MassFlow']=np.inf
+        rows[3][names[0]]='invalid'
+        rows[4]['status']='failed'
+        rows[5][names[1]]='1.0'  # Valid historical point outside the fixed slice.
+        rows[6][names[2]]=None
+        frame=pd.DataFrame(rows,index=[10,20,30,40,50,60,70])
+        frame['Efficiency']=frame['Efficiency'].astype('Float64')
+        original=frame.copy(deep=True)
+        history,local=r.training_partition(self.config,frame)
+        self.assertEqual(history.run_id.tolist(),['case_000000','case_000005'])
+        self.assertEqual(local.run_id.tolist(),['case_000000'])
+        self.assertEqual(history.index.tolist(),[10,60])
+        self.assertEqual(history.external_note.tolist(),['keep','keep'])
+        self.assertTrue(np.isfinite(history[names+r.OBJECTIVES].to_numpy()).all())
+        self.assertEqual(history.loc[60,names[1]],1.)
+        pd.testing.assert_frame_equal(frame,original)
+
     def test_csv_metadata_and_boundary_phase_survive_append(self):
         self.save_row(0,sample_phase='boundary',experiment_id='p',design_role='center',external_note='keep')
         self.save_row(1)

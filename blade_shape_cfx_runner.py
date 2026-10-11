@@ -6,6 +6,7 @@ import json
 import math
 import os
 import re
+import shutil
 import subprocess
 import time
 from dataclasses import dataclass
@@ -252,12 +253,20 @@ def _run_cfx_pipeline(
         if pre.get('status') in {'running', 'failed', 'returned'}:
             return CfxResult(False, {}, 'Previous Pre was not recorded as complete; inspect the case.', 'pre')
         if pre.get('status') != 'complete':
-            paths = write_cfx_pre_inputs(work, p_out_pa=p_out_pa, template_cfx=template_cfx)
+            # CFX-Pre may save the loaded project after updating its mesh. Load
+            # a case-local copy so the signed source template stays unchanged.
+            template_copy = work / 'cfx_pre_template.cfx'
+            shutil.copyfile(template_cfx, template_copy)
+            if file_identity(template_copy) != inputs['template_cfx']:
+                return CfxResult(False, {}, 'CFX template changed while copying the Pre input.', 'environment')
+            paths = write_cfx_pre_inputs(work, p_out_pa=p_out_pa, template_cfx=template_copy)
             ret = invoke('pre', [str(executables['pre']), '-batch', str(paths['pre_script'])])
             if ret != 0 or not definition.is_file():
                 stages['pre']['status'] = 'failed'; atomic_json(receipt, state)
                 return CfxResult(False, {}, f'CFX-Pre failed, exit={ret}', 'pre')
-            stages['pre'].update(status='complete', definition_identity=file_identity(definition), ccl_identity=file_identity(work/'update_bc.ccl'))
+            stages['pre'].update(status='complete', definition_identity=file_identity(definition),
+                                 ccl_identity=file_identity(work/'update_bc.ccl'),
+                                 template_copy=template_copy.name, loaded_template_identity=inputs['template_cfx'])
             atomic_json(receipt, state)
         elif file_identity(definition) != pre.get('definition_identity') or file_identity(work/'update_bc.ccl') != pre.get('ccl_identity'):
             return CfxResult(False, {}, 'Recorded .def/CCL is missing or changed.', 'pre')

@@ -83,7 +83,9 @@ def slice_id(config: dict[str, Any]) -> str:
 def training_partition(config: dict[str, Any], frame: pd.DataFrame) -> tuple[pd.DataFrame,pd.DataFrame]:
     names = [v['name'] for v in config['variables']]
     clean = frame.loc[frame.status.eq('success')].copy()
-    numeric = clean[names+OBJECTIVES].apply(pd.to_numeric,errors='coerce')
+    # Empty startup tables can retain object dtype after to_numeric; nullable
+    # numeric columns also need a NumPy-compatible dtype before isfinite.
+    numeric = clean[names+OBJECTIVES].apply(pd.to_numeric,errors='coerce').astype(float)
     clean = clean.loc[np.isfinite(numeric.to_numpy()).all(axis=1)].copy()
     clean[names+OBJECTIVES] = numeric.loc[clean.index]
     return clean, clean.loc[same_slice_mask(config,clean[names].to_numpy())].copy()

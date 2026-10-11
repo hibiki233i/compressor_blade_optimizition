@@ -224,6 +224,22 @@ class TestCommandBuilders(unittest.TestCase):
         self.assertIn("--dry-run", spec.args)
         self.assertIn("--offline", spec.args)
 
+    def test_windows_preview_is_copyable_powershell_and_preserves_argv(self) -> None:
+        spec = commands.build_write_candidate(r'D:\blade optizamation\blade_shape_config.json', index=0, seed=22)
+        argv = spec.argv(r'C:\Python314\python.exe')
+        self.assertEqual(commands.format_command(argv, windows=True),
+                         r"& 'C:\Python314\python.exe' -u blade_shape_active_learning.py write-candidate "
+                         r"--config 'D:\blade optizamation\blade_shape_config.json' --index 0 --seed 22")
+        self.assertEqual(argv, spec.argv(r'C:\Python314\python.exe'))
+        self.assertEqual(commands.format_command([], windows=True), '')
+
+    def test_command_preview_quotes_shell_metacharacters(self) -> None:
+        argv = ['python', '-c', 'print(1)', "D:/O'Brien/$data `x`; &file.json", '']
+        self.assertEqual(commands.format_command(argv, windows=True),
+                         "& 'python' -c 'print(1)' 'D:/O''Brien/$data `x`; &file.json' ''")
+        import shlex
+        self.assertEqual(shlex.split(commands.format_command(argv, windows=False)), argv)
+
 
 # --------------------------------------------------------------------------
 # config validation + persistence (no Qt)

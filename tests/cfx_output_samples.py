@@ -10,6 +10,17 @@ def output(rms='2.0E-06', iteration=100, exhausted=False):
             + 'CFD Solver finished: synthetic test\n')
 
 
+def outer_iteration_limit_output(rms='2.0E-04', iteration=2000, exhausted=True):
+    """Synthetic residuals with the termination wording from DOE case_000000."""
+    text=output(rms,iteration,False).replace('Convergence criteria satisfied.\n','')
+    return text + (
+        '\n ======================================================================\n'
+        '              Termination and Interrupt Condition Summary\n'
+        ' ======================================================================\n'
+        ' CFD Solver: Run duration reached\n'
+        '   (Maximum number of outer iterations)\n')
+
+
 #: End of a real CFX 2025 R1 .out (sensitivity case_000000, 2026-10-10) after the
 #: boundary-flow summary; host and memory sections removed. It contains more
 #: ``|`` tables with other column counts that must not be read as residuals.
