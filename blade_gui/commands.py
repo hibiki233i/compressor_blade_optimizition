@@ -59,6 +59,12 @@ def _config_args(config_path: str | Path) -> list[str]:
     return ["--config", str(config_path)]
 
 
+def _accept_args(reason: str) -> list[str]:
+    # A one-off declaration: blank means "do not accept", never a remembered default.
+    reason = (reason or "").strip()
+    return ["--accept-input-change", reason] if reason else []
+
+
 def build_run(
     config_path: str | Path,
     *,
@@ -68,6 +74,7 @@ def build_run(
     max_new_cfd: int | None = None,
     seed: int | None = None,
     resume: bool = False,
+    accept_input_change: str = "",
 ) -> CommandSpec:
     args = ["run", *_config_args(config_path)]
     if initial_samples is not None:
@@ -82,6 +89,7 @@ def build_run(
         args += ["--seed", str(int(seed))]
     if resume:
         args.append("--resume")
+    args += _accept_args(accept_input_change)
     return CommandSpec("run", args, "运行主动学习循环（真实 CFD）")
 
 
@@ -129,6 +137,7 @@ def build_run_boundary(
     stage: str,
     max_new_cfd: int,
     resume: bool = False,
+    accept_input_change: str = "",
 ) -> CommandSpec:
     args = [
         "run-boundary",
@@ -139,6 +148,7 @@ def build_run_boundary(
     ]
     if resume:
         args.append("--resume")
+    args += _accept_args(accept_input_change)
     return CommandSpec("run-boundary", args, f"运行边界阶段：{stage}")
 
 

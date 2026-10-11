@@ -378,6 +378,18 @@ class Project:
         # callers may add helper columns; hand out a copy so the cache stays clean
         return frame.copy()
 
+    def records_from_other_inputs(self) -> int:
+        """Training rows that stop run / run-boundary until the input change is accepted."""
+        frame = self.training()
+        if frame.empty or not self.config_valid:
+            return 0
+        try:
+            import blade_shape_signature as signatures
+            config = {**self.config, "paths": {**self.config.get("paths", {}), "output_dir": str(self.output_dir)}}
+            return int((~signatures.evidence_mask(config, frame)).sum())
+        except Exception:  # noqa: BLE001 - an unreadable artefact must not kill the view
+            return 0
+
     def pareto(self) -> pd.DataFrame:
         path = self.path("pareto_front.csv")
         frame = self._cached("pareto", path, lambda: self._read_csv(path))

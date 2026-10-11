@@ -10,8 +10,8 @@ like JSON values); copy ``blade_shape_local.ini.example`` to start.
 ``cfx_bin_dir`` and ``turbogrid_exe`` left empty in both files are derived from
 the ANSYS installer's ``AWP_ROOT<version>`` variable (``[ansys] version = 251``,
 or the only installed version when none is set). Several installed versions and
-no ``version`` derive nothing: ``cfx_bin_dir`` is part of the CFX resume
-signature, so a second install must never switch the solver silently.
+no ``version`` derive nothing: each case records the ``cfx_bin_dir`` it ran
+with, and a second install must never switch the solver silently.
 """
 from __future__ import annotations
 

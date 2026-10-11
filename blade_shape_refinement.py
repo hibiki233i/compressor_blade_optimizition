@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 
 from blade_shape_acquisition import hv_reference_point
+import blade_shape_signature as signatures
 from blade_shape_runtime import output_lock, case_reservations, reserve_case, stream_seed, atomic_json as durable_json
 
 OBJECTIVES = ['Efficiency', 'MassFlow']
@@ -82,7 +83,8 @@ def slice_id(config: dict[str, Any]) -> str:
 
 def training_partition(config: dict[str, Any], frame: pd.DataFrame) -> tuple[pd.DataFrame,pd.DataFrame]:
     names = [v['name'] for v in config['variables']]
-    clean = frame.loc[frame.status.eq('success')].copy()
+    # Labels produced under other physical inputs are kept in the CSV but are not evidence.
+    clean = frame.loc[frame.status.eq('success') & signatures.evidence_mask(config, frame)].copy()
     # Empty startup tables can retain object dtype after to_numeric; nullable
     # numeric columns also need a NumPy-compatible dtype before isfinite.
     numeric = clean[names+OBJECTIVES].apply(pd.to_numeric,errors='coerce').astype(float)
@@ -290,17 +292,6 @@ def write_diagnostics(config: dict[str,Any]) -> dict[str,Any]:
     return gate
 
 
-def physical_signature(config: dict[str,Any]) -> str:
-    keys=['cft_batch_template','base_cft','turbogrid_template','template_cfx','template_cse','geometry_script_path']
-    assets={}
-    for key in keys:
-        path=Path(config['paths'].get(key,''))
-        assets[key]={'path':str(path),'sha256':hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None}
-    return digest({'variables':config['variables'],'constraints':config['constraints'],'search':config.get('search',{}),
-                   'cfx_convergence':config.get('cfx_convergence',{}),
-                   'runtime':{k:config['runtime'].get(k) for k in ['n_blades','rpm','mass_flow','p_out_pa','alpha0']},'assets':assets})
-
-
 def point_config(config: dict[str,Any], point: dict[str,Any]) -> dict[str,Any]:
     out=copy.deepcopy(config)
     if point['stage']=='extension':
@@ -389,7 +380,7 @@ def _write_boundary_plan(config: dict[str,Any], center_run_id: str, path: Path) 
             stages[point['stage']]['valid']=False
             stages[point['stage']]['issues'].append({'point_id':point['point_id'],'issues':point['issues']})
     payload={'version':2,'center_run_id':center_run_id,'center_x':center.tolist(),'slice_id':slice_id(config),
-             'signature':physical_signature(config),'points':points,'stages':stages,
+             'signature':signatures.remember(config),'points':points,'stages':stages,
              'variables':names,'extension':ext,'boundary_levels':config['refinement'].get('boundary_levels',{}),
              'validation':'Python geometry rules only; mesh/CFD not run'}
     payload['plan_id']=digest(payload)
@@ -397,12 +388,14 @@ def _write_boundary_plan(config: dict[str,Any], center_run_id: str, path: Path) 
     return payload
 
 
-def run_boundary(config: dict[str,Any], path: Path, stage: str, max_new: int, resume: bool) -> dict[str,Any]:
+def run_boundary(config: dict[str,Any], path: Path, stage: str, max_new: int, resume: bool,
+                 accept_input_change: str | None = None) -> dict[str,Any]:
     with output_lock(config['paths']['output_dir']):
-        return _run_boundary(config,path,stage,max_new,resume)
+        return _run_boundary(config,path,stage,max_new,resume,accept_input_change)
 
 
-def _run_boundary(config: dict[str,Any], path: Path, stage: str, max_new: int, resume: bool) -> dict[str,Any]:
+def _run_boundary(config: dict[str,Any], path: Path, stage: str, max_new: int, resume: bool,
+                  accept_input_change: str | None = None) -> dict[str,Any]:
     import blade_shape_active_learning as b
     b.check_geometry_script(config)
     path=Path(path)
@@ -411,8 +404,8 @@ def _run_boundary(config: dict[str,Any], path: Path, stage: str, max_new: int, r
     plan=json.loads(path.read_text());content={k:v for k,v in plan.items() if k!='plan_id'}
     if plan.get('version') != 2:
         raise ValueError('Create a version-2 plan; old plans are not silently migrated.')
-    if plan.get('plan_id')!=digest(content) or plan['signature']!=physical_signature(config):
-        raise ValueError('Plan or geometry/operating configuration changed; create a new plan.')
+    if plan.get('plan_id')!=digest(content):
+        raise ValueError('Plan content changed after it was written; create a new plan.')
     if plan['extension']!=config['refinement']['extension']:
         raise ValueError('Extension configuration changed.')
     if not plan['stages'][stage]['valid']:
@@ -424,6 +417,8 @@ def _run_boundary(config: dict[str,Any], path: Path, stage: str, max_new: int, r
     if state['plan_id']!=plan['plan_id']:raise ValueError('State belongs to another plan.')
     if exists and not resume:raise ValueError('State exists. Use --resume to continue.')
     frame=b.load_training(config)
+    signatures.check(config,signatures.merge(signatures.training_records(config,frame),
+                                             {plan['signature']:[f"plan {plan['plan_id'][:12]}"]}),accept_input_change)
     reservations=case_reservations(config['paths']['output_dir'])
     for run_id,owner in reservations.items():
         if owner.get('plan_id')==plan['plan_id'] and owner['point_id'] not in state['points']:

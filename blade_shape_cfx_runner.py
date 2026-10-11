@@ -182,18 +182,24 @@ def _run_cfx_pipeline(
     inputs = {'run_id': run_id, 'mesh': mesh_id,
               'candidate': file_identity(work / 'candidate.json'),
               'template_cfx': file_identity(template_cfx), 'template_cse': file_identity(template_cse),
-              'p_out_pa': p_out_pa, 'cores': cores, 'n_blades': n_blades,
-              'cfx_bin_dir': str(cfx_bin_dir), 'convergence': convergence.to_dict()}
+              'p_out_pa': p_out_pa, 'n_blades': n_blades, 'convergence': convergence.to_dict()}
+    # Core count and install path do not change the answer; they are recorded, not signed.
+    environment = {'cores': cores, 'cfx_bin_dir': str(cfx_bin_dir)}
     if inputs['template_cfx'] is None or inputs['template_cse'] is None:
         return CfxResult(False, {}, 'CFX templates are missing; cannot verify result identity.', 'environment')
-    signature = digest(inputs)
     state = json.loads(receipt.read_text()) if receipt.exists() else None
-    if state is not None and (state.get('version') != 2 or state.get('signature') != signature):
+    # Compare the signed keys only: receipts written before 2026-10 also stored
+    # cores and cfx_bin_dir among their inputs.
+    if state is not None and (state.get('version') != 2
+                              or {key: state.get('inputs', {}).get(key) for key in inputs} != inputs):
         return CfxResult(False, {}, 'CFX input identity changed; existing results were not reused.', 'environment')
     if state is None:
         if output.exists() or list(work.glob('*.res')) or definition.exists():
             return CfxResult(False, {}, 'Unverified legacy CFX artifacts: no completion receipt. Inspect/archive or use a fresh case.', 'solve')
-        state = {'version': 2, 'signature': signature, 'inputs': inputs, 'stages': {}}
+        state = {'version': 2, 'signature': digest(inputs), 'inputs': inputs, 'stages': {}}
+    environments = state.setdefault('environments', [])
+    if environment not in environments:
+        environments.append(environment)
         atomic_json(receipt, state)
     stages = state['stages']
     solve = stages.get('solve', {})

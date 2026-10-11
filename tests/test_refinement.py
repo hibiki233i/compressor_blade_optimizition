@@ -9,6 +9,7 @@ from unittest.mock import patch
 import numpy as np
 import pandas as pd
 import blade_shape_active_learning as b
+from blade_shape_signature import physical_signature
 
 def fake_geometry(config, candidate_path, dry_run=False):
     (candidate_path.parent/'Impeller_Mesh.gtm').write_text('synthetic test mesh')
@@ -40,7 +41,8 @@ class RefinementTests(unittest.TestCase):
     def save_row(self, number=0, x=None, **extra):
         x=self.center if x is None else x
         row={**b.vector_to_sample(self.config,x), 'run_id':f'case_{number:06d}',
-             'status':'success','sample_phase':'active_learning','Efficiency':.76,'MassFlow':4.2,**extra}
+             'status':'success','sample_phase':'active_learning','Efficiency':.76,'MassFlow':4.2,
+             'physical_signature':physical_signature(self.config),**extra}
         b.append_row(self.config,row)
         return row
 
@@ -85,7 +87,8 @@ class RefinementTests(unittest.TestCase):
         for number in range(7):
             rows.append({**{n:str(v) for n,v in b.vector_to_sample(self.config,self.center).items()},
                          'run_id':f'case_{number:06d}','status':'success',
-                         'Efficiency':.76,'MassFlow':4.2,'external_note':'keep'})
+                         'Efficiency':.76,'MassFlow':4.2,'external_note':'keep',
+                         'physical_signature':physical_signature(self.config)})
         rows[1]['Efficiency']=pd.NA
         rows[2]['MassFlow']=np.inf
         rows[3][names[0]]='invalid'

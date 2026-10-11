@@ -18,8 +18,9 @@ _RMS = f"{RMS_TARGET_MAX:g}"
 _RESTART = f"{RESTART_ITERATIONS_RANGE[0]}–{RESTART_ITERATIONS_RANGE[1]}"
 
 # What else a change touches; appended to the entries that are part of it.
-PHYSICAL = ("属于物理签名（refinement.physical_signature）：存在未完成的待评估队列或冻结的边界方案时修改，"
-            "续跑会报 “Inputs changed … inspect before resuming” 并停下；已完成的记录不受影响。")
+PHYSICAL = ("属于物理签名（blade_shape_signature.physical_signature）：训练记录、待评估队列和边界方案都带着生成时的签名。"
+            "修改后，输出目录里旧签名的记录不再参与训练和 Pareto，run / run-boundary 会列出变化并停下；"
+            "换一个输出目录另起研究，或确认旧记录在新输入下仍有效后用 --accept-input-change 填写原因继续。")
 SLICE = "属于 slice_id：修改后当前切片的预测校准与诊断窗口从零开始累计。"
 LOCAL = "改动任一局部搜索设置都会重置 local_search_state.json（半径回到初始值，成功/失败计数清零）。"
 CFX = "属于 CFX 输入签名：已有算例在签名改变后不再复用其结果（cfx_state.json 会拒绝）。"
@@ -40,8 +41,8 @@ HELP: dict[str, Help] = {
     "runtime.cfx_cores": Help(
         "≤ 物理核数",
         "CFX 求解的本地并行分区数（cfx5solve -par-local -part N）。\n"
-        "推荐：不超过本机物理核数（不算超线程）；单通道网格较小时分区过多反而变慢，每个分区宜保留数万个以上节点。",
-        (CFX,)),
+        "推荐：不超过本机物理核数（不算超线程）；单通道网格较小时分区过多反而变慢，每个分区宜保留数万个以上节点。\n"
+        "不进入任何签名：只记录在算例的 cfx_state.json 中，修改后已有算例照常续跑。"),
     "cfx_convergence.rms_target": Help(
         f"推荐 {_RMS}；上限 {_RMS}",
         "最终验收门槛：.out 中最后一次输出的动量、质量、能量方程 RMS 残差的最大值必须 ≤ 此值，否则该算例记为失败，结果不进入训练集。湍流方程与 CFX 自身的停止判据一致，只记录不卡。"
@@ -163,28 +164,23 @@ HELP: dict[str, Help] = {
     # ------------------------------------------------------------ constraints
     "constraints.max_beta_offset_deg": Help(
         "β 相对基准的包络",
-        "hub、shroud 各 5 个 β 控制点相对基准的最大绝对偏移（度）。与各变量自身的上下限同时生效：变量边界都在此值以内时，这条约束不起作用。",
-        (PHYSICAL,)),
+        "hub、shroud 各 5 个 β 控制点相对基准的最大绝对偏移（度）。与各变量自身的上下限同时生效：变量边界都在此值以内时，这条约束不起作用。"),
     "constraints.max_theta_offset_deg": Help(
         "θ 相对基准的包络",
-        "hub、shroud θ 偏移的最大绝对值（度）。与变量自身上下限同时生效：变量边界都在此值以内时，这条约束不起作用。",
-        (PHYSICAL,)),
+        "hub、shroud θ 偏移的最大绝对值（度）。与变量自身上下限同时生效：变量边界都在此值以内时，这条约束不起作用。"),
     "constraints.max_generated_beta_step_deg": Help(
         "叶片角光顺度",
         "把 hub、shroud 的 β 分布线性插值到子午归一化位置 0–1 上 31 个等距点（间距 1/30），要求相邻两点的 |Δβ| 不超过："
         "max(此值, 基准自身的最大相邻步长 + 基准步长余量)。用来限制叶片角突变（局部曲率过大）。\n"
-        "如何确定：先看基准的最大相邻步长，再按允许叶型比基准“更陡”多少来设定。设得过小，几乎所有偏离基准的候选都会被拒绝。",
-        (PHYSICAL,)),
+        "如何确定：先看基准的最大相邻步长，再按允许叶型比基准“更陡”多少来设定。设得过小，几乎所有偏离基准的候选都会被拒绝。"),
     "constraints.baseline_step_margin_deg": Help(
         "推荐 0.5",
-        "光顺约束的余量。基准本身的最大步长若已超过上一项，实际门槛取“基准最大步长 + 此余量”，保证基准及其附近的平缓变化总是可行。",
-        (PHYSICAL,)),
+        "光顺约束的余量。基准本身的最大步长若已超过上一项，实际门槛取“基准最大步长 + 此余量”，保证基准及其附近的平缓变化总是可行。"),
     "constraints.duplicate_distance_norm": Help(
         "推荐 0.01–0.05",
         "候选与已有点（仅比较同一切片的记录）在活动变量上的最小归一化距离，小于此值视为重复而丢弃。" + NORM + "\n"
         "如何确定：取一个几何差值，使它引起的目标变化大于 Pareto 容差（即 CFD 能分辨）。"
-        "过大会使候选池凑不满，甚至出现 “No feasible candidates”；过小则把 CFD 预算浪费在噪声级别的差异上。",
-        (PHYSICAL,)),
+        "过大会使候选池凑不满，甚至出现 “No feasible candidates”；过小则把 CFD 预算浪费在噪声级别的差异上。"),
     # ------------------------------------------------------------ search
     "search.slice_tolerance_norm": Help(
         "推荐 1e-8（精确匹配）",
@@ -192,7 +188,7 @@ HELP: dict[str, Help] = {
         "挑战模型、局部搜索、重复判定和诊断都只用同切片的记录。" + NORM + "\n"
         "1e-8 表示只认按这组固定值生成的记录（数值上完全相同）。只有在有意把固定值略有差异的旧数据也算进来时才放宽，"
         "例如 0.01（约为各固定变量范围的 1%）。",
-        (SLICE, PHYSICAL)),
+        (SLICE,)),
     # ------------------------------------------------------------ refinement
     "refinement.challenger_min_samples": Help(
         "推荐 ≈ 2 × 活动变量数",

@@ -19,6 +19,7 @@ import blade_shape_active_learning as b
 import blade_shape_cfx_runner as cfx
 import blade_shape_flow_diagnostics as fd
 import blade_shape_refinement as r
+from blade_shape_signature import physical_signature
 from blade_gui import commands
 from blade_gui.project import validate_config
 from tests.cfx_output_samples import output as cfx_output
@@ -188,8 +189,9 @@ class CommandFileVersionTests(unittest.TestCase):
                                                      template_cse=work / 'extract.cse').success)
             state = json.loads((work / 'cfx_state.json').read_text())
         self.assertEqual(set(state['inputs']), {'run_id', 'mesh', 'candidate', 'template_cfx', 'template_cse',
-                                                'p_out_pa', 'cores', 'n_blades', 'cfx_bin_dir', 'convergence'})
+                                                'p_out_pa', 'n_blades', 'convergence'})
         self.assertEqual(state['signature'], cfx.digest(state['inputs']))
+        self.assertEqual(state['environments'], [{'cores': 8, 'cfx_bin_dir': str(bindir)}])
 
 
 CCL = '''LIBRARY:
@@ -225,11 +227,11 @@ class OperatingPointTests(unittest.TestCase):
 
     def test_declared_values_stay_in_the_physical_signature(self):
         config = json.loads(Path('blade_shape_config.json').read_text())
-        before = r.physical_signature(config)
+        before = physical_signature(config)
         for key in ('rpm', 'mass_flow', 'alpha0'):
             changed = copy.deepcopy(config)
             changed['runtime'][key] += 1.0
-            self.assertNotEqual(r.physical_signature(changed), before, key)
+            self.assertNotEqual(physical_signature(changed), before, key)
 
     def check_pre(self, rpm, definition=True):
         with tempfile.TemporaryDirectory() as tmp, \

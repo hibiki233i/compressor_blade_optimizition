@@ -57,8 +57,10 @@ class FieldHelpTests(unittest.TestCase):
                                                     ('paths.output_dir', '输出目录')])])
         self.assertIn('<h3>几何约束</h3>', document)
         self.assertIn('重复距离阈值', document)
-        self.assertNotIn('输出目录', document)
-        self.assertIn('修改影响：物理签名', document)
+        self.assertNotIn('paths.output_dir', document)
+        # geometry rules only filter new candidates; they do not change an existing label
+        self.assertNotIn('物理签名</i>', document)
+        self.assertIn('修改影响：CFX 签名、物理签名', help_document_html([('工况', [('runtime.p_out_pa', '出口背压')])]))
 
 
 if __name__ == '__main__':

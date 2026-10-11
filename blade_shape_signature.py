@@ -1,0 +1,216 @@
+"""What a real CFD label depends on, and explicit acceptance of input changes.
+
+The physical signature covers only inputs that change the answer for an
+already chosen design vector: variable names/order (how ``x`` maps to the
+meanline), declared operating point, CFX convergence settings and the content
+of the geometry/mesh/CFX templates and geometry script. Search settings,
+variable bounds, geometry rules, core count and install paths do not change
+the result for a fixed ``x`` and are left out.
+
+Every training row, pending entry and boundary plan carries the signature it
+was produced under. A run refuses to continue while any record carries a
+signature that is not compatible with the current one; the user either moves
+to a new output directory or accepts the change with a stated reason. The
+acceptance is appended to ``input_signatures.json`` together with the inputs
+behind each signature, so later mismatch messages can name what changed.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Iterable
+
+import pandas as pd
+
+from blade_shape_runtime import atomic_json, digest
+
+ASSET_KEYS = ('cft_batch_template', 'base_cft', 'turbogrid_template', 'template_cfx', 'template_cse',
+              'geometry_script_path')
+RUNTIME_KEYS = ('n_blades', 'rpm', 'mass_flow', 'p_out_pa', 'alpha0')
+COLUMN = 'physical_signature'
+REGISTRY = 'input_signatures.json'
+# Rows written before signatures existed and with no queue/reservation record.
+UNSIGNED = 'unsigned'
+
+_hash_cache: dict[tuple[str, int, int], str] = {}
+
+
+class InputsChanged(ValueError):
+    """Records were produced under other inputs and the change was not accepted."""
+
+
+def _sha256(value: Any) -> str | None:
+    path = Path(str(value or ''))
+    if not str(value or '').strip() or not path.is_file():
+        return None
+    stat = path.stat()
+    key = (str(path.resolve()), stat.st_size, stat.st_mtime_ns)
+    if key not in _hash_cache:
+        _hash_cache[key] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return _hash_cache[key]
+
+
+def physical_inputs(config: dict[str, Any]) -> dict[str, Any]:
+    paths = config.get('paths', {})
+    return {'variables': [v['name'] for v in config['variables']],
+            'cfx_convergence': config.get('cfx_convergence', {}),
+            'runtime': {k: config['runtime'].get(k) for k in RUNTIME_KEYS},
+            'assets': {k: _sha256(paths.get(k)) for k in ASSET_KEYS}}
+
+
+def physical_signature(config: dict[str, Any]) -> str:
+    return digest(physical_inputs(config))
+
+
+def legacy_physical_signature(config: dict[str, Any]) -> str:
+    """The formula used before 2026-10: equal only if every old input is unchanged."""
+    assets = {}
+    for key in ASSET_KEYS:
+        path = Path(config['paths'].get(key, ''))
+        assets[key] = {'path': str(path), 'sha256': _sha256(path) if path.is_file() else None}
+    return digest({'variables': config['variables'], 'constraints': config.get('constraints'),
+                   'search': config.get('search', {}), 'cfx_convergence': config.get('cfx_convergence', {}),
+                   'runtime': {k: config['runtime'].get(k) for k in RUNTIME_KEYS}, 'assets': assets})
+
+
+def _output(config: dict[str, Any]) -> Path | None:
+    value = str(config.get('paths', {}).get('output_dir') or '').strip()
+    return Path(value) if value else None
+
+
+def _read(path: Path, default: Any) -> Any:
+    return json.loads(path.read_text()) if path.exists() else default
+
+
+def load_registry(config: dict[str, Any]) -> dict[str, Any]:
+    out = _output(config)
+    registry = _read(out / REGISTRY, None) if out else None
+    if registry is None:
+        return {'version': 1, 'signatures': {}, 'accepted': []}
+    if registry.get('version') != 1:
+        raise ValueError(f'Unknown {REGISTRY} version.')
+    return registry
+
+
+def remember(config: dict[str, Any]) -> str:
+    """Return the current signature, recording its inputs for later mismatch messages."""
+    signature = physical_signature(config)
+    out = _output(config)
+    if out is not None:
+        registry = load_registry(config)
+        if signature not in registry['signatures']:
+            registry['signatures'][signature] = physical_inputs(config)
+            atomic_json(out / REGISTRY, registry)
+    return signature
+
+
+def compatible(config: dict[str, Any]) -> set[str]:
+    """Current signature, the old formula for unchanged inputs, and accepted predecessors."""
+    allowed = {physical_signature(config), legacy_physical_signature(config)}
+    accepted = load_registry(config)['accepted']
+    grown = True
+    while grown:
+        grown = False
+        for entry in accepted:
+            if entry['to'] in allowed and not set(entry['from']) <= allowed:
+                allowed |= set(entry['from'])
+                grown = True
+    return allowed
+
+
+def row_signatures(config: dict[str, Any], frame: pd.DataFrame) -> pd.Series:
+    """Stored signature; for older rows, the queue entry or reservation that produced them."""
+    stored = frame[COLUMN] if COLUMN in frame.columns else pd.Series(index=frame.index, dtype=object)
+    stored = stored.astype(object).where(stored.notna() & stored.astype(str).str.strip().ne(''), None)
+    if stored.notna().all():
+        return stored.astype(str)
+    known: dict[str, str] = {}
+    out = _output(config)
+    if out is not None:
+        for run_id, owner in _read(out / 'case_reservations.json', {}).items():
+            if owner.get('signature'):
+                known[run_id] = owner['signature']
+        for entry in _read(out / 'pending_evaluations.json', {}).get('entries', []):
+            if entry.get('signature'):
+                known[entry['run_id']] = entry['signature']
+    run_ids = frame['run_id'].astype(str) if 'run_id' in frame.columns else pd.Series('', index=frame.index)
+    return stored.fillna(run_ids.map(known)).fillna(UNSIGNED).astype(str)
+
+
+def evidence_mask(config: dict[str, Any], frame: pd.DataFrame) -> pd.Series:
+    """Rows produced under the current inputs (or an accepted predecessor)."""
+    if frame.empty:
+        return pd.Series(True, index=frame.index)
+    return row_signatures(config, frame).isin(compatible(config))
+
+
+def _describe(registry: dict[str, Any], old: str, current: dict[str, Any]) -> str:
+    if old == UNSIGNED:
+        return 'written before signatures existed; inputs unknown'
+    inputs = registry['signatures'].get(old)
+    if inputs is None:
+        return 'inputs were not recorded (signature from an older program version)'
+    changes = []
+    for group in sorted(set(inputs) | set(current)):
+        before, after = inputs.get(group), current.get(group)
+        if isinstance(before, dict) and isinstance(after, dict):
+            for key in sorted(set(before) | set(after)):
+                if before.get(key) != after.get(key):
+                    detail = 'content changed' if group == 'assets' else f'{before.get(key)!r} -> {after.get(key)!r}'
+                    changes.append(f'{group}.{key}: {detail}')
+        elif before != after:
+            changes.append(f'{group} changed')
+    return '; '.join(changes) or 'no difference in recorded inputs'
+
+
+def check(config: dict[str, Any], records: dict[str, Iterable[str]], accept: str | None) -> None:
+    """Refuse incompatible records unless the user accepts them with a reason.
+
+    ``records`` maps a signature to labels of the records carrying it (run_ids,
+    a plan id). Acceptance is recorded once and makes those signatures
+    compatible with the current inputs from then on.
+    """
+    allowed = compatible(config)
+    found: dict[str, list[str]] = {}
+    for signature, labels in records.items():
+        if signature not in allowed:
+            found.setdefault(signature, []).extend(labels)
+    reason = (accept or '').strip()
+    if not found:
+        if reason:
+            print('Input change: nothing to accept; all records match the current inputs.')
+        return
+    current = remember(config)
+    registry = load_registry(config)
+    inputs = physical_inputs(config)
+    lines = [f'  {len(labels)} record(s) [{", ".join(labels[:5])}{", ..." if len(labels) > 5 else ""}]: '
+             f'{_describe(registry, signature, inputs)}' for signature, labels in sorted(found.items())]
+    if not reason:
+        raise InputsChanged(
+            'Records in this output directory were produced under other physical inputs:\n' + '\n'.join(lines) +
+            '\nUse a new output directory for a separate study, or rerun with '
+            '--accept-input-change "<reason>" if these records stay valid under the current inputs.')
+    registry['accepted'].append({'at': datetime.now(timezone.utc).isoformat(timespec='seconds'),
+                                 'from': sorted(found), 'to': current, 'reason': reason,
+                                 'records': {signature: labels for signature, labels in sorted(found.items())}})
+    atomic_json(_output(config) / REGISTRY, registry)
+    print('Input change accepted (' + reason + '):\n' + '\n'.join(lines))
+
+
+def training_records(config: dict[str, Any], frame: pd.DataFrame) -> dict[str, list[str]]:
+    records: dict[str, list[str]] = {}
+    if frame.empty:
+        return records
+    for signature, run_id in zip(row_signatures(config, frame), frame['run_id'].astype(str)):
+        records.setdefault(signature, []).append(run_id)
+    return records
+
+
+def merge(*groups: dict[str, list[str]]) -> dict[str, list[str]]:
+    out: dict[str, list[str]] = {}
+    for group in groups:
+        for signature, labels in group.items():
+            out.setdefault(signature, []).extend(labels)
+    return out
