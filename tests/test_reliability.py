@@ -58,9 +58,67 @@ class ReliabilityTests(unittest.TestCase):
             kw['p_out_pa']=11
             self.assertFalse(cfx.run_cfx_pipeline(self.out,'case_0',**kw).success,'changed BC reused old results')
         self.assertEqual(calls,['cfx5pre.exe','cfx5solve.exe','cfx5post.exe'])
+
+    def test_pre_saves_only_case_template_copy_and_keeps_signed_source_unchanged(self):
+        kw=self.cfx_setup()
+        source=Path(kw['template_cfx']);original=source.read_bytes();calls=[]
+        def command(cmd,cwd,log):
+            name=Path(cmd[0]).name;calls.append(name)
+            if name=='cfx5pre.exe':
+                script=(cwd/'Update_Mesh.pre').read_text()
+                load=next(line for line in script.splitlines() if line.startswith('>load filename='))
+                loaded=Path(load.split('=',1)[1])
+                self.assertEqual(loaded.resolve(),(cwd/'cfx_pre_template.cfx').resolve())
+                self.assertEqual(loaded.read_bytes(),original)
+                loaded.write_text('synthetic project saved with the new mesh')
+                (cwd/'Impeller.def').write_text('def')
+            elif name=='cfx5solve.exe':
+                (cwd/'complete.res').write_text('res')
+                (cwd/'complete.out').write_text(cfx_output())
+            else:(cwd/'CFX_Results.txt').write_text('0.76,2,1,.42,2.1')
+            return 0
+        with patch.object(cfx,'_run_logged',side_effect=command):
+            self.assertTrue(cfx.run_cfx_pipeline(self.out,'case_0',**kw).success)
+        self.assertEqual(source.read_bytes(),original)
+        state=json.loads((self.out/'cfx_state.json').read_text())
+        self.assertEqual(state['stages']['pre']['loaded_template_identity'],state['inputs']['template_cfx'])
+        with patch.object(cfx,'_run_logged',side_effect=AssertionError('must recover without external work')):
+            self.assertTrue(cfx.run_cfx_pipeline(self.out,'case_0',**kw).success)
+        self.assertEqual(calls,['cfx5pre.exe','cfx5solve.exe','cfx5post.exe'])
     def test_unverified_result_text_is_rejected(self):
         kw=self.cfx_setup();(self.out/'CFX_Results.txt').write_text('0.76,2,1,.42,2.1')
         self.assertFalse(cfx.run_cfx_pipeline(self.out,'case_0',**kw).success)
+
+    def test_changed_boundary_mapping_does_not_reuse_completed_cfd(self):
+        kw = self.cfx_setup()
+        kw['boundary_mapping'] = {'flow_analysis': 'Flow Analysis 1', 'domain': 'R1',
+                                  'boundaries': {'shroudtip': ['SHROUD Passage'],
+                                                 'bladetip': ['BLD SHROUD TIP']}}
+        calls = []
+        def command(cmd, cwd, log):
+            name = Path(cmd[0]).name
+            calls.append(name)
+            if name == 'cfx5pre.exe':
+                self.assertIn('mode=append', (self.out / 'Update_Mesh.pre').read_text())
+                self.assertIn('Location = SHROUD Passage', (self.out / 'update_bc.ccl').read_text())
+                (self.out / 'Impeller.def').write_text('def')
+            elif name == 'cfx5solve.exe':
+                (self.out / 'complete.res').write_text('res')
+                (self.out / 'complete.out').write_text(cfx_output())
+            else:
+                (self.out / 'CFX_Results.txt').write_text('0.76,2,1,.42,2.1')
+            return 0
+        with patch.object(cfx, '_run_logged', side_effect=command):
+            self.assertTrue(cfx.run_cfx_pipeline(self.out, 'case_0', **kw).success)
+            self.assertTrue(cfx.run_cfx_pipeline(self.out, 'case_0', **kw).success)
+        for changed in (None, {**kw['boundary_mapping'], 'domain': 'R2'},
+                        {**kw['boundary_mapping'], 'boundaries': {'shroudtip': ['SHROUD INBlock']}}):
+            with self.subTest(mapping=changed), \
+                    patch.object(cfx, '_run_logged', side_effect=AssertionError('must reject changed inputs')):
+                result = cfx.run_cfx_pipeline(self.out, 'case_0', **{**kw, 'boundary_mapping': changed})
+            self.assertFalse(result.success)
+            self.assertEqual(result.failure_stage, 'environment')
+        self.assertEqual(calls, ['cfx5pre.exe', 'cfx5solve.exe', 'cfx5post.exe'])
     def test_failed_boundary_command_is_nonzero(self):
         self.rows();p=self.out/'plan.json';r.write_boundary_plan(self.c,'case_000000',p)
         result=subprocess.run([sys.executable,'blade_shape_active_learning.py','run-boundary','--config',str(self.cp),
@@ -105,6 +163,64 @@ class ReliabilityTests(unittest.TestCase):
         with patch.object(b,'evaluate_true_cfd',side_effect=complete):b.run_loop(args)
         self.assertEqual(ids,[4,4])
         self.assertEqual(len(pd.read_csv(self.out/'active_learning_diagnostics.csv')),1)
+
+    def test_first_doe_finalizes_success_or_failure_with_empty_before_table(self):
+        for status in ['success','failed']:
+            with self.subTest(status=status):
+                config=copy.deepcopy(self.c)
+                root=self.out/status
+                config['paths']['output_dir']=str(root)
+                self.cp.write_text(json.dumps(config))
+                args=b.build_parser().parse_args(['run','--config',str(self.cp),
+                     '--initial-samples','1','--iterations','0','--max-new-cfd','1'])
+                def evaluate(config,baseline,x,index,**meta):
+                    row={**b.vector_to_sample(config,x),**meta,'run_id':f'case_{index:06d}',
+                         'status':status,'Efficiency':.76 if status=='success' else np.nan,
+                         'MassFlow':4.2 if status=='success' else np.nan,'external_note':'keep'}
+                    b.append_row(config,row)
+                    return b.CaseResult(row,status=='success')
+                with patch.object(b,'evaluate_true_cfd',side_effect=evaluate) as evaluation:
+                    if status=='failed':
+                        with self.assertRaises(SystemExit) as failure:b.run_loop(args)
+                        self.assertEqual(failure.exception.code,1)
+                    else:b.run_loop(args)
+                self.assertEqual(evaluation.call_count,1)
+                entry=json.loads((root/'pending_evaluations.json').read_text())['entries'][0]
+                self.assertEqual(entry['status'],status)
+                self.assertTrue(entry['finalized'])
+                self.assertEqual(entry['before_run_ids'],[])
+                self.assertEqual(len(b.load_training(config)),1)
+                self.assertEqual(len(pd.read_csv(root/'pareto_front.csv')),int(status=='success'))
+
+    def test_first_failed_doe_repairs_finalization_without_repeating_cfd(self):
+        self.cp.write_text(json.dumps(self.c))
+        args=b.build_parser().parse_args(['run','--config',str(self.cp),
+              '--initial-samples','2','--iterations','0','--max-new-cfd','2'])
+        def evaluate(config,baseline,x,index,**meta):
+            row={**b.vector_to_sample(config,x),**meta,'run_id':f'case_{index:06d}',
+                 'status':'failed','failure_stage':'solve','Efficiency':np.nan,
+                 'MassFlow':np.nan,'external_note':'keep'}
+            b.append_row(config,row)
+            return b.CaseResult(row,False)
+        with patch.object(b,'evaluate_true_cfd',side_effect=evaluate), \
+                patch.object(r,'improvement_metrics',side_effect=TypeError('simulated failure after CSV append')):
+            with self.assertRaisesRegex(TypeError,'after CSV append'):b.run_loop(args)
+        queue=json.loads((self.out/'pending_evaluations.json').read_text())
+        self.assertEqual(queue['entries'][0]['status'],'running')
+        self.assertFalse(queue['entries'][0]['finalized'])
+        args.resume=True;args.max_new_cfd=0
+        with patch.object(b,'evaluate_true_cfd',side_effect=AssertionError('must not repeat failed CFD')):
+            with self.assertRaises(SystemExit) as failure:b.run_loop(args)
+        self.assertEqual(failure.exception.code,1)
+        repaired=json.loads((self.out/'pending_evaluations.json').read_text())
+        self.assertEqual(repaired['entries'][0]['run_id'],'case_000000')
+        self.assertEqual(repaired['entries'][0]['status'],'failed')
+        self.assertTrue(repaired['entries'][0]['finalized'])
+        self.assertEqual(repaired['entries'][1],queue['entries'][1])
+        training=b.load_training(self.c)
+        self.assertEqual(training.run_id.tolist(),['case_000000'])
+        self.assertEqual(training.iloc[0].external_note,'keep')
+        self.assertTrue(pd.read_csv(self.out/'pareto_front.csv').empty)
     def test_local_trial_steps_do_not_collapse_at_upper_bound(self):
         self.x[4]=4.5;self.rows()
         names=self.c['refinement']['boundary_variables']

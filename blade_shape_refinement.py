@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 
 from blade_shape_acquisition import hv_reference_point
+from blade_shape_cfx_runner import normalize_boundary_mapping
 from blade_shape_runtime import output_lock, case_reservations, reserve_case, stream_seed, atomic_json as durable_json
 
 OBJECTIVES = ['Efficiency', 'MassFlow']
@@ -83,7 +84,9 @@ def slice_id(config: dict[str, Any]) -> str:
 def training_partition(config: dict[str, Any], frame: pd.DataFrame) -> tuple[pd.DataFrame,pd.DataFrame]:
     names = [v['name'] for v in config['variables']]
     clean = frame.loc[frame.status.eq('success')].copy()
-    numeric = clean[names+OBJECTIVES].apply(pd.to_numeric,errors='coerce')
+    # Empty startup tables can retain object dtype after to_numeric; nullable
+    # numeric columns also need a NumPy-compatible dtype before isfinite.
+    numeric = clean[names+OBJECTIVES].apply(pd.to_numeric,errors='coerce').astype(float)
     clean = clean.loc[np.isfinite(numeric.to_numpy()).all(axis=1)].copy()
     clean[names+OBJECTIVES] = numeric.loc[clean.index]
     return clean, clean.loc[same_slice_mask(config,clean[names].to_numpy())].copy()
@@ -294,9 +297,13 @@ def physical_signature(config: dict[str,Any]) -> str:
     for key in keys:
         path=Path(config['paths'].get(key,''))
         assets[key]={'path':str(path),'sha256':hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None}
-    return digest({'variables':config['variables'],'constraints':config['constraints'],'search':config.get('search',{}),
+    inputs = {'variables':config['variables'],'constraints':config['constraints'],'search':config.get('search',{}),
                    'cfx_convergence':config.get('cfx_convergence',{}),
-                   'runtime':{k:config['runtime'].get(k) for k in ['n_blades','rpm','mass_flow','p_out_pa','alpha0']},'assets':assets})
+                   'runtime':{k:config['runtime'].get(k) for k in ['n_blades','rpm','mass_flow','p_out_pa','alpha0']},'assets':assets}
+    mapping = normalize_boundary_mapping(config.get('cfx_boundary_mapping'))
+    if mapping:
+        inputs['cfx_boundary_mapping'] = mapping
+    return digest(inputs)
 
 
 def point_config(config: dict[str,Any], point: dict[str,Any]) -> dict[str,Any]:

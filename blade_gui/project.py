@@ -103,6 +103,12 @@ def validate_config(config: dict[str, Any]) -> list[Issue]:
         issues.append(Issue("error", f"CFX 收敛设置无效：{exc}"))
 
     try:
+        from blade_shape_cfx_runner import normalize_boundary_mapping
+        normalize_boundary_mapping(config.get('cfx_boundary_mapping'))
+    except (ValueError, TypeError) as exc:
+        issues.append(Issue("error", f"CFX 边界映射无效：{exc}"))
+
+    try:
         cli_module().surrogate_choice(config)
     except (ValueError, TypeError, AttributeError) as exc:
         issues.append(Issue("error", f"代理模型设置无效：{exc}"))

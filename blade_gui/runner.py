@@ -8,11 +8,11 @@ from __future__ import annotations
 
 import codecs
 import os
-import shlex
 import sys
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QTimer, Signal
+from .commands import format_command
 
 
 class CommandRunner(QObject):
@@ -41,7 +41,7 @@ class CommandRunner(QObject):
         return list(self._command)
 
     def command_text(self) -> str:
-        return " ".join(shlex.quote(part) for part in self._command)
+        return format_command(self._command)
 
     # -------------------------------------------------------------- start
     def start(self, argv: list[str], extra_env: dict[str, str] | None = None) -> bool:

@@ -7,6 +7,8 @@ override a value given before the sub-command.
 """
 from __future__ import annotations
 
+import os
+import re
 import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -15,6 +17,25 @@ ENTRY_SCRIPT = "blade_shape_active_learning.py"
 CFX_SCRIPT = "blade_shape_cfx_runner.py"
 
 BOUNDARY_STAGES = ["singles", "pairs", "extension"]
+
+
+def format_command(argv: list[str], *, windows: bool | None = None) -> str:
+    """Copyable PowerShell on Windows, POSIX shell syntax elsewhere.
+
+    Execution still uses the original argv directly through QProcess.
+    """
+    if not argv:
+        return ''
+    if windows is None:
+        windows = os.name == 'nt'
+    if not windows:
+        return shlex.join(argv)
+
+    def quote(value: str) -> str:
+        return "'" + value.replace("'", "''") + "'"
+
+    args = [part if re.fullmatch(r'[A-Za-z0-9_./:\\-]+', part) else quote(part) for part in argv[1:]]
+    return ' '.join(['&', quote(argv[0]), *args])
 
 
 @dataclass
@@ -31,7 +52,7 @@ class CommandSpec:
         return [python, "-u", self.script, *self.args]
 
     def preview(self, python: str = "python") -> str:
-        return " ".join(shlex.quote(part) for part in self.argv(python))
+        return format_command(self.argv(python))
 
 
 def _config_args(config_path: str | Path) -> list[str]:

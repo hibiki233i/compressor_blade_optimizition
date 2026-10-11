@@ -139,6 +139,87 @@ class SurrogateFallbackTests(unittest.TestCase):
                             if issue.level == 'error'))
 
 
+class BoundaryMappingTests(unittest.TestCase):
+    def setUp(self):
+        self.mapping = {'flow_analysis': 'Flow Analysis 1', 'domain': 'R1',
+                        'boundaries': {'shroudtip': ['SHROUD Passage'], 'bladetip': ['BLD SHROUD TIP']}}
+
+    def test_locations_are_imported_after_mesh_before_definition(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = cfx.write_cfx_pre_inputs(tmp, p_out_pa=10, template_cfx='C:/t/x.cfx',
+                                              boundary_mapping=self.mapping)
+            pre = paths['pre_script'].read_text()
+            ccl = paths['ccl_file'].read_text()
+        self.assertLess(pre.index('>gtmImport'), pre.index('>importccl'))
+        self.assertLess(pre.index('>importccl'), pre.index('>writeCaseFile'))
+        self.assertIn('mode=append', pre)
+        self.assertNotIn('mode=replace', pre)
+        self.assertIn('BOUNDARY: shroudtip\n      Location = SHROUD Passage', ccl)
+        self.assertIn('BOUNDARY: bladetip\n      Location = BLD SHROUD TIP', ccl)
+        self.assertIn('MyBackPressure = 10 [Pa]', ccl)
+        # This override must not redefine or delete the wall's slip/heat physics.
+        self.assertNotIn('BOUNDARY CONDITIONS:', ccl)
+        self.assertNotIn('Option =', ccl)
+
+    def test_invalid_or_overlapping_locations_fail_before_writing(self):
+        invalid = [[], {'domain': 'R1'}, {**self.mapping, 'domain': 'R1\nEND'},
+                   {**self.mapping, 'boundaries': {}},
+                   {**self.mapping, 'boundaries': {'shroudtip': 'SHROUD Passage'}},
+                   {**self.mapping, 'boundaries': {'shroudtip': ['SHROUD Passage', 'SHROUD Passage']}},
+                   {**self.mapping, 'boundaries': {'shroudtip': ['SHROUD Passage'],
+                                                   'bladetip': ['SHROUD Passage']}},
+                   {**self.mapping, 'boundaries': {'shroudtip': ['SHROUD Passage\nEND']}},
+                   {**self.mapping, 'boundaries': {'shroudtip': ['   ']}}]
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp) / 'inputs'
+            for mapping in invalid:
+                with self.subTest(mapping=mapping), self.assertRaises(ValueError):
+                    cfx.write_cfx_pre_inputs(work, p_out_pa=10, template_cfx='x.cfx',
+                                              boundary_mapping=mapping)
+                self.assertFalse(work.exists())
+
+    def test_mapping_is_part_of_physical_signature_and_has_stable_order(self):
+        config = json.loads(Path('blade_shape_config.json').read_text())
+        config.pop('cfx_boundary_mapping', None)
+        disabled = r.physical_signature(config)
+        config['cfx_boundary_mapping'] = {}
+        self.assertEqual(r.physical_signature(config), disabled)
+        config['cfx_boundary_mapping'] = self.mapping
+        enabled = r.physical_signature(config)
+        self.assertNotEqual(enabled, disabled)
+        config['cfx_boundary_mapping'] = copy.deepcopy(self.mapping)
+        config['cfx_boundary_mapping']['boundaries'] = dict(reversed(list(self.mapping['boundaries'].items())))
+        self.assertEqual(r.physical_signature(config), enabled)
+        config['cfx_boundary_mapping']['boundaries']['shroudtip'] = ['SHROUD INBlock']
+        self.assertNotEqual(r.physical_signature(config), enabled)
+
+    def test_cli_and_gui_validate_mapping(self):
+        config = json.loads(Path('blade_shape_config.json').read_text())
+        config['cfx_boundary_mapping'] = {**self.mapping, 'domain': 'R1\nEND'}
+        self.assertTrue(any(issue.level == 'error' and 'CFX 边界映射' in issue.message
+                            for issue in validate_config(config)))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'config.json'
+            path.write_text(json.dumps(config))
+            with redirect_stderr(StringIO()), self.assertRaises(ValueError):
+                b.load_config(path)
+
+    def test_check_pre_reads_mapping_from_config_without_running_cfx(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = json.loads(Path('blade_shape_config.json').read_text())
+            config['cfx_boundary_mapping'] = self.mapping
+            config['paths'].update(template_cfx=str(root / 'x.cfx'), template_cse=str(root / 'x.cse'),
+                                   cfx_bin_dir=str(root / 'bin'))
+            path = root / 'config.json'
+            path.write_text(json.dumps(config))
+            with patch.object(cfx, '_run_logged', side_effect=AssertionError('must not launch CFX')), \
+                    redirect_stdout(StringIO()):
+                self.assertEqual(cfx.check_cfx_pre_inputs(path, root / 'check'), 1)
+            self.assertIn('Location = BLD SHROUD TIP', (root / 'check' / 'update_bc.ccl').read_text())
+            self.assertIn('>importccl', (root / 'check' / 'Update_Mesh.pre').read_text())
+
+
 class CommandFileVersionTests(unittest.TestCase):
     def test_header_stays_on_the_verified_syntax_version(self):
         for version in (None, '', '251', 'v251', '25.1', '252', '261'):

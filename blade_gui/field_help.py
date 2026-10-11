@@ -57,7 +57,9 @@ HELP: dict[str, Help] = {
         (CFX, PHYSICAL)),
     "cfx_convergence.flow_analysis": Help(
         "与模板一致",
-        "CFX 模板中 FLOW 对象的名称（默认 “Flow Analysis 1”），用于写入收敛控制 CCL。必须与 BaseModel.cfx 中的名称完全一致，否则 CFX-Pre 找不到该对象。",
+        "CFX 模板中求解分析对象 FLOW 的名称（默认 “Flow Analysis 1”），用于指定收敛控制 CCL 作用于哪一个分析。"
+        "必须与模板中的 FLOW 名称完全一致；程序在启动 CFX-Solver 时加载此 CCL，名称不匹配会导致设置无法正确应用或求解报错。"
+        "它不是网格区域、Domain 或边界名称。",
         (CFX, PHYSICAL)),
     "runtime.n_blades": Help(
         "主叶片数",

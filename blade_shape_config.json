@@ -14,19 +14,31 @@
     "output_dir": ""
   },
   "cfx_convergence": {
-    "rms_target": 0.00001,
+    "rms_target": 1e-05,
     "restart_iterations": 2000,
     "flow_analysis": "Flow Analysis 1"
   },
+  "cfx_boundary_mapping": {
+    "flow_analysis": "Flow Analysis 1",
+    "domain": "R1",
+    "boundaries": {
+      "shroudtip": [
+        "SHROUD Passage"
+      ],
+      "bladetip": [
+        "BLD SHROUD TIP"
+      ]
+    }
+  },
   "runtime": {
     "cfx_cores": 8,
-    "n_blades": 10,
-    "p_out_pa": 10.0,
+    "n_blades": 9,
+    "p_out_pa": 12.0,
     "rpm": 10000.0,
     "mass_flow": 0.0036,
-    "alpha0": 0.0,
-    "initial_samples": 48,
-    "iterations": 2,
+    "alpha0": 21.8,
+    "initial_samples": 40,
+    "iterations": 10,
     "batch_size": 3,
     "candidate_pool_size": 600,
     "nsga2_pop_size": 80,
@@ -55,18 +67,66 @@
     "duplicate_distance_norm": 0.02
   },
   "variables": [
-    {"name": "hub_beta_0_deg_offset", "lower": -3.0, "upper": 4.0},
-    {"name": "hub_beta_1_deg_offset", "lower": -3.5, "upper": 2.0},
-    {"name": "hub_beta_2_deg_offset", "lower": -3.5, "upper": 3.0},
-    {"name": "hub_beta_3_deg_offset", "lower": -4.0, "upper": 2.5},
-    {"name": "hub_beta_4_deg_offset", "lower": -2.5, "upper": 4.5},
-    {"name": "shroud_beta_0_deg_offset", "lower": -4.0, "upper": 3.0},
-    {"name": "shroud_beta_1_deg_offset", "lower": -3.0, "upper": 3.0},
-    {"name": "shroud_beta_2_deg_offset", "lower": -3.0, "upper": 3.0},
-    {"name": "shroud_beta_3_deg_offset", "lower": -3.0, "upper": 3.5},
-    {"name": "shroud_beta_4_deg_offset", "lower": -4.5, "upper": 2.0},
-    {"name": "hub_theta_deg_offset", "lower": -1.5, "upper": 1.5},
-    {"name": "shroud_theta_deg_offset", "lower": -1.5, "upper": 1.5}
+    {
+      "name": "hub_beta_0_deg_offset",
+      "lower": -3.0,
+      "upper": 4.0
+    },
+    {
+      "name": "hub_beta_1_deg_offset",
+      "lower": -3.5,
+      "upper": 2.0
+    },
+    {
+      "name": "hub_beta_2_deg_offset",
+      "lower": -3.5,
+      "upper": 3.0
+    },
+    {
+      "name": "hub_beta_3_deg_offset",
+      "lower": -4.0,
+      "upper": 2.5
+    },
+    {
+      "name": "hub_beta_4_deg_offset",
+      "lower": -2.5,
+      "upper": 4.5
+    },
+    {
+      "name": "shroud_beta_0_deg_offset",
+      "lower": -4.0,
+      "upper": 3.0
+    },
+    {
+      "name": "shroud_beta_1_deg_offset",
+      "lower": -3.0,
+      "upper": 3.0
+    },
+    {
+      "name": "shroud_beta_2_deg_offset",
+      "lower": -3.0,
+      "upper": 3.0
+    },
+    {
+      "name": "shroud_beta_3_deg_offset",
+      "lower": -3.0,
+      "upper": 3.5
+    },
+    {
+      "name": "shroud_beta_4_deg_offset",
+      "lower": -4.5,
+      "upper": 2.0
+    },
+    {
+      "name": "hub_theta_deg_offset",
+      "lower": -1.5,
+      "upper": 1.5
+    },
+    {
+      "name": "shroud_theta_deg_offset",
+      "lower": -1.5,
+      "upper": 1.5
+    }
   ],
   "search": {
     "active_variables": [
@@ -79,11 +139,11 @@
       "hub_theta_deg_offset"
     ],
     "fixed_variables": {
-      "hub_beta_1_deg_offset": -0.7976745133188405,
-      "hub_beta_2_deg_offset": -3.0395772286388123,
-      "shroud_beta_1_deg_offset": -2.5264409987376446,
-      "shroud_beta_4_deg_offset": 1.9412121516791416,
-      "shroud_theta_deg_offset": -0.6344325595115534
+      "hub_beta_1_deg_offset": 0.0,
+      "hub_beta_2_deg_offset": 0.0,
+      "shroud_beta_1_deg_offset": 0.0,
+      "shroud_beta_4_deg_offset": 0.0,
+      "shroud_theta_deg_offset": 0.0
     },
     "slice_tolerance_norm": 1e-08
   },
@@ -139,7 +199,7 @@
       "max_radius_norm": 0.3,
       "successes_to_expand": 3,
       "failures_to_shrink": 3,
-      "min_relative_hv_gain": 0.0001
+      "min_relative_hv_gain": 0.0002
     }
   }
 }

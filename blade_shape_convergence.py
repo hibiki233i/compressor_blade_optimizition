@@ -100,6 +100,11 @@ def assess_out(text: str, policy: ConvergencePolicy) -> dict:
         raise ValueError(f'Missing final RMS equations: {sorted(expected-values.keys())}')
     flat = re.sub(r'\s+', ' ', final)
     limit_stop = bool(re.search(r'maximum number of (?:time[- ]step |outer loop )?iterations.*?(?:reached|terminat)', flat, re.I))
+    # CFX 2025 R1 reports the reason before the iteration-limit description.
+    # Match that specific summary, rather than treating any run-duration stop
+    # (e.g. a wall-clock limit) as permission to continue the solver.
+    limit_stop = limit_stop or bool(re.search(
+        r'CFD Solver:\s*Run duration reached\s*\(\s*Maximum number of outer iterations\s*\)', flat, re.I))
     limits = re.findall(r'Maximum Number of Iterations\s*=\s*(\d+)', text, re.I)
     declared_limit = int(limits[-1]) if limits else None
     current_iteration = int(last.group(2) or last.group(1))
