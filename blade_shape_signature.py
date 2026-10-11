@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -31,8 +32,11 @@ ASSET_KEYS = ('cft_batch_template', 'base_cft', 'turbogrid_template', 'template_
 RUNTIME_KEYS = ('n_blades', 'rpm', 'mass_flow', 'p_out_pa', 'alpha0')
 COLUMN = 'physical_signature'
 REGISTRY = 'input_signatures.json'
-# Rows written before signatures existed and with no queue/reservation record.
+# Rows written before signatures existed and with no queue/reservation record
+# get a per-row pseudo signature ``unsigned:<run_id>:<content hash>``, so that
+# accepting them covers exactly the reviewed rows, never later unsigned ones.
 UNSIGNED = 'unsigned'
+_UNSIGNED_CONTENT = ('Efficiency', 'MassFlow', 'status')
 
 _hash_cache: dict[tuple[str, int, int], str] = {}
 
@@ -136,7 +140,27 @@ def row_signatures(config: dict[str, Any], frame: pd.DataFrame) -> pd.Series:
             if entry.get('signature'):
                 known[entry['run_id']] = entry['signature']
     run_ids = frame['run_id'].astype(str) if 'run_id' in frame.columns else pd.Series('', index=frame.index)
-    return stored.fillna(run_ids.map(known)).fillna(UNSIGNED).astype(str)
+    resolved = list(stored.fillna(run_ids.map(known)))
+    for position, signature in enumerate(resolved):
+        if pd.isna(signature):
+            resolved[position] = _unsigned_signature(config, frame.iloc[position])
+    return pd.Series(resolved, index=frame.index).astype(str)
+
+
+def _unsigned_signature(config: dict[str, Any], row: pd.Series) -> str:
+    def value(item: Any) -> Any:
+        try:
+            number = float(item)
+        except (TypeError, ValueError):
+            return str(item)
+        return repr(number) if math.isfinite(number) else None
+    columns = [v['name'] for v in config['variables']] + list(_UNSIGNED_CONTENT)
+    content = digest({column: value(row.get(column)) for column in columns})[:16]
+    return f"{UNSIGNED}:{row.get('run_id', '')}:{content}"
+
+
+def is_unsigned(signature: str) -> bool:
+    return signature.startswith(UNSIGNED + ':')
 
 
 def evidence_mask(config: dict[str, Any], frame: pd.DataFrame) -> pd.Series:
@@ -147,7 +171,7 @@ def evidence_mask(config: dict[str, Any], frame: pd.DataFrame) -> pd.Series:
 
 
 def _describe(registry: dict[str, Any], old: str, current: dict[str, Any]) -> str:
-    if old == UNSIGNED:
+    if old == UNSIGNED or is_unsigned(old):
         return 'written before signatures existed; inputs unknown'
     inputs = registry['signatures'].get(old)
     if inputs is None:
@@ -185,8 +209,13 @@ def check(config: dict[str, Any], records: dict[str, Iterable[str]], accept: str
     current = remember(config)
     registry = load_registry(config)
     inputs = physical_inputs(config)
+    # Unsigned rows each carry their own pseudo signature; report them as one group.
+    groups: dict[str, list[str]] = {}
+    for signature, labels in sorted(found.items()):
+        groups.setdefault(UNSIGNED if is_unsigned(signature) else signature, []).extend(labels)
     lines = [f'  {len(labels)} record(s) [{", ".join(labels[:5])}{", ..." if len(labels) > 5 else ""}]: '
-             f'{_describe(registry, signature, inputs)}' for signature, labels in sorted(found.items())]
+             f'{_describe(registry, signature, inputs)}'
+             for signature, labels in groups.items()]
     if not reason:
         raise InputsChanged(
             'Records in this output directory were produced under other physical inputs:\n' + '\n'.join(lines) +

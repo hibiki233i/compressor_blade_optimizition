@@ -139,7 +139,10 @@ class SignatureTests(unittest.TestCase):
             {'run_id': 'case_000000', 'signature': legacy, 'x': [], 'arguments': {}, 'selected': {},
              'status': 'success', 'finalized': True}]}))
         loaded = b.load_training(self.c)
-        self.assertEqual(s.row_signatures(self.c, loaded).tolist(), [legacy] + [s.UNSIGNED] * 3)
+        found = s.row_signatures(self.c, loaded).tolist()
+        self.assertEqual(found[0], legacy)
+        self.assertTrue(all(s.is_unsigned(signature) for signature in found[1:]))
+        self.assertEqual(len(set(found[1:])), 3)
         self.assertEqual(len(r.training_partition(self.c, loaded)[0]), 1)
         with self.assertRaises(s.InputsChanged) as caught:
             b.run_loop(self.run_args())
@@ -147,6 +150,25 @@ class SignatureTests(unittest.TestCase):
         with patch.object(b, 'evaluate_true_cfd', side_effect=self.complete), redirect_stdout(StringIO()):
             b.run_loop(self.run_args('--accept-input-change', 'June runs used the same templates'))
         self.assertEqual(len(r.training_partition(self.c, b.load_training(self.c))[0]), 5)
+
+    def test_accepting_unsigned_rows_covers_only_the_reviewed_rows(self):
+        self.rows(2)
+        frame = pd.read_csv(self.out / 'training_data.csv').drop(columns=[s.COLUMN])
+        frame.to_csv(self.out / 'training_data.csv', index=False)
+        with redirect_stdout(StringIO()):
+            s.check(self.c, s.training_records(self.c, b.load_training(self.c)), 'reviewed case 0 and 1')
+        self.assertTrue(s.evidence_mask(self.c, b.load_training(self.c)).all())
+        # a later restored/imported unsigned row, and an edited copy of a reviewed one, are not covered
+        reviewed = pd.read_csv(self.out / 'training_data.csv')
+        extra = reviewed.iloc[[0]].assign(run_id='case_000099')
+        edited = reviewed.iloc[[1]].assign(Efficiency=.99)
+        pd.concat([reviewed.iloc[[0]], edited, extra]).to_csv(self.out / 'training_data.csv', index=False)
+        loaded = b.load_training(self.c)
+        self.assertEqual(s.evidence_mask(self.c, loaded).tolist(), [True, False, False])
+        with self.assertRaises(s.InputsChanged) as caught:
+            b.run_loop(self.run_args())
+        self.assertIn('2 record(s) [case_000001, case_000099]: written before signatures existed',
+                      str(caught.exception))
 
     def test_unfinished_entry_with_old_formula_resumes_under_unchanged_inputs(self):
         self.rows(4)
