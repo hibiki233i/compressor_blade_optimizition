@@ -20,6 +20,7 @@ from blade_shape_cfx_runner import run_cfx_pipeline
 from blade_shape_convergence import ConvergencePolicy
 from blade_shape_local_config import apply_local_paths
 import blade_shape_refinement as refinement
+import blade_shape_signature as signatures
 from blade_shape_acquisition import expected_hvi
 import blade_shape_pending as pending
 from blade_shape_runtime import output_lock, file_identity, atomic_json, case_reservations, stream_seed
@@ -52,7 +53,7 @@ SAMPLE_COLUMNS = [
     "experiment_id",
     "design_role",
 ]
-STATUS_COLUMNS = ["status", "failure_stage", "message", "case_dir", "run_id"]
+STATUS_COLUMNS = ["status", "failure_stage", "message", "case_dir", "run_id", signatures.COLUMN]
 # Design variables are mapped to the CFturbo meanline by name, never by position.
 HUB_BETA_VARIABLES = tuple(f"hub_beta_{i}_deg_offset" for i in range(5))
 SHROUD_BETA_VARIABLES = tuple(f"shroud_beta_{i}_deg_offset" for i in range(5))
@@ -439,6 +440,8 @@ def append_compatible_csv(path: Path, row: dict[str, Any], columns: list[str],
 
 
 def append_row(config: dict[str, Any], row: dict[str, Any]) -> None:
+    # The label belongs to the inputs it was computed under; see blade_shape_signature.
+    row = {**row, signatures.COLUMN: row.get(signatures.COLUMN) or signatures.remember(config)}
     append_compatible_csv(training_csv_path(config), row, all_columns(config),
                           lambda df: normalize_training_frame(config, df))
 
@@ -454,7 +457,7 @@ def write_iteration_summary(config: dict[str, Any], rows: list[dict[str, Any]]) 
 
 
 def write_pareto(config: dict[str, Any], df: pd.DataFrame) -> pd.DataFrame:
-    success = df[df["status"] == "success"].copy()
+    success = df[(df["status"] == "success") & signatures.evidence_mask(config, df)].copy()
     # A success row with a missing/non-finite objective (e.g. a hand-edited CSV)
     # is never dominated under NaN comparisons and would leak into both fronts.
     objectives = success[OBJECTIVE_COLUMNS].apply(pd.to_numeric, errors="coerce")
@@ -1050,8 +1053,8 @@ def check_geometry_script(config: dict[str, Any]) -> None:
         raise GeometryScriptOutdated(
             f"{path} does not declare a BladeCount parameter: this script copy is older than the repository. "
             "Copy Run-BladeShapeGeometryMeshing.ps1 from the repository to paths.geometry_script_path. "
-            "The script path and SHA-256 are part of the physical signature, so a pending queue or boundary "
-            "plan created with the old copy will then refuse to resume; inspect it before continuing.")
+            "The script content is part of the physical signature, so records created with the old copy "
+            "then stop the run until you accept the change with --accept-input-change; inspect them first.")
 
 
 def run_geometry(config: dict[str, Any], candidate_path: Path, dry_run: bool = False) -> tuple[bool, str]:
@@ -1114,6 +1117,7 @@ def evaluate_true_cfd(
     experiment_id: str = "",
     design_role: str = "",
 ) -> CaseResult:
+    signatures.ensure_pinned(config)
     run_id = f"case_{case_index:06d}"
     sample = vector_to_sample(config, x)
     row: dict[str, Any] = {**sample, **{col: np.nan for col in RESULT_COLUMNS}}
@@ -1132,6 +1136,8 @@ def evaluate_true_cfd(
             "message": "",
             "case_dir": "",
             "run_id": run_id,
+            # the inputs this evaluation starts under; checked again before success is recorded
+            signatures.COLUMN: signatures.remember(config),
         }
     )
 
@@ -1154,10 +1160,16 @@ def evaluate_true_cfd(
         candidate_path = write_candidate_files(config, baseline, x, run_id)
     row['case_dir'] = str(case_dir)
     receipt_path = case_dir / 'geometry_state.json'
-    signature = refinement.digest({'physical':refinement.physical_signature(config), 'x':x.tolist(), 'candidate':file_identity(candidate_path)})
+    # Only inputs that shape the mesh: an accepted change of, e.g., the CFturbo
+    # template must not reuse a mesh made from the old one.
+    signature = refinement.digest({'geometry':signatures.geometry_signature(config), 'x':x.tolist(),
+                                   'candidate':file_identity(candidate_path)})
     receipt = json.loads(receipt_path.read_text()) if receipt_path.exists() else None
     if receipt is not None:
-        if receipt.get('signature') != signature or receipt.get('status') != 'complete' or receipt.get('mesh') != file_identity(case_dir/'Impeller_Mesh.gtm'):
+        # receipts written before 2026-10 signed the whole old-formula physical signature
+        legacy = refinement.digest({'physical':signatures.legacy_physical_signature(config), 'x':x.tolist(),
+                                    'candidate':file_identity(candidate_path)})
+        if receipt.get('signature') not in {signature, legacy} or receipt.get('status') != 'complete' or receipt.get('mesh') != file_identity(case_dir/'Impeller_Mesh.gtm'):
             row.update(failure_stage='geometry',message='Geometry receipt is incomplete or inputs/mesh changed. Inspect this case.')
             append_row(config,row)
             return CaseResult(row,False)
@@ -1221,6 +1233,12 @@ def evaluate_true_cfd(
         row['message'] = 'Non-finite objective returned by CFX-Post.'
         append_row(config, row)
         return CaseResult(row, False)
+    if signatures.physical_signature(config) != row[signatures.COLUMN]:
+        row['failure_stage'] = 'environment'
+        row['message'] = ('Physical inputs changed on disk during this evaluation (template, geometry script or '
+                          'CFX installation); the result is not recorded as a label. Inspect this case.')
+        append_row(config, row)
+        return CaseResult(row, False)
     row["status"] = "success"
     row["failure_stage"] = ""
     row["message"] = cfx.message
@@ -1249,6 +1267,14 @@ def _run_loop(args: argparse.Namespace, config: dict[str, Any]) -> None:
     if not args.resume and (not df.empty or pending.load(config)['entries']):
         raise SystemExit('Existing training/pending data found. Use --resume.')
     pending.check_orphans(config, df)
+    try:
+        signatures.check(config, signatures.merge(signatures.training_records(config, df), pending.records(config)),
+                         getattr(args, 'accept_input_change', None))
+    except signatures.InputsChanged:
+        # Leave fronts on disk that hold only current-input rows, even when stopping here.
+        write_pareto(config, df)
+        raise
+    signatures.pin(config)
     baseline = extract_baseline(config)
     seed, max_new = int(runtime['seed']), int(runtime['max_new_cfd'])
     recovered = pending.run(config, baseline, max_new)
@@ -1339,22 +1365,36 @@ def write_candidate_command(args: argparse.Namespace) -> None:
 def refinement_command(args: argparse.Namespace) -> None:
     config = load_config(args.config)
     if args.command == 'diagnose':
-        history, local = refinement.training_partition(config, load_training(config))
+        frame = load_training(config)
+        history, local = refinement.training_partition(config, frame)
+        other_inputs = int((~signatures.evidence_mask(config, frame)).sum())
         report = history.copy()
         report['inactive_distance_norm'] = refinement.slice_distance(config, report[variable_names(config)].to_numpy())
         report['on_current_slice'] = refinement.same_slice_mask(config, report[variable_names(config)].to_numpy())
         output_dir(config).mkdir(parents=True, exist_ok=True)
         report.to_csv(output_dir(config) / 'training_slice_audit.csv', index=False)
         print(json.dumps({'history_successes':len(history), 'same_slice_successes':len(local),
+                          'rows_from_other_inputs':other_inputs,
                           'gate':refinement.write_diagnostics(config)}, indent=2))
     elif args.command == 'write-boundary-plan':
         plan = refinement.write_boundary_plan(config, args.center_run_id, Path(args.plan))
         print(json.dumps({'plan':args.plan, 'plan_id':plan['plan_id'], 'points':len(plan['points']), 'stages':plan['stages']}, indent=2))
     else:
-        result = refinement.run_boundary(config, Path(args.plan), args.stage, args.max_new_cfd, args.resume)
+        result = refinement.run_boundary(config, Path(args.plan), args.stage, args.max_new_cfd, args.resume,
+                                         args.accept_input_change)
         print(json.dumps(result, indent=2))
         if result['stage_status'] == 'failed':
             raise SystemExit(1)
+
+
+ACCEPT_HELP = ("Declare that records produced under other physical inputs stay valid under the current "
+               "inputs; the reason is recorded in input_signatures.json.")
+
+
+def _reason(value: str) -> str:
+    if not value.strip():
+        raise argparse.ArgumentTypeError("a reason is required")
+    return value.strip()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1374,6 +1414,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--max-new-cfd", type=int)
     run.add_argument("--seed", type=int)
     run.add_argument("--resume", action="store_true")
+    run.add_argument("--accept-input-change", type=_reason, metavar="REASON", help=ACCEPT_HELP)
     run.set_defaults(func=run_loop)
 
     wc = sub.add_parser("write-candidate", help="Write one candidate JSON and optionally dry-run XML generation.")
@@ -1394,6 +1435,7 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument('--stage', choices=['singles','pairs','extension'], required=True)
             command.add_argument('--max-new-cfd', type=int, required=True)
             command.add_argument('--resume', action='store_true')
+            command.add_argument('--accept-input-change', type=_reason, metavar='REASON', help=ACCEPT_HELP)
         command.set_defaults(func=refinement_command)
     return parser
 

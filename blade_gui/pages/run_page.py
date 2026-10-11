@@ -231,12 +231,14 @@ class RunPage(Page):
         self.run_max = self._spin(0, 100000)
         self.run_seed = self._spin(0, 2**31 - 1)
         self.run_resume = QCheckBox("--resume（沿用已有 CSV 与 case 编号）")
+        self.run_accept = self._accept_field()
         form.addRow("初始 DOE 样本", self.run_initial)
         form.addRow("主动学习迭代", self.run_iterations)
         form.addRow("每批点数", self.run_batch)
         form.addRow("最大新增 CFD", self.run_max)
         form.addRow("随机种子", self.run_seed)
         form.addRow("", self.run_resume)
+        form.addRow("确认输入变化", self.run_accept)
         return page
 
     def _build_candidate_form(self) -> QWidget:
@@ -316,11 +318,22 @@ class RunPage(Page):
         self.boundary_stage.addItems(commands.BOUNDARY_STAGES)
         self.boundary_max = self._spin(0, 100000, 1)
         self.boundary_resume = QCheckBox("--resume")
+        self.boundary_accept = self._accept_field()
         form.addRow("方案文件", holder)
         form.addRow("阶段", self.boundary_stage)
         form.addRow("最大新增 CFD", self.boundary_max)
         form.addRow("", self.boundary_resume)
+        form.addRow("确认输入变化", self.boundary_accept)
         return page
+
+    @staticmethod
+    def _accept_field() -> QLineEdit:
+        # Deliberately not remembered: a stored reason would silently accept the next change.
+        field = QLineEdit()
+        field.setPlaceholderText("留空 = 不接受；仅在运行因物理输入变化停下后填写原因")
+        field.setToolTip("对应 --accept-input-change：声明旧输入下的记录在当前输入下仍然有效，"
+                         "原因写入 input_signatures.json。启动后自动清空。")
+        return field
 
     def _remembered_widgets(self) -> dict[str, QWidget]:
         return {
@@ -338,7 +351,7 @@ class RunPage(Page):
             self.run_initial, self.run_iterations, self.run_batch, self.run_max, self.run_seed,
             self.run_resume, self.cand_index, self.cand_seed, self.cand_dry, self.cand_offline,
             self.plan_center, self.plan_path, self.boundary_stage, self.boundary_max,
-            self.boundary_resume, self.boundary_plan,
+            self.boundary_resume, self.boundary_plan, self.run_accept, self.boundary_accept,
         ]
 
     def _connect_dirty(self, widget: QWidget) -> None:
@@ -396,7 +409,8 @@ class RunPage(Page):
 
     def _sync_center_runs(self) -> None:
         current = self.plan_center.currentText()
-        df = self._configured_project().training()
+        # a centre must be a result under the current inputs
+        df = self._configured_project().results()
         runs: list[str] = []
         if not df.empty and "status" in df.columns and "run_id" in df.columns:
             status = df["status"].astype(str).str.strip().str.lower()
@@ -463,6 +477,7 @@ class RunPage(Page):
                 max_new_cfd=self.run_max.value(),
                 seed=self.run_seed.value(),
                 resume=self.run_resume.isChecked(),
+                accept_input_change=self.run_accept.text(),
             )
         if action == "write-candidate":
             return commands.build_write_candidate(
@@ -486,6 +501,7 @@ class RunPage(Page):
             stage=self.boundary_stage.currentText(),
             max_new_cfd=self.boundary_max.value(),
             resume=self.boundary_resume.isChecked(),
+            accept_input_change=self.boundary_accept.text(),
         )
 
     def _update_preview(self) -> None:
@@ -516,6 +532,17 @@ class RunPage(Page):
                 self.guard.set_level(
                     "warn",
                     f"实际运行目录 {self._configured_project().output_dir} {detail}：不带 --resume 时 run 会主动退出。",
+                )
+                return
+        if action in {"run", "run-boundary"}:
+            accept = (self.run_accept if action == "run" else self.boundary_accept).text().strip()
+            plan = self.boundary_plan.currentText().strip() if action == "run-boundary" else None
+            other = self._configured_project().blocking_records(plan)
+            if other and not accept:
+                self.guard.set_level(
+                    "warn",
+                    f"有 {other} 条记录（训练记录、未完成的待算点或边界方案）来自其他物理输入，运行会停下并列出差异。"
+                    "另起研究请换输出目录；确认它们在当前输入下仍然有效时，在「确认输入变化」中填写原因。",
                 )
                 return
         if action == "write-boundary-plan" and not self.plan_center.currentText().strip():
@@ -556,6 +583,9 @@ class RunPage(Page):
             )
             if action == "run" and not self.run_resume.isChecked() and any(self._existing_run_work()):
                 message = "检测到已有训练数据或待处理算例且未勾选 --resume，run 会立即退出。\n\n仍然继续吗？"
+            reason = (self.run_accept if action == "run" else self.boundary_accept).text().strip()
+            if reason:
+                message += f"\n\n同时接受物理输入变化，原因：{reason}\n旧输入下的记录将作为当前输入的有效数据参与训练。"
             answer = QMessageBox.question(self, "确认启动", message,
                                           QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
             if answer != QMessageBox.Yes:
@@ -569,6 +599,9 @@ class RunPage(Page):
         self.runner.start(argv)
         if not self.runner.running:
             self.progress.setVisible(False)
+        else:
+            self.run_accept.clear()
+            self.boundary_accept.clear()
 
     def stop(self) -> None:
         if not self.runner.running:

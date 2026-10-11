@@ -276,6 +276,11 @@ class Summary:
     selection_sources: dict[str, int] = field(default_factory=dict)
     iterations: int = 0
     last_modified: float = 0.0
+    # training rows produced under other physical inputs; excluded from best values and fronts
+    other_inputs: int = 0
+    # rows this machine cannot check (templates/CFX not readable here); kept in the views
+    unverified_inputs: int = 0
+    input_check_error: str = ""
 
     @property
     def success_rate(self) -> float:
@@ -298,6 +303,7 @@ class Project:
     # ---------------------------------------------------------------- load
     def reload(self) -> None:
         self._cache.clear()
+        self.input_check_error = ""
         self.issues = []
         self.load_error = ""
         if self.config_path is None:
@@ -378,15 +384,95 @@ class Project:
         # callers may add helper columns; hand out a copy so the cache stays clean
         return frame.copy()
 
+    def _signature_config(self) -> dict[str, Any]:
+        return {**self.config, "paths": {**self.config.get("paths", {}), "output_dir": str(self.output_dir)}}
+
+    def input_classes(self) -> pd.Series:
+        """Per training row: ``current``, ``other`` or ``unknown`` (cannot be decided here).
+
+        Read-only views on a machine without the templates or CFX compare the
+        inputs recorded in ``input_signatures.json`` instead of excluding every row.
+        """
+        frame = self.training()
+        if frame.empty:
+            return pd.Series(dtype=object)
+        if not self.config_valid:
+            return pd.Series("unknown", index=frame.index)
+        names = ("training_data.csv", "input_signatures.json", "pending_evaluations.json", "case_reservations.json")
+        stamp = tuple(self.path(name).stat().st_mtime_ns if self.path(name).exists() else 0 for name in names)
+        hit = self._cache.get("input_classes")
+        if hit and hit[0] == stamp:
+            return hit[1].copy()
+        try:
+            import blade_shape_signature as signatures
+            config = self._signature_config()
+            classes = pd.Series(signatures.classify(config, signatures.row_signatures(config, frame)), index=frame.index)
+            self.input_check_error = ""
+        except Exception as exc:  # noqa: BLE001 - keep the rows visible but say they are unchecked
+            classes = pd.Series("unknown", index=frame.index)
+            self.input_check_error = str(exc)
+        self._cache["input_classes"] = (stamp, classes)
+        return classes.copy()
+
+    def records_from_other_inputs(self) -> int:
+        """Training rows produced under other physical inputs."""
+        return int((self.input_classes() == "other").sum())
+
+    def blocking_records(self, plan: str | Path | None = None) -> int:
+        """Training rows, unfinished queue entries and the plan that would stop run / run-boundary."""
+        count = self.records_from_other_inputs()
+        try:
+            import blade_shape_signature as signatures
+            labels = [e.get("signature", "") for e in self.pending().get("entries", []) if not e.get("finalized")]
+            if plan:
+                path = Path(plan)
+                if not path.is_file() and (self.output_dir / path).is_file():
+                    path = self.output_dir / path
+                if path.is_file():
+                    labels.append(json.loads(path.read_text(encoding="utf-8")).get("signature", ""))
+            count += signatures.classify(self._signature_config(), labels).count("other")
+        except Exception:  # noqa: BLE001 - the CLI performs the authoritative check
+            pass
+        return count
+
+    def results(self) -> pd.DataFrame:
+        """Training rows that count as results under the current inputs.
+
+        Result views (best values, fronts, correlations) use this; case history
+        uses :meth:`training`, which keeps every row. Rows that cannot be
+        checked on this machine stay in, and :class:`Summary` reports them.
+        """
+        frame = self.training()
+        return frame.loc[self.input_classes() != "other"].copy()
+
+    def _front(self, name: str, strict: bool) -> pd.DataFrame:
+        path = self.path(name)
+        frame = self._cached(name, path, lambda: self._read_csv(path))
+        frame = frame if frame is not None else pd.DataFrame()
+        if not self.records_from_other_inputs():
+            return frame
+        # The written front predates the input change (run stops before rewriting
+        # it); recompute it in memory from the rows that still count.
+        try:
+            cli = cli_module()
+            results = self.results()
+            success = results.loc[results["status"].astype(str).str.strip().str.lower() == "success"].copy()
+            for col in OBJECTIVES:
+                success[col] = pd.to_numeric(success[col], errors="coerce")
+            success = success.loc[np.isfinite(success[OBJECTIVES].to_numpy(dtype=float)).all(axis=1)]
+            if success.empty:
+                return success
+            y = success[OBJECTIVES].to_numpy(dtype=float)
+            mask = cli.pareto_mask(y) if strict else cli.pareto_mask(y, cli.objective_tolerances(self.config))
+            return success.loc[mask].sort_values(OBJECTIVES, ascending=False)
+        except Exception:  # noqa: BLE001
+            return pd.DataFrame()
+
     def pareto(self) -> pd.DataFrame:
-        path = self.path("pareto_front.csv")
-        frame = self._cached("pareto", path, lambda: self._read_csv(path))
-        return frame if frame is not None else pd.DataFrame()
+        return self._front("pareto_front.csv", strict=False)
 
     def pareto_strict(self) -> pd.DataFrame:
-        path = self.path("pareto_front_strict.csv")
-        frame = self._cached("strict", path, lambda: self._read_csv(path))
-        return frame if frame is not None else pd.DataFrame()
+        return self._front("pareto_front_strict.csv", strict=True)
 
     def diagnostics(self) -> pd.DataFrame:
         path = self.path("active_learning_diagnostics.csv")
@@ -442,11 +528,16 @@ class Project:
         out.successes = int((status == "success").sum())
         out.failures = int(out.attempts - out.successes)
 
+        classes = self.input_classes()
+        evidence = classes != "other"
+        out.other_inputs = int((classes == "other").sum())
+        out.unverified_inputs = int((classes == "unknown").sum())
+        out.input_check_error = self.input_check_error
         numeric = df.copy()
         for col in OBJECTIVES + ["Power"]:
             if col in numeric.columns:
                 numeric[col] = pd.to_numeric(numeric[col], errors="coerce")
-        success = numeric.loc[status == "success"]
+        success = numeric.loc[(status == "success") & evidence]
 
         if not success.empty:
             if "Efficiency" in success and success["Efficiency"].notna().any():
@@ -483,7 +574,7 @@ class Project:
 
     def best_so_far(self) -> tuple[list[int], list[float], list[float]]:
         """Cumulative best Efficiency / MassFlow over successful evaluations."""
-        df = self.training()
+        df = self.results()
         if df.empty or "status" not in df.columns:
             return [], [], []
         status = df["status"].astype(str).str.strip().str.lower()

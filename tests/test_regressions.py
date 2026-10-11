@@ -15,6 +15,7 @@ import pandas as pd
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 import blade_shape_active_learning as al  # noqa: E402
+from blade_shape_signature import physical_signature  # noqa: E402
 from blade_gui.project import Project, config_errors, validate_config  # noqa: E402
 from tests.test_gui import PYSIDE_AVAILABLE, ProjectFixture, make_config  # noqa: E402
 
@@ -57,7 +58,7 @@ class ParetoAndGeometryTests(unittest.TestCase):
             dict(Efficiency=np.nan, MassFlow=9.9, status='success', run_id='case_000001'),
             dict(Efficiency=0.81, MassFlow=2.9, status='success', run_id='case_000002'),
             dict(Efficiency=0.99, MassFlow=9.9, status='failed', run_id='case_000003'),
-        ])
+        ]).assign(physical_signature=physical_signature(self.config))
         front = al.write_pareto(self.config, frame)
         strict = pd.read_csv(self.out / 'pareto_front_strict.csv')
         self.assertEqual(sorted(front.run_id), ['case_000000', 'case_000002'])

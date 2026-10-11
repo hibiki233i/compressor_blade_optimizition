@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 import numpy as np
 import pandas as pd
+import blade_shape_signature as signatures
 from blade_shape_runtime import atomic_json, case_reservations
 
 
@@ -32,10 +33,9 @@ def load(config: dict[str,Any]) -> dict[str,Any]:
 
 def enqueue(config: dict[str,Any], selected: list[Any], arguments: list[dict[str,Any]]) -> None:
     import blade_shape_active_learning as b
-    import blade_shape_refinement as r
     queue=load(config)
     index=b.next_case_index(config,b.load_training(config))
-    signature=r.physical_signature(config)
+    signature=signatures.remember(config)
     for candidate,metadata in zip(selected,arguments,strict=True):
         entry={'run_id':f'case_{index:06d}', 'signature':signature,'x':candidate.x.tolist(),
                'arguments':safe_json(metadata),'selected':safe_json(asdict(candidate)),'status':'pending','finalized':False}
@@ -56,10 +56,19 @@ def check_orphans(config: dict[str,Any], frame: pd.DataFrame) -> None:
             raise ValueError(f'Untracked case {folder.name}: inspect its provenance before continuing. No new CFD was selected.')
 
 
+def records(config: dict[str,Any]) -> dict[str,list[str]]:
+    """Signatures of unfinished entries; finished ones are checked through their CSV rows."""
+    out: dict[str,list[str]]={}
+    for entry in load(config)['entries']:
+        if not entry['finalized']:out.setdefault(entry['signature'],[]).append(entry['run_id'])
+    return out
+
+
 def run(config: dict[str,Any], baseline: Any, budget: int) -> dict[str,Any]:
     import blade_shape_active_learning as b
     import blade_shape_refinement as r
     queue=load(config);used=0;failures=0;summary=[]
+    allowed=signatures.compatible(config)
     for entry in queue['entries']:
         frame=b.load_training(config)
         recorded=frame.loc[frame.run_id.eq(entry['run_id'])]
@@ -67,8 +76,8 @@ def run(config: dict[str,Any], baseline: Any, budget: int) -> dict[str,Any]:
         if entry['finalized']:
             if recorded.empty:raise ValueError(f"Completed queue row missing from CSV: {entry['run_id']}")
             continue
-        if entry['signature']!=r.physical_signature(config):
-            raise ValueError(f"Inputs changed for pending {entry['run_id']}; inspect before resuming.")
+        if entry['signature'] not in allowed:
+            raise signatures.InputsChanged(f"Inputs changed for pending {entry['run_id']}; inspect before resuming.")
         x=np.array(entry['x'],float)
         if not recorded.empty:
             row=recorded.iloc[0]
@@ -80,6 +89,7 @@ def run(config: dict[str,Any], baseline: Any, budget: int) -> dict[str,Any]:
             result=b.CaseResult(row.to_dict(),row['status']=='success')
         else:
             if used>=budget:break
+            signatures.ensure_pinned(config)
             if entry['status']=='pending':
                 entry['before_run_ids']=frame.run_id.tolist()
                 entry['status']='running'

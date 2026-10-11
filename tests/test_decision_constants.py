@@ -15,6 +15,7 @@ import blade_shape_acquisition as acquisition
 import blade_shape_active_learning as b
 import blade_shape_convergence as convergence
 import blade_shape_refinement as refinement
+from blade_shape_signature import physical_signature
 from blade_shape_runtime import SEED_STREAMS, stream_seed
 from tests.test_gui import PYSIDE_AVAILABLE, ProjectFixture
 
@@ -116,7 +117,8 @@ class HypervolumeReferenceTests(unittest.TestCase):
     def frame(self, y):
         names = b.variable_names(self.config)
         rows = [{**dict.fromkeys(names, 0.0), 'run_id': f'case_{i:06d}', 'status': 'success', 'sample_phase': 'doe',
-                 'Efficiency': e, 'MassFlow': m} for i, (e, m) in enumerate(y)]
+                 'Efficiency': e, 'MassFlow': m, 'physical_signature': physical_signature(self.config)}
+                for i, (e, m) in enumerate(y)]
         return pd.DataFrame(rows)
 
     def test_both_modules_use_the_historical_formula(self):

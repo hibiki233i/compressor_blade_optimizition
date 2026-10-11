@@ -208,9 +208,12 @@ class AnalyticsPage(Page):
 
     # ------------------------------------------------------------ refresh
     def refresh(self) -> None:
-        df = self.ctx.project.training()
+        # rows from other physical inputs are not results under the current ones
+        df = self.ctx.project.results()
         success = _successful(df)
         diagnostics = self.ctx.project.diagnostics()
+        if "run_id" in diagnostics.columns and "run_id" in df.columns:
+            diagnostics = diagnostics.loc[diagnostics["run_id"].astype(str).isin(df["run_id"].astype(str))]
 
         self._sync_variable_box()
         self._refresh_correlation(success)
@@ -265,7 +268,7 @@ class AnalyticsPage(Page):
     def _refresh_variable_scatter(self) -> None:
         name = self.variable_box.currentText()
         objective = self.objective_box.currentText() or OBJECTIVES[0]
-        success = _successful(self.ctx.project.training())
+        success = _successful(self.ctx.project.results())
         chart: XYChart = self.scatter_card.chart
         chart.set_axis_labels(f"{name} (deg)", objective)
         if success.empty or not name or name not in success.columns:

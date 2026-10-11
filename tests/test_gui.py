@@ -170,6 +170,12 @@ class ProjectFixture(unittest.TestCase):
         self.config = make_config(self.out)
         self.config_path = self.root / "config.json"
         self.config_path.write_text(json.dumps(self.config, indent=2), encoding="utf-8")
+        # rows carry the signature of the inputs they were computed under, and the
+        # inputs behind it are recorded in input_signatures.json, as real runs write them
+        from blade_shape_signature import remember
+        signed = remember(self.config)
+        write_csv(self.out / "training_data.csv", [*TRAINING_HEADER, "physical_signature"],
+                  [[*row, signed] for row in TRAINING_ROWS])
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
@@ -431,6 +437,19 @@ class TestGuiWidgets(ProjectFixture):
         self.assertEqual(page.tile_pareto.value.text(), "3")
         self.assertEqual(page.phase_chart._items[0][0], "初始 DOE")
         self.assertGreater(page.gate_body.count(), 0)
+
+    def test_dashboard_excludes_rows_from_other_physical_inputs(self) -> None:
+        changed = json.loads(self.config_path.read_text(encoding="utf-8"))
+        changed["runtime"]["p_out_pa"] = 99.0
+        self.config_path.write_text(json.dumps(changed, indent=2), encoding="utf-8")
+        self.ctx.reload()
+        self.window._select_page(0)
+        self._settle()
+        page = self.window.pages[0]
+        self.assertIn("4 条训练记录来自其他物理输入", page.message.text.text())
+        self.assertEqual(page.tile_attempts.value.text(), "4")  # history still counts every attempt
+        self.assertEqual(page.tile_pareto.value.text(), "0")
+        self.assertFalse(page.pareto_chart.isVisible())
 
     def test_analytics_parity_axes_are_unified(self) -> None:
         self.window._select_page(1)

@@ -187,13 +187,15 @@ class DashboardPage(Page):
         self.tile_eff.set_value(fmt(summary.best_efficiency), summary.best_run_id or "—")
         self.tile_flow.set_value(fmt(summary.best_massflow), "单通道 × 叶片数")
 
-        self._refresh_message(df)
+        self._refresh_message(df, summary)
         self._refresh_pareto()
         self._refresh_convergence()
         self._refresh_distributions(summary)
         self._refresh_gate()
 
-    def _refresh_message(self, df) -> None:
+    def _refresh_message(self, df, summary=None) -> None:
+        other_inputs = summary.other_inputs if summary is not None else 0
+        unverified = summary.unverified_inputs if summary is not None else 0
         project = self.ctx.project
         errors = [item for item in project.issues if item.level == "error"]
         warnings = [item for item in project.issues if item.level == "warning"]
@@ -207,6 +209,21 @@ class DashboardPage(Page):
                 f"尚未在 {project.output_dir} 找到 training_data.csv。可在「运行控制」启动主动学习，"
                 "或在「项目设置」把数据目录指向已有结果。",
             )
+        elif other_inputs:
+            self.message.set_level(
+                "warn",
+                f"有 {other_inputs} 条训练记录来自其他物理输入（工况、收敛设置、模板内容或 CFX 版本与当前配置不同），"
+                "最优值、Pareto 前沿和分析图已排除它们；「算例浏览」仍列出全部记录。"
+                "确认它们在当前输入下仍有效时，在「运行控制」中填写「确认输入变化」。",
+            )
+        elif unverified:
+            reason = (f"核对出错：{summary.input_check_error}" if summary.input_check_error else
+                      "本机读不到部分模板或 CFX 安装，且这些记录没有可比对的输入明细")
+            self.message.set_level(
+                "warn",
+                f"有 {unverified} 条训练记录无法核对物理输入（{reason}）。它们仍显示在结果中，"
+                "请在装有工程模板和 CFX 的机器上确认。",
+            )
         elif warnings:
             self.message.set_level(
                 "warn",
@@ -217,7 +234,7 @@ class DashboardPage(Page):
             self.message.set_level("good", "配置校验通过，数据已载入。")
 
     def _refresh_pareto(self) -> None:
-        df = self.ctx.project.training()
+        df = self.ctx.project.results()
         success = _successful(df)
         has_data = success is not None and not success.empty and "Efficiency" in success.columns
         self.pareto_chart.setVisible(bool(has_data))
