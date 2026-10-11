@@ -89,36 +89,6 @@ class ReliabilityTests(unittest.TestCase):
         kw=self.cfx_setup();(self.out/'CFX_Results.txt').write_text('0.76,2,1,.42,2.1')
         self.assertFalse(cfx.run_cfx_pipeline(self.out,'case_0',**kw).success)
 
-    def test_changed_boundary_mapping_does_not_reuse_completed_cfd(self):
-        kw = self.cfx_setup()
-        kw['boundary_mapping'] = {'flow_analysis': 'Flow Analysis 1', 'domain': 'R1',
-                                  'boundaries': {'shroudtip': ['SHROUD Passage'],
-                                                 'bladetip': ['BLD SHROUD TIP']}}
-        calls = []
-        def command(cmd, cwd, log):
-            name = Path(cmd[0]).name
-            calls.append(name)
-            if name == 'cfx5pre.exe':
-                self.assertIn('mode=append', (self.out / 'Update_Mesh.pre').read_text())
-                self.assertIn('Location = SHROUD Passage', (self.out / 'update_bc.ccl').read_text())
-                (self.out / 'Impeller.def').write_text('def')
-            elif name == 'cfx5solve.exe':
-                (self.out / 'complete.res').write_text('res')
-                (self.out / 'complete.out').write_text(cfx_output())
-            else:
-                (self.out / 'CFX_Results.txt').write_text('0.76,2,1,.42,2.1')
-            return 0
-        with patch.object(cfx, '_run_logged', side_effect=command):
-            self.assertTrue(cfx.run_cfx_pipeline(self.out, 'case_0', **kw).success)
-            self.assertTrue(cfx.run_cfx_pipeline(self.out, 'case_0', **kw).success)
-        for changed in (None, {**kw['boundary_mapping'], 'domain': 'R2'},
-                        {**kw['boundary_mapping'], 'boundaries': {'shroudtip': ['SHROUD INBlock']}}):
-            with self.subTest(mapping=changed), \
-                    patch.object(cfx, '_run_logged', side_effect=AssertionError('must reject changed inputs')):
-                result = cfx.run_cfx_pipeline(self.out, 'case_0', **{**kw, 'boundary_mapping': changed})
-            self.assertFalse(result.success)
-            self.assertEqual(result.failure_stage, 'environment')
-        self.assertEqual(calls, ['cfx5pre.exe', 'cfx5solve.exe', 'cfx5post.exe'])
     def test_failed_boundary_command_is_nonzero(self):
         self.rows();p=self.out/'plan.json';r.write_boundary_plan(self.c,'case_000000',p)
         result=subprocess.run([sys.executable,'blade_shape_active_learning.py','run-boundary','--config',str(self.cp),

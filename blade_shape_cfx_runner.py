@@ -63,49 +63,6 @@ def _cfx_path(path: str | Path) -> str:
     return _as_posix(path)
 
 
-def normalize_boundary_mapping(options: dict | None) -> dict:
-    """Validate a partial Location override; wall physics remain in the template."""
-    if options is None or options == {}:
-        return {}
-    if not isinstance(options, dict) or set(options) != {'flow_analysis', 'domain', 'boundaries'}:
-        raise ValueError('cfx_boundary_mapping requires flow_analysis, domain and boundaries')
-
-    def name(value: object) -> str:
-        if not isinstance(value, str) or not re.fullmatch(r'[A-Za-z0-9 _.-]+', value) or not value.strip():
-            raise ValueError(f'Invalid CFX boundary mapping name: {value!r}')
-        return value.strip()
-
-    flow, domain = name(options['flow_analysis']), name(options['domain'])
-    boundaries = options['boundaries']
-    if not isinstance(boundaries, dict) or not boundaries:
-        raise ValueError('cfx_boundary_mapping.boundaries must be a nonempty object')
-    normalized, owners = {}, {}
-    for boundary, regions in boundaries.items():
-        boundary = name(boundary)
-        if boundary in normalized:
-            raise ValueError(f'Duplicate CFX boundary name: {boundary}')
-        if not isinstance(regions, list) or not regions:
-            raise ValueError(f'CFX boundary {boundary} requires a nonempty list of mesh regions')
-        locations = [name(region) for region in regions]
-        for region in locations:
-            if region in owners:
-                raise ValueError(f'CFX mesh region {region} is assigned more than once')
-            owners[region] = boundary
-        normalized[boundary] = sorted(locations)
-    return {'flow_analysis': flow, 'domain': domain,
-            'boundaries': dict(sorted(normalized.items()))}
-
-
-def boundary_mapping_ccl(options: dict | None) -> str:
-    mapping = normalize_boundary_mapping(options)
-    if not mapping:
-        return ''
-    lines = [f"FLOW: {mapping['flow_analysis']}", f"  DOMAIN: {mapping['domain']}"]
-    for boundary, locations in mapping['boundaries'].items():
-        lines.extend([f'    BOUNDARY: {boundary}', f"      Location = {','.join(locations)}", '    END'])
-    return '\n'.join(lines + ['  END', 'END', ''])
-
-
 def _run_logged(cmd: list[str], cwd: Path, log_path: Path) -> int:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("w", encoding="utf-8", errors="ignore") as log:
@@ -145,9 +102,7 @@ def write_cfx_pre_inputs(
     p_out_pa: float,
     template_cfx: str | Path,
     ansys_version: str | None = None,
-    boundary_mapping: dict | None = None,
 ) -> dict[str, Path]:
-    mapping_ccl = boundary_mapping_ccl(boundary_mapping)
     work = Path(working_dir)
     work.mkdir(parents=True, exist_ok=True)
     gtm_file = work / "Impeller_Mesh.gtm"
@@ -167,14 +122,10 @@ def write_cfx_pre_inputs(
                 "END",
                 "",
             ]
-        ) + mapping_ccl,
+        ),
         encoding="utf-8",
     )
 
-    # Append updates only these Location parameters, retaining the template's
-    # Specified Shear / heat-transfer conditions and CEL expressions.
-    mapping_commands = (f'>importccl filename={_cfx_path(ccl_file)}, mode=append, autoLoadLibrary=none\n'
-                        '>update\n') if mapping_ccl else ''
     pre_script.write_text(
         f"""COMMAND FILE:
   CFX Pre Version = {command_file_version(ansys_version)}
@@ -184,7 +135,7 @@ END
 >gtmImport filename={_cfx_path(gtm_file)}, type=GTM, \
 units=m, nameStrategy=Assembly
 >update
-{mapping_commands}>writeCaseFile filename={_cfx_path(def_file)}, operation=\
+>writeCaseFile filename={_cfx_path(def_file)}, operation=\
 write def file
 >update
 >quit
@@ -204,22 +155,18 @@ def run_cfx_pipeline(
     cfx_bin_dir: str | Path, template_cfx: str | Path, template_cse: str | Path,
     cores: int = 8, n_blades: int = 10,
     convergence: ConvergencePolicy | None = None,
-    boundary_mapping: dict | None = None,
 ) -> CfxResult:
-    boundary_mapping = normalize_boundary_mapping(boundary_mapping)
     with output_lock(working_dir):
         return _run_cfx_pipeline(working_dir, run_id, p_out_pa=p_out_pa,
                                  cfx_bin_dir=cfx_bin_dir, template_cfx=template_cfx,
                                  template_cse=template_cse, cores=cores, n_blades=n_blades,
-                                 convergence=convergence or ConvergencePolicy(),
-                                 boundary_mapping=boundary_mapping)
+                                 convergence=convergence or ConvergencePolicy())
 
 
 def _run_cfx_pipeline(
     working_dir: str | Path, run_id: str, *, p_out_pa: float,
     cfx_bin_dir: str | Path, template_cfx: str | Path, template_cse: str | Path,
     cores: int, n_blades: int, convergence: ConvergencePolicy,
-    boundary_mapping: dict,
 ) -> CfxResult:
     """Accept only results linked to a recorded, successful Solve and matching inputs.
 
@@ -237,8 +184,6 @@ def _run_cfx_pipeline(
               'template_cfx': file_identity(template_cfx), 'template_cse': file_identity(template_cse),
               'p_out_pa': p_out_pa, 'cores': cores, 'n_blades': n_blades,
               'cfx_bin_dir': str(cfx_bin_dir), 'convergence': convergence.to_dict()}
-    if boundary_mapping:
-        inputs['boundary_mapping'] = boundary_mapping
     if inputs['template_cfx'] is None or inputs['template_cse'] is None:
         return CfxResult(False, {}, 'CFX templates are missing; cannot verify result identity.', 'environment')
     signature = digest(inputs)
@@ -314,8 +259,7 @@ def _run_cfx_pipeline(
             shutil.copyfile(template_cfx, template_copy)
             if file_identity(template_copy) != inputs['template_cfx']:
                 return CfxResult(False, {}, 'CFX template changed while copying the Pre input.', 'environment')
-            paths = write_cfx_pre_inputs(work, p_out_pa=p_out_pa, template_cfx=template_copy,
-                                         boundary_mapping=boundary_mapping)
+            paths = write_cfx_pre_inputs(work, p_out_pa=p_out_pa, template_cfx=template_copy)
             ret = invoke('pre', [str(executables['pre']), '-batch', str(paths['pre_script'])])
             if ret != 0 or not definition.is_file():
                 stages['pre']['status'] = 'failed'; atomic_json(receipt, state)
@@ -520,7 +464,6 @@ def _check_cfx_pre_inputs(config_path: str | Path, working_dir: str | Path,
         work,
         p_out_pa=float(runtime["p_out_pa"]),
         template_cfx=paths["template_cfx"],
-        boundary_mapping=config.get('cfx_boundary_mapping'),
     )
     policy = ConvergencePolicy.from_config(config)
     (work / 'convergence.ccl').write_text(convergence_ccl(policy), encoding='utf-8')

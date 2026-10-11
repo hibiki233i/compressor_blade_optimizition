@@ -16,7 +16,7 @@ import xml.etree.ElementTree as ET
 import numpy as np
 import pandas as pd
 
-from blade_shape_cfx_runner import normalize_boundary_mapping, run_cfx_pipeline
+from blade_shape_cfx_runner import run_cfx_pipeline
 from blade_shape_convergence import ConvergencePolicy
 from blade_shape_local_config import apply_local_paths
 import blade_shape_refinement as refinement
@@ -102,7 +102,6 @@ def load_config(path: str | Path) -> dict[str, Any]:
         where = local["ini"] if local.get("found") else f"{local['ini']} (not found; copy blade_shape_local.ini.example)"
         print(f"Warning: empty paths {', '.join(empty)}; set them in {where}", file=sys.stderr)
     ConvergencePolicy.from_config(payload)
-    normalize_boundary_mapping(payload.get('cfx_boundary_mapping'))
     geometry_indices(payload)
     surrogate_choice(payload)
     refinement.active_indices(payload)
@@ -1202,7 +1201,6 @@ def evaluate_true_cfd(
             cores=int(runtime["cfx_cores"]),
             n_blades=int(runtime["n_blades"]),
             convergence=ConvergencePolicy.from_config(config),
-            boundary_mapping=config.get('cfx_boundary_mapping'),
         )
     except OSError as exc:
         row['failure_stage'] = 'environment'

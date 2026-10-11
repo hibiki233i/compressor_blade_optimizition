@@ -16,7 +16,6 @@ import numpy as np
 import pandas as pd
 
 from blade_shape_acquisition import hv_reference_point
-from blade_shape_cfx_runner import normalize_boundary_mapping
 from blade_shape_runtime import output_lock, case_reservations, reserve_case, stream_seed, atomic_json as durable_json
 
 OBJECTIVES = ['Efficiency', 'MassFlow']
@@ -297,13 +296,9 @@ def physical_signature(config: dict[str,Any]) -> str:
     for key in keys:
         path=Path(config['paths'].get(key,''))
         assets[key]={'path':str(path),'sha256':hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None}
-    inputs = {'variables':config['variables'],'constraints':config['constraints'],'search':config.get('search',{}),
+    return digest({'variables':config['variables'],'constraints':config['constraints'],'search':config.get('search',{}),
                    'cfx_convergence':config.get('cfx_convergence',{}),
-                   'runtime':{k:config['runtime'].get(k) for k in ['n_blades','rpm','mass_flow','p_out_pa','alpha0']},'assets':assets}
-    mapping = normalize_boundary_mapping(config.get('cfx_boundary_mapping'))
-    if mapping:
-        inputs['cfx_boundary_mapping'] = mapping
-    return digest(inputs)
+                   'runtime':{k:config['runtime'].get(k) for k in ['n_blades','rpm','mass_flow','p_out_pa','alpha0']},'assets':assets})
 
 
 def point_config(config: dict[str,Any], point: dict[str,Any]) -> dict[str,Any]:

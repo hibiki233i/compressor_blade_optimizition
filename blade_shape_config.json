@@ -18,18 +18,6 @@
     "restart_iterations": 2000,
     "flow_analysis": "Flow Analysis 1"
   },
-  "cfx_boundary_mapping": {
-    "flow_analysis": "Flow Analysis 1",
-    "domain": "R1",
-    "boundaries": {
-      "shroudtip": [
-        "SHROUD Passage"
-      ],
-      "bladetip": [
-        "BLD SHROUD TIP"
-      ]
-    }
-  },
   "runtime": {
     "cfx_cores": 8,
     "n_blades": 9,

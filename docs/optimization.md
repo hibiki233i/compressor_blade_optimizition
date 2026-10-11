@@ -135,25 +135,6 @@ python blade_shape_active_learning.py run --config blade_shape_config.json --res
 
 `flow_analysis` 必须和 CFX 模板里的 Flow 名称一致。
 
-**滑移修正壁面的网格映射**：配置中的 `cfx_boundary_mapping` 在每次导入新网格后、写出 `.def` 前更新边界的 `Location`：
-
-```json
-"cfx_boundary_mapping": {
-  "flow_analysis": "Flow Analysis 1",
-  "domain": "R1",
-  "boundaries": {
-    "shroudtip": ["SHROUD Passage"],
-    "bladetip": ["BLD SHROUD TIP"]
-  }
-}
-```
-
-这里左侧是 CFX 边界名称，数组里是 TurboGrid 网格区域名称，名称和大小写必须与工程一致。`flow_analysis` 和 `domain` 分别是模板里的 Flow 和 Domain 名称。一个边界可指定多个区域；同一区域不能出现在多个映射中。省略此配置、设为 `null` 或 `{}` 时沿用模板映射。
-
-程序将这些 `Location` 写入算例的 `update_bc.ccl`，然后在 `Update_Mesh.pre` 中用 `importccl mode=append` 导入。[ANSYS 25.1 的 Append 规则](https://ansyshelp.ansys.com/public/Views/Secured/corp/v251/en/cfx_pre/i1300886.html)只覆盖指定参数，保留已有对象中的其他参数。因此模板必须事先定义好 `shroudtip` / `bladetip` 的完整壁面条件、滑移剪切表达式和换热条件；此映射不负责创建滑移模型。模板的其他边界也不能同时占用这两个区域：例如 `R1 Shroud` 只包含 `SHROUD INBlock,SHROUD OUTBlock`，`R1 Blade` 只包含 `BLD HIGH,BLD LOW`。`SHROUD TIP GGI SIDE 1/2` 是间隙内部接口，继续留在原接口边界中。
-
-`check-pre` 同样生成这些映射输入，但不启动 CFX-Pre，也不验证实际网格区域存在或壁面物理设置生效。真实工程需检查导出的 `.def` 和 CFX-Pre 日志，确认区域唯一归属且 `Specified Shear`、剪切表达式、换热条件仍在。边界映射参与算例恢复和冻结边界方案的输入签名；更改映射后不能复用原映射下的待处理算例或完成结果。
-
 **续跑时的核对**：每个算例目录下有 `geometry_state.json` 和 `cfx_state.json`，记录了这个算例用的输入文件指纹和各阶段的完成情况。续跑时如果发现输入变了、或者某阶段没有完成记录，程序不会把残留文件当成成功，而是要求人工检查。
 
 真实前处理先将 CFX 模板复制为算例目录内的 `cfx_pre_template.cfx`，再让 CFX-Pre 加载该副本，避免更新网格或保存工程时改写原模板、使待处理队列的输入签名失效。原模板的身份仍参与续跑核对；如果旧运行的原模板已经被改写，需要恢复与记录指纹一致的原文件，不能通过修改队列签名绕过检查。
