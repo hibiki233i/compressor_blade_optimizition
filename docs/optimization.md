@@ -113,9 +113,10 @@ python blade_shape_active_learning.py run --config blade_shape_config.json --res
 | 进入签名 | 不进入签名 |
 | --- | --- |
 | 变量名称和顺序（决定 x 怎样写进几何） | 变量上下限、几何约束、`search` 中的活动/固定变量和切片容差 |
-| `runtime` 的 `n_blades`、`rpm`、`mass_flow`、`p_out_pa`、`alpha0` | `cfx_cores`、各程序的安装路径 |
+| `runtime` 的 `n_blades`、`rpm`、`mass_flow`、`p_out_pa`、`alpha0` | `cfx_cores` |
 | `cfx_convergence` 全部设置 | 候选生成、代理模型、Pareto 容差等选点设置 |
 | CFturbo / TurboGrid / CFX 模板和几何脚本的**文件内容** | 这些文件放在哪个目录 |
+| CFX 求解器版本：`cfx_bin_dir` 中的版本号文件夹（如 `v251`）和 `cfx5solve.exe` 的内容 | CFX 安装在哪个目录（同一版本挪位置不算变化） |
 
 改了右列，已有记录照常续跑。改了左列，旧签名的记录不再参与训练和前沿（仍保留在 CSV 里），`run` / `run-boundary` 会列出变化了哪些输入并停下，不会启动 CFD。这时有两种选择：
 
@@ -152,7 +153,7 @@ python blade_shape_active_learning.py run --config blade_shape_config.json --res
 
 `flow_analysis` 必须和 CFX 模板里的 Flow 名称一致。
 
-**续跑时的核对**：每个算例目录下有 `geometry_state.json` 和 `cfx_state.json`，记录了这个算例用的输入文件指纹和各阶段的完成情况。续跑时如果发现输入变了、或者某阶段没有完成记录，程序不会把残留文件当成成功，而是要求人工检查。CFX 的核数和安装路径不参与这项核对，只追加记录在 `cfx_state.json` 的 `environments` 中，换核数或换安装位置后已完成的阶段照常复用。
+**续跑时的核对**：每个算例目录下有 `geometry_state.json` 和 `cfx_state.json`，记录了这个算例用的输入文件指纹和各阶段的完成情况。续跑时如果发现输入变了、或者某阶段没有完成记录，程序不会把残留文件当成成功，而是要求人工检查。CFX 的核数和安装目录不参与这项核对，只追加记录在 `cfx_state.json` 的 `environments` 中，换核数或把同一版本挪到别处后，已完成的阶段照常复用。换了 CFX 版本（版本号文件夹或 `cfx5solve.exe` 内容不同）则不复用，并且按物理输入变化处理。2026-10 之前写下的 `cfx_state.json` 没有记录版本，只在安装路径完全相同时复用。
 
 真实前处理先将 CFX 模板复制为算例目录内的 `cfx_pre_template.cfx`，再让 CFX-Pre 加载该副本，避免更新网格或保存工程时改写原模板、使待处理队列的输入签名失效。原模板的内容仍属于物理签名和算例的 CFX 核对。如果旧运行的原模板已经被改写，优先恢复与记录指纹一致的原文件；确认改写不影响计算时，也可以用 `--accept-input-change` 说明原因后继续（见第 5 节）。但已经在旧模板下完成了部分 CFX 阶段的算例，其 `cfx_state.json` 仍会拒绝复用，需要人工检查后用新算例重算。不要手工改队列或凭据里的签名。
 

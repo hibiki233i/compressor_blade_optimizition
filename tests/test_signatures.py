@@ -66,7 +66,7 @@ class SignatureTests(unittest.TestCase):
         same['constraints']['duplicate_distance_norm'] *= 2
         same['variables'][0]['upper'] += 1
         same['runtime']['cfx_cores'] += 4
-        same['paths']['cfx_bin_dir'] = 'E:/other/install'
+        same['paths']['cfx_bin_dir'] = 'E:/other/install'  # neither has a version folder or solver here
         moved = self.out / 'moved.cft-batch'
         moved.write_bytes(Path(self.c['paths']['cft_batch_template']).read_bytes())
         same['paths']['cft_batch_template'] = str(moved)
@@ -266,8 +266,9 @@ class SignatureTests(unittest.TestCase):
             return 0
         with patch.object(cfx, '_run_logged', side_effect=command):
             self.assertTrue(cfx.run_cfx_pipeline(work, 'case_0', **kw).success)
-        # rewrite the receipt in the pre-2026-10 shape: cores and install path signed
+        # rewrite the receipt in the pre-2026-10 shape: cores and install path signed, no release
         state = json.loads((work / 'cfx_state.json').read_text())
+        state['inputs'].pop('solver')
         state['inputs'].update(cores=8, cfx_bin_dir=str(kw['cfx_bin_dir']))
         state['signature'] = cfx.digest(state['inputs'])
         state.pop('environments')
@@ -275,7 +276,54 @@ class SignatureTests(unittest.TestCase):
         with patch.object(cfx, '_run_logged', side_effect=AssertionError('no external work')):
             self.assertTrue(cfx.run_cfx_pipeline(work, 'case_0', cores=12, **kw).success)
             changed = cfx.run_cfx_pipeline(work, 'case_0', **{**kw, 'p_out_pa': 11})
+            # such a receipt does not record the release: another install path is not trusted
+            other = work / 'other_bin'
+            other.mkdir()
+            moved = cfx.run_cfx_pipeline(work, 'case_0', **{**kw, 'cfx_bin_dir': other})
         self.assertIn('identity changed', changed.message)
+        self.assertIn('identity changed', moved.message)
+
+    def test_another_cfx_release_invalidates_results_and_the_physical_signature(self):
+        work = self.out / 'case'
+        work.mkdir()
+        kw = self.cfx_kw(work)
+
+        def command(cmd, cwd, log):
+            name = Path(cmd[0]).name
+            if name == 'cfx5pre.exe':
+                (work / 'Impeller.def').write_text('def')
+            elif name == 'cfx5solve.exe':
+                (work / 'run.res').write_text('res')
+                (work / 'run.out').write_text(cfx_output())
+            else:
+                (work / 'CFX_Results.txt').write_text('0.76,2,1,.42,2.1')
+            return 0
+
+        def install(path, solver):
+            path.mkdir(parents=True)
+            for name in ['cfx5pre.exe', 'cfx5solve.exe', 'cfx5post.exe']:
+                (path / name).write_text(solver if name == 'cfx5solve.exe' else 'never executed')
+            return path
+        v251 = install(work / 'ANSYS Inc' / 'v251' / 'CFX' / 'bin', 'solver 2025 R1')
+        moved = install(work / 'D' / 'ANSYS Inc' / 'v251' / 'CFX' / 'bin', 'solver 2025 R1')
+        v252 = install(work / 'ANSYS Inc' / 'v252' / 'CFX' / 'bin', 'solver 2025 R2')
+        patched = install(work / 'E' / 'ANSYS Inc' / 'v251' / 'CFX' / 'bin', 'solver 2025 R1 patched')
+        with patch.object(cfx, '_run_logged', side_effect=command):
+            self.assertTrue(cfx.run_cfx_pipeline(work, 'case_0', **{**kw, 'cfx_bin_dir': v251}).success)
+        with patch.object(cfx, '_run_logged', side_effect=AssertionError('no external work')):
+            self.assertTrue(cfx.run_cfx_pipeline(work, 'case_0', **{**kw, 'cfx_bin_dir': moved}).success)
+            for other in (v252, patched):
+                result = cfx.run_cfx_pipeline(work, 'case_0', **{**kw, 'cfx_bin_dir': other})
+                self.assertIn('identity changed', result.message, other)
+        signature = lambda path: s.physical_signature({**self.c, 'paths': {**self.c['paths'], 'cfx_bin_dir': str(path)}})
+        self.assertEqual(signature(v251), signature(moved))
+        self.assertNotEqual(signature(v251), signature(v252))
+        self.assertNotEqual(signature(v251), signature(patched))
+        self.rows(2, config={**self.c, 'paths': {**self.c['paths'], 'cfx_bin_dir': str(v251)}})
+        self.c['paths']['cfx_bin_dir'] = str(v252)
+        with self.assertRaises(s.InputsChanged) as caught:
+            b.run_loop(self.run_args())
+        self.assertIn("solver.release: 'v251' -> 'v252'", str(caught.exception))
 
     def test_geometry_receipt_from_old_formula_is_reused(self):
         baseline = b.BaselineShape(np.ones(5), np.ones(5), np.linspace(0, 1, 5), np.linspace(0, 1, 5), 0., 0.)

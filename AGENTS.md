@@ -12,7 +12,7 @@
 | `blade_shape_acquisition.py` | 双目标期望超体积改进及采样 |
 | `blade_shape_refinement.py` | 活动/固定变量划分、条件代理、局部搜索、诊断和分阶段边界实验 |
 | `blade_shape_pending.py`、`blade_shape_runtime.py` | 待评估队列、断点恢复、算例预留、原子状态文件和进程锁 |
-| `blade_shape_signature.py` | 物理签名（只含改变计算结果的输入）、训练记录的输入兼容判断、`--accept-input-change` 的确认记录 |
+| `blade_shape_signature.py` | 物理签名（只含改变计算结果的输入，含 CFX 求解器版本）、训练记录的输入兼容判断、`--accept-input-change` 的确认记录 |
 | `Run-BladeShapeGeometryMeshing.ps1` | 将候选写入 CFturbo batch，并调用 CFturbo、TurboGrid |
 | `blade_shape_cfx_runner.py` | CFX-Pre、求解、后处理、结果解析及阶段恢复 |
 | `blade_shape_incidence_validation.py`、`blade_shape_aca_extraction.py` | 独立展向攻角验证；`aca` 子命令用保存的 session 从 `.res` 导出 20 点 ACA CSV 供 `legacy` 使用 |

@@ -3,9 +3,9 @@
 The physical signature covers only inputs that change the answer for an
 already chosen design vector: variable names/order (how ``x`` maps to the
 meanline), declared operating point, CFX convergence settings and the content
-of the geometry/mesh/CFX templates and geometry script. Search settings,
-variable bounds, geometry rules, core count and install paths do not change
-the result for a fixed ``x`` and are left out.
+of the geometry/mesh/CFX templates and geometry script, and the CFX solver
+release. Search settings, variable bounds, geometry rules, core count and
+install locations do not change the result for a fixed ``x`` and are left out.
 
 Every training row, pending entry and boundary plan carries the signature it
 was produced under. A run refuses to continue while any record carries a
@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -38,6 +39,8 @@ REGISTRY = 'input_signatures.json'
 UNSIGNED = 'unsigned'
 _UNSIGNED_CONTENT = ('Efficiency', 'MassFlow', 'status')
 
+_RELEASE = re.compile(r'v\d{3}', re.IGNORECASE)  # ANSYS install tree: ...\ANSYS Inc\v251\CFX\bin
+
 _hash_cache: dict[tuple[str, int, int], str] = {}
 
 
@@ -56,12 +59,27 @@ def _sha256(value: Any) -> str | None:
     return _hash_cache[key]
 
 
+def solver_identity(cfx_bin_dir: Any) -> dict[str, Any]:
+    """The CFX release that solves, not where it is installed.
+
+    Moving identical binaries keeps both the version folder and the solver
+    launcher content; another release changes them.
+    """
+    text = str(cfx_bin_dir or '').strip()
+    if not text:
+        return {'release': None, 'cfx5solve': None}
+    parts = [part for part in re.split(r'[\\/]', text) if part]
+    release = next((part.lower() for part in reversed(parts) if _RELEASE.fullmatch(part)), None)
+    return {'release': release, 'cfx5solve': _sha256(Path(text) / 'cfx5solve.exe')}
+
+
 def physical_inputs(config: dict[str, Any]) -> dict[str, Any]:
     paths = config.get('paths', {})
     return {'variables': [v['name'] for v in config['variables']],
             'cfx_convergence': config.get('cfx_convergence', {}),
             'runtime': {k: config['runtime'].get(k) for k in RUNTIME_KEYS},
-            'assets': {k: _sha256(paths.get(k)) for k in ASSET_KEYS}}
+            'assets': {k: _sha256(paths.get(k)) for k in ASSET_KEYS},
+            'solver': solver_identity(paths.get('cfx_bin_dir'))}
 
 
 def physical_signature(config: dict[str, Any]) -> str:

@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from blade_shape_runtime import atomic_json, digest, file_identity, output_lock
+from blade_shape_signature import solver_identity
 from blade_shape_convergence import ConvergencePolicy, assess_out, convergence_ccl
 
 
@@ -182,16 +183,21 @@ def _run_cfx_pipeline(
     inputs = {'run_id': run_id, 'mesh': mesh_id,
               'candidate': file_identity(work / 'candidate.json'),
               'template_cfx': file_identity(template_cfx), 'template_cse': file_identity(template_cse),
-              'p_out_pa': p_out_pa, 'n_blades': n_blades, 'convergence': convergence.to_dict()}
-    # Core count and install path do not change the answer; they are recorded, not signed.
+              'p_out_pa': p_out_pa, 'n_blades': n_blades, 'convergence': convergence.to_dict(),
+              'solver': solver_identity(cfx_bin_dir)}
+    # Core count and install location do not change the answer; they are recorded, not signed.
     environment = {'cores': cores, 'cfx_bin_dir': str(cfx_bin_dir)}
     if inputs['template_cfx'] is None or inputs['template_cse'] is None:
         return CfxResult(False, {}, 'CFX templates are missing; cannot verify result identity.', 'environment')
     state = json.loads(receipt.read_text()) if receipt.exists() else None
-    # Compare the signed keys only: receipts written before 2026-10 also stored
-    # cores and cfx_bin_dir among their inputs.
+    recorded = dict(state.get('inputs', {})) if state is not None else {}
+    if 'solver' not in recorded and recorded.get('cfx_bin_dir') == str(cfx_bin_dir):
+        # Receipts written before 2026-10 signed the install path instead of the
+        # release; the same path still means the same solver.
+        recorded['solver'] = inputs['solver']
+    # Compare the signed keys only: those receipts also stored cores and cfx_bin_dir.
     if state is not None and (state.get('version') != 2
-                              or {key: state.get('inputs', {}).get(key) for key in inputs} != inputs):
+                              or {key: recorded.get(key) for key in inputs} != inputs):
         return CfxResult(False, {}, 'CFX input identity changed; existing results were not reused.', 'environment')
     if state is None:
         if output.exists() or list(work.glob('*.res')) or definition.exists():

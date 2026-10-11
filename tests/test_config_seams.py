@@ -189,7 +189,7 @@ class CommandFileVersionTests(unittest.TestCase):
                                                      template_cse=work / 'extract.cse').success)
             state = json.loads((work / 'cfx_state.json').read_text())
         self.assertEqual(set(state['inputs']), {'run_id', 'mesh', 'candidate', 'template_cfx', 'template_cse',
-                                                'p_out_pa', 'n_blades', 'convergence'})
+                                                'p_out_pa', 'n_blades', 'convergence', 'solver'})
         self.assertEqual(state['signature'], cfx.digest(state['inputs']))
         self.assertEqual(state['environments'], [{'cores': 8, 'cfx_bin_dir': str(bindir)}])
 
