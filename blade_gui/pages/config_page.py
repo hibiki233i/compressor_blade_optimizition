@@ -242,6 +242,10 @@ class VariableTable(QTableWidget):
         super().__init__(0, len(self.HEADERS), parent)
         self.setHorizontalHeaderLabels(self.HEADERS)
         self.verticalHeader().setVisible(False)
+        self.verticalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        # The themed editors must fit the row without the generic item padding
+        # shifting them below the variable name and centered checkbox.
+        self.setStyleSheet("QTableWidget::item { padding-top: 0px; padding-bottom: 0px; }")
         self.setAlternatingRowColors(True)
         self.setSelectionMode(QTableWidget.NoSelection)
         self.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
