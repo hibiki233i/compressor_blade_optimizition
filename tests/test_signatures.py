@@ -369,5 +369,41 @@ class SignatureTests(unittest.TestCase):
         self.assertEqual(project.records_from_other_inputs(), 3)
 
 
+    def test_gui_result_views_use_only_rows_under_current_inputs(self):
+        from blade_gui.project import Project
+        self.rows(3)  # old inputs; the best of these written into the fronts
+        b.write_pareto(self.c, b.load_training(self.c))
+        written = pd.read_csv(self.out / 'pareto_front.csv')
+        self.c['runtime']['p_out_pa'] += 1
+        for i, (efficiency, flow) in enumerate([(.750, 4.0), (.751, 3.9)], start=3):
+            x = self.x.copy()
+            x[1] += .1 * i
+            b.append_row(self.c, {**b.vector_to_sample(self.c, x), 'run_id': f'case_{i:06d}', 'status': 'success',
+                                  'sample_phase': 'active_learning', 'Efficiency': efficiency, 'MassFlow': flow})
+        self.cp.write_text(json.dumps(self.c))
+        project = Project(self.cp)
+        self.assertEqual(len(project.training()), 5)  # case history keeps every row
+        self.assertEqual(project.results().run_id.tolist(), ['case_000003', 'case_000004'])
+        summary = project.summary()
+        self.assertEqual((summary.attempts, summary.other_inputs), (5, 3))
+        self.assertEqual((summary.best_efficiency, summary.best_run_id), (.751, 'case_000004'))
+        self.assertEqual(len(project.best_so_far()[0]), 2)
+        # the stale written front lists old-input rows; the view recomputes it
+        self.assertTrue(set(written.run_id) <= {'case_000000', 'case_000001', 'case_000002'})
+        self.assertEqual(sorted(project.pareto().run_id), ['case_000003', 'case_000004'])
+        self.assertEqual(sorted(project.pareto_strict().run_id), ['case_000003', 'case_000004'])
+        # with nothing excluded, the written front is shown as is
+        b.write_pareto(self.c, b.load_training(self.c))
+        self.c['runtime']['p_out_pa'] -= 1
+        self.cp.write_text(json.dumps(self.c))
+        project.reload()
+        self.assertEqual(project.summary().other_inputs, 2)
+        with redirect_stdout(StringIO()):
+            s.check(self.c, s.training_records(self.c, b.load_training(self.c)), 'same CFD')
+        project.reload()
+        self.assertEqual(project.records_from_other_inputs(), 0)
+        pd.testing.assert_frame_equal(project.pareto(), pd.read_csv(self.out / 'pareto_front.csv'))
+
+
 if __name__ == '__main__':
     unittest.main()

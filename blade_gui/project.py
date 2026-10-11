@@ -276,6 +276,8 @@ class Summary:
     selection_sources: dict[str, int] = field(default_factory=dict)
     iterations: int = 0
     last_modified: float = 0.0
+    # training rows produced under other physical inputs; excluded from best values and fronts
+    other_inputs: int = 0
 
     @property
     def success_rate(self) -> float:
@@ -378,27 +380,58 @@ class Project:
         # callers may add helper columns; hand out a copy so the cache stays clean
         return frame.copy()
 
-    def records_from_other_inputs(self) -> int:
-        """Training rows that stop run / run-boundary until the input change is accepted."""
-        frame = self.training()
+    def _evidence_mask(self, frame: pd.DataFrame) -> pd.Series:
+        """True for rows produced under the current physical inputs (all True when undecidable)."""
         if frame.empty or not self.config_valid:
-            return 0
+            return pd.Series(True, index=frame.index)
         try:
             import blade_shape_signature as signatures
             config = {**self.config, "paths": {**self.config.get("paths", {}), "output_dir": str(self.output_dir)}}
-            return int((~signatures.evidence_mask(config, frame)).sum())
+            return signatures.evidence_mask(config, frame)
         except Exception:  # noqa: BLE001 - an unreadable artefact must not kill the view
-            return 0
+            return pd.Series(True, index=frame.index)
+
+    def records_from_other_inputs(self) -> int:
+        """Training rows that stop run / run-boundary until the input change is accepted."""
+        return int((~self._evidence_mask(self.training())).sum())
+
+    def results(self) -> pd.DataFrame:
+        """Training rows that count as results under the current inputs.
+
+        Result views (best values, fronts, correlations) use this; case history
+        uses :meth:`training`, which keeps every row.
+        """
+        frame = self.training()
+        return frame.loc[self._evidence_mask(frame)].copy()
+
+    def _front(self, name: str, strict: bool) -> pd.DataFrame:
+        path = self.path(name)
+        frame = self._cached(name, path, lambda: self._read_csv(path))
+        frame = frame if frame is not None else pd.DataFrame()
+        if not self.records_from_other_inputs():
+            return frame
+        # The written front predates the input change (run stops before rewriting
+        # it); recompute it in memory from the rows that still count.
+        try:
+            cli = cli_module()
+            results = self.results()
+            success = results.loc[results["status"].astype(str).str.strip().str.lower() == "success"].copy()
+            for col in OBJECTIVES:
+                success[col] = pd.to_numeric(success[col], errors="coerce")
+            success = success.loc[np.isfinite(success[OBJECTIVES].to_numpy(dtype=float)).all(axis=1)]
+            if success.empty:
+                return success
+            y = success[OBJECTIVES].to_numpy(dtype=float)
+            mask = cli.pareto_mask(y) if strict else cli.pareto_mask(y, cli.objective_tolerances(self.config))
+            return success.loc[mask].sort_values(OBJECTIVES, ascending=False)
+        except Exception:  # noqa: BLE001
+            return pd.DataFrame()
 
     def pareto(self) -> pd.DataFrame:
-        path = self.path("pareto_front.csv")
-        frame = self._cached("pareto", path, lambda: self._read_csv(path))
-        return frame if frame is not None else pd.DataFrame()
+        return self._front("pareto_front.csv", strict=False)
 
     def pareto_strict(self) -> pd.DataFrame:
-        path = self.path("pareto_front_strict.csv")
-        frame = self._cached("strict", path, lambda: self._read_csv(path))
-        return frame if frame is not None else pd.DataFrame()
+        return self._front("pareto_front_strict.csv", strict=True)
 
     def diagnostics(self) -> pd.DataFrame:
         path = self.path("active_learning_diagnostics.csv")
@@ -454,11 +487,13 @@ class Project:
         out.successes = int((status == "success").sum())
         out.failures = int(out.attempts - out.successes)
 
+        evidence = self._evidence_mask(df)
+        out.other_inputs = int((~evidence).sum())
         numeric = df.copy()
         for col in OBJECTIVES + ["Power"]:
             if col in numeric.columns:
                 numeric[col] = pd.to_numeric(numeric[col], errors="coerce")
-        success = numeric.loc[status == "success"]
+        success = numeric.loc[(status == "success") & evidence]
 
         if not success.empty:
             if "Efficiency" in success and success["Efficiency"].notna().any():
@@ -495,7 +530,7 @@ class Project:
 
     def best_so_far(self) -> tuple[list[int], list[float], list[float]]:
         """Cumulative best Efficiency / MassFlow over successful evaluations."""
-        df = self.training()
+        df = self.results()
         if df.empty or "status" not in df.columns:
             return [], [], []
         status = df["status"].astype(str).str.strip().str.lower()
