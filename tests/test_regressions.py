@@ -334,6 +334,36 @@ class GuiRegressionTests(ProjectFixture):
         self.assertEqual(sorted(descendants(10, pairs)), [11, 12, 13])
         self.assertEqual(descendants(12, pairs), [])
         self.assertEqual(descendants(30, pairs), [])
+        asked = []
+        refuse_11 = lambda pid, parent: asked.append((pid, parent)) or pid != 11
+        self.assertEqual(descendants(10, pairs, accept=refuse_11), [13])
+        self.assertEqual(sorted(asked), [(11, 10), (13, 10)])  # never asked about 12, 20 or 21
+
+    def test_tracking_reads_parent_links_from_one_snapshot(self):
+        # psutil's per-process ppid() takes a whole-system snapshot on Windows:
+        # ~460 of them per pass froze the window for seconds while CFX ran.
+        import sys
+        import blade_gui.runner as runner_module
+        from blade_gui.runner import CommandRunner
+
+        runner = CommandRunner(Path.cwd())
+        runner.start([sys.executable, '-c', 'import time; time.sleep(60)'])
+        self.assertTrue(self._wait_until(lambda: runner.running))
+        real_iter = runner_module.psutil.process_iter
+        attrs = []
+
+        def recording_iter(*args, **kwargs):
+            attrs.append(args[0] if args else kwargs.get('attrs'))
+            return real_iter(*args, **kwargs)
+
+        with patch.object(runner_module, 'ppid_map', wraps=runner_module.ppid_map) as snapshot, \
+                patch.object(runner_module.psutil, 'process_iter', side_effect=recording_iter):
+            runner._track()
+        self.assertEqual(snapshot.call_count, 1)
+        self.assertEqual(attrs, [['name']])
+        self.assertIn(runner._root_pid, {pid for pid, _ in runner._known})
+        runner.stop()
+        self.assertTrue(self._wait_until(lambda: not runner.running))
 
     def test_stop_ends_a_process_whose_parent_already_exited(self):
         # CLI -> middle -> leaf; the middle exits, so the leaf is no longer in
@@ -395,14 +425,18 @@ class GuiRegressionTests(ProjectFixture):
 
         class Fake:
             def __init__(self, pid, ppid, created, name):
-                self.pid, self.info = pid, {'ppid': ppid, 'create_time': created, 'name': name}
+                self.pid, self.ppid, self.created, self.info = pid, ppid, created, {'name': name}
+
+            def create_time(self):
+                return self.created
 
         table = [Fake(root, 1, started + .1, 'python.exe'),
                  Fake(900001, root, started - 86400, 'explorer.exe'),   # parent died a day ago
                  Fake(900002, 900001, started + 1, 'notepad.exe'),     # started from that one
                  Fake(900003, root, started + .5, 'cfx5solve.exe'),    # this run's child
                  Fake(900004, 900003, started + .6, 'solver-mpi.exe')]
-        with patch.object(runner_module.psutil, 'process_iter', return_value=table):
+        with patch.object(runner_module.psutil, 'process_iter', return_value=table), \
+                patch.object(runner_module, 'ppid_map', return_value={fake.pid: fake.ppid for fake in table}):
             runner._track()
         self.assertEqual(sorted(pid for pid, _ in runner._known), sorted([root, 900003, 900004]))
         runner._known = {}  # the fakes must not be signalled
