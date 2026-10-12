@@ -99,7 +99,7 @@ class IncidenceTests(unittest.TestCase):
             for name in ['synthetic.res','synthetic.cft']: (case/name).touch()
             (root/'post.exe').touch()
             s['res_path']=str(case/'synthetic.res'); s['geometry_source']=str(case/'synthetic.cft')
-            with patch.object(v.subprocess,'run', side_effect=OSError('no post')):
+            with patch('blade_shape_flow_diagnostics.subprocess.run', side_effect=OSError('no post')):
                 with self.assertRaises(OSError): v.extract(s,root/'post.exe',root/'out')
             state=json.loads((root/'out/state.json').read_text())
             self.assertEqual(state['status'],'failed')
@@ -117,7 +117,7 @@ class IncidenceTests(unittest.TestCase):
                 raw=''.join(f'{key}\t{value}\n' for key,value in values().items())+'__complete__\t1\n'
                 (kwargs['cwd']/v.RAW_NAME).write_text(raw)
                 return subprocess.CompletedProcess(command,0,stdout='mock post complete')
-            with patch.object(v.subprocess,'run',side_effect=post):
+            with patch('blade_shape_flow_diagnostics.subprocess.run', side_effect=post):
                 result=v.extract(s,root/'post.exe',root/'out')
             self.assertTrue(result['quality_ok'])
             self.assertFalse(result['numerical_acceptance_verified'])
@@ -135,7 +135,7 @@ class IncidenceTests(unittest.TestCase):
             def post(command, **kwargs):
                 (kwargs['cwd']/'cfdpost_error.log').write_text('2026/10/08\n'+message)
                 return subprocess.CompletedProcess(command, 0, stdout='post returned zero')
-            with patch.object(v.subprocess, 'run', side_effect=post):
+            with patch('blade_shape_flow_diagnostics.subprocess.run', side_effect=post):
                 with self.assertRaisesRegex(RuntimeError, 'inconsistent dimensions') as caught:
                     v.extract(s, root/'post.exe', root/'out')
             self.assertIn(str(root/'out/cfdpost_error.log'), str(caught.exception))

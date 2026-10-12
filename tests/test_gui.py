@@ -25,6 +25,7 @@ from blade_gui.project import (  # noqa: E402
     config_errors,
     read_config_file,
     save_config,
+    successful_rows,
     validate_config,
 )
 
@@ -216,11 +217,6 @@ class TestCommandBuilders(unittest.TestCase):
         self.assertEqual(argv[2], commands.ENTRY_SCRIPT)
         self.assertIn(commands.ENTRY_SCRIPT, spec.preview("python3"))
 
-    def test_check_pre_uses_cfx_runner(self) -> None:
-        spec = commands.build_check_pre("c.json", working_dir="/tmp/case")
-        self.assertEqual(spec.script, commands.CFX_SCRIPT)
-        self.assertIn("--working-dir", spec.args)
-
     def test_boundary_stages(self) -> None:
         self.assertEqual(commands.BOUNDARY_STAGES, ["singles", "pairs", "extension"])
         spec = commands.build_run_boundary("c.json", plan="p.json", stage="pairs", max_new_cfd=6)
@@ -299,6 +295,33 @@ class TestConfigLayer(ProjectFixture):
 # --------------------------------------------------------------------------
 # data layer (no Qt)
 # --------------------------------------------------------------------------
+class TestSuccessfulRows(unittest.TestCase):
+    def test_success_statuses_preserve_row_order_and_columns(self) -> None:
+        import pandas as pd
+
+        frame = pd.DataFrame({
+            "status": [" Success ", "SUCCESS", "failed", "dry-run", None],
+            "run_id": ["a", "b", "c", "d", "e"],
+        }, index=[5, 2, 8, 1, 4])
+        selected = successful_rows(frame)
+        self.assertEqual(selected["run_id"].tolist(), ["a", "b"])
+        self.assertEqual(selected.index.tolist(), [5, 2])
+        self.assertEqual(selected.columns.tolist(), frame.columns.tolist())
+
+    def test_missing_frames_and_empty_schemas_are_preserved(self) -> None:
+        import pandas as pd
+
+        self.assertIsNone(successful_rows(None))
+        for frame in (
+            pd.DataFrame(columns=["status", "run_id"]),
+            pd.DataFrame({"run_id": ["unregistered"]}),
+        ):
+            with self.subTest(columns=frame.columns.tolist()):
+                selected = successful_rows(frame)
+                self.assertTrue(selected.empty)
+                self.assertEqual(selected.columns.tolist(), frame.columns.tolist())
+
+
 class TestProjectLayer(ProjectFixture):
     def setUp(self) -> None:
         super().setUp()
@@ -462,6 +485,29 @@ class TestGuiWidgets(ProjectFixture):
         self.assertAlmostEqual(x_lo, y_lo)
         self.assertAlmostEqual(x_hi, y_hi)
         self.assertEqual(len(page.corr_card.chart._items), 3)
+
+    def test_analytics_groups_unknown_phases_as_other(self) -> None:
+        import pandas as pd
+
+        from blade_gui import theme
+
+        self.window._select_page(1)
+        self._settle()
+        page = self.window.pages[1]
+        variable = page.variable_box.currentText()
+        frame = pd.DataFrame({
+            "status": ["success"] * 4,
+            variable: [0.1, 0.2, 0.3, 0.4],
+            "Efficiency": [0.80, 0.81, 0.82, 0.83],
+            "sample_phase": ["doe", "unknown", "custom", None],
+            "run_id": ["doe", "unknown", "custom", "missing"],
+        })
+        with patch.object(self.ctx.project, "results", return_value=frame):
+            page._refresh_variable_scatter()
+        series = page.scatter_card.chart._series
+        self.assertEqual([item.name for item in series], ["初始 DOE", "其他"])
+        self.assertEqual(series[1].labels, ["unknown", "custom", "missing"])
+        self.assertEqual(series[1].color, theme.color("text_faint"))
 
     def test_config_form_round_trips(self) -> None:
         self.window._select_page(2)

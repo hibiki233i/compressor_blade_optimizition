@@ -358,12 +358,6 @@ QPushButton#NavItem:checked {{
     color: {p['text_faint']};
     font-size: 12px;
 }}
-#Divider {{
-    background: {p['border_soft']};
-    border: none;
-    max-height: 1px;
-    min-height: 1px;
-}}
 
 /* ------------------------------------------------------------ stat tile */
 #StatTile {{

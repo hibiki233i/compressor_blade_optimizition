@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import math
 import os
@@ -417,14 +416,6 @@ def load_existing_diagnostics(config: dict[str, Any]) -> dict[str, dict[str, Any
     if "run_id" not in frame.columns:
         return {}
     return {str(row["run_id"]): row.to_dict() for _, row in frame.iterrows()}
-
-
-def ensure_training_schema(config: dict[str, Any]) -> None:
-    path = training_csv_path(config)
-    if not path.exists():
-        return
-    frame = normalize_training_frame(config, pd.read_csv(path))
-    frame.to_csv(path, index=False)
 
 
 def append_compatible_csv(path: Path, row: dict[str, Any], columns: list[str],
@@ -858,7 +849,6 @@ def select_acquisition(
     mean, std = surrogate.predict(candidates)
     acquisition = expected_hvi(config, observed_objectives, mean, std)
     ehvi = acquisition['scores']
-    dist = refinement.active_distances(config, candidates, existing)
     selected: list[SelectedCandidate] = []
     selected_existing = existing.copy()
     available = np.ones(len(candidates), dtype=bool)
@@ -894,39 +884,6 @@ def select_acquisition(
             break
 
     return selected
-
-
-def normalize_vector(values: np.ndarray) -> np.ndarray:
-    lo = float(np.min(values))
-    hi = float(np.max(values))
-    return (values - lo) / max(hi - lo, 1e-12)
-
-
-def normalize_objectives(values: np.ndarray) -> np.ndarray:
-    lo = values.min(axis=0)
-    hi = values.max(axis=0)
-    return (values - lo) / np.maximum(hi - lo, 1e-12)
-
-
-def approximate_expected_hvi(
-    config: dict[str, Any],
-    observed_objectives: np.ndarray,
-    mean: np.ndarray,
-    std: np.ndarray,
-) -> np.ndarray:
-    """Exact 2D improvement for common (quasi-)Monte-Carlo predictive samples."""
-    if len(mean) == 0:
-        return np.array([])
-    return expected_hvi(config, observed_objectives, mean, std)['scores']
-
-
-def dominated_by_any(points: np.ndarray, pareto: np.ndarray) -> np.ndarray:
-    if pareto.size == 0:
-        return np.zeros(len(points), dtype=bool)
-    dominated = np.zeros(len(points), dtype=bool)
-    for y in pareto:
-        dominated |= np.all(points <= y, axis=1)
-    return dominated
 
 
 def fallback_selections(samples: list[np.ndarray], source: str, start_rank: int = 1) -> list[SelectedCandidate]:
@@ -975,22 +932,22 @@ def build_diagnostic_row(
 
 def next_case_index(config: dict[str, Any], df: pd.DataFrame) -> int:
     ids = []
+    case_names = []
     if not df.empty and "run_id" in df.columns:
-        for value in df["run_id"].dropna().astype(str):
-            if value.startswith("case_"):
-                try:
-                    ids.append(int(value.split("_")[1]))
-                except Exception:
-                    pass
-    ids.extend(parse_case_number(name) for name in case_reservations(output_dir(config)) if parse_case_number(name) is not None)
+        case_names.extend(value for value in df["run_id"].dropna().astype(str) if value.startswith("case_"))
+    reserved = list(case_reservations(output_dir(config)))
     queue = pending.load(config)
-    ids.extend(parse_case_number(e['run_id']) for e in queue['entries'] if parse_case_number(e['run_id']) is not None)
-    cases = output_dir(config) / "cases"
-    if not cases.exists():
-        return max(ids) + 1 if ids else 0
-    for path in cases.glob("case_*"):
+    reserved.extend(entry['run_id'] for entry in queue['entries'])
+    for name in reserved:
+        number = parse_case_number(name)
+        if number is not None:
+            ids.append(number)
+    case_names.extend(path.name for path in (output_dir(config) / "cases").glob("case_*"))
+    # Historical CSV and directory names used the first numeric token; queue
+    # and reservation IDs use the stricter parser. Preserve both interpretations.
+    for name in case_names:
         try:
-            ids.append(int(path.name.split("_")[1]))
+            ids.append(int(name.split("_")[1]))
         except Exception:
             pass
     return max(ids) + 1 if ids else 0

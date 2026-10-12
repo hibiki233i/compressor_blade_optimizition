@@ -184,6 +184,19 @@ class GuiRegressionTests(ProjectFixture):
         # red; it must look like plain background (sampled where nothing is drawn).
         self.assertEqual(pixel(0.75, 0.3), pixel(0.25, 0.85))
 
+    def test_boundary_pause_completion_shows_awaiting_review(self):
+        from blade_gui import commands
+
+        run = self.window.pages[3]
+        spec = commands.build_run_boundary(self.config_path, plan='plan.json', stage='singles', max_new_cfd=1)
+        run.runner._command = spec.argv()
+        run._on_started(spec.argv())
+        run._on_finished(commands.REVIEW_EXIT, 'normal')
+        self.assertEqual(run.status_badge.text(), '待审核')
+        self.assertTrue(run.start_button.isEnabled())
+        self.assertFalse(run.stop_button.isEnabled())
+        self.assertFalse(run.progress.isVisible())
+
     def test_result_awaiting_review_is_counted_filtered_and_opens_the_review_action(self):
         path = self.out / 'training_data.csv'
         frame = pd.read_csv(path)

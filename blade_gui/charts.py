@@ -137,10 +137,6 @@ class _ChartBase(QWidget):
         self._hover: tuple[int, int] | None = None  # (series index, point index)
         self._empty_text = "暂无数据"
 
-    def set_empty_text(self, text: str) -> None:
-        self._empty_text = text
-        self.update()
-
     # ------------------------------------------------------------- drawing
     def _fonts(self) -> None:
         self._f_tick = fnt(11)

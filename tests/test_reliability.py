@@ -34,6 +34,18 @@ class ReliabilityTests(unittest.TestCase):
         bindir=self.out/'bin';bindir.mkdir()
         for n in ['cfx5pre.exe','cfx5solve.exe','cfx5post.exe']:(bindir/n).write_text('never executed')
         return dict(p_out_pa=10,cfx_bin_dir=bindir,template_cfx=self.out/'template.cfx',template_cse=self.out/'extract.cse')
+    def test_case_number_keeps_all_sources_and_legacy_suffixes(self):
+        frame=pd.DataFrame({'run_id':['case_000002','case_000007_archive','unrelated','case_bad']})
+        self.assertEqual(b.next_case_index(self.c,frame),8)
+        (self.out/'cases'/'case_000009_archive').mkdir(parents=True)
+        self.assertEqual(b.next_case_index(self.c,frame),10)
+        r.atomic_json(self.out/'case_reservations.json',{
+            'case_000011':{'plan_id':'synthetic','point_id':'single'},
+            'case_000999_archive':{'plan_id':'synthetic','point_id':'legacy'},
+        })
+        self.assertEqual(b.next_case_index(self.c,frame),12)
+        b.pending.enqueue(self.c,[b.SelectedCandidate(self.x,1,'doe')],[{'sample_phase':'doe','doe_index':12}])
+        self.assertEqual(b.next_case_index(self.c,frame),13)
     def test_failed_solve_residue_is_not_accepted(self):
         kw=self.cfx_setup();calls=[]
         def command(cmd,cwd,log):
@@ -114,10 +126,10 @@ class ReliabilityTests(unittest.TestCase):
     def test_equal_candidates_have_equal_ehvi_and_order_invariance(self):
         y=np.array([[.76,4.2],[.755,4.3]])
         m=np.tile([.761,4.25],(20,1));s=np.tile([.002,.03],(20,1))
-        scores=b.approximate_expected_hvi(self.c,y,m,s)
+        scores=b.expected_hvi(self.c,y,m,s)['scores']
         np.testing.assert_allclose(scores,scores[0],rtol=1e-12)
         m[:,0]+=np.arange(20)*.00001
-        a=b.approximate_expected_hvi(self.c,y,m,s);z=b.approximate_expected_hvi(self.c,y,m[::-1],s[::-1])[::-1]
+        a=b.expected_hvi(self.c,y,m,s)['scores'];z=b.expected_hvi(self.c,y,m[::-1],s[::-1])['scores'][::-1]
         np.testing.assert_allclose(a,z,rtol=1e-12)
     def test_pending_al_reuses_reserved_case_after_interruption(self):
         self.rows(4);args=b.build_parser().parse_args(['run','--config',str(self.cp),'--resume','--iterations','1','--batch-size','1','--max-new-cfd','1'])

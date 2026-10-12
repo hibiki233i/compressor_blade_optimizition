@@ -32,11 +32,25 @@ from blade_shape_local_config import (  # noqa: E402
     apply_local_paths, describe_local_paths, local_ini_path, split_local_paths, write_local_paths,
 )
 
-#: the tracked example config (shareable settings only; paths come from the local INI)
-DEFAULT_CONFIG_PATH = CODE_DIR / "blade_shape_config.json"
-
 OBJECTIVES = ["Efficiency", "MassFlow"]
 RESULT_COLUMNS = ["Efficiency", "PressureRatio", "MassFlow", "Power", "totalpressureratio"]
+PHASE_LABELS = {
+    "doe": "初始 DOE",
+    "active_learning": "主动学习",
+    "boundary": "边界实验",
+    "fallback": "兜底随机",
+    "unknown": "未知",
+}
+
+
+def successful_rows(frame: pd.DataFrame | None) -> pd.DataFrame | None:
+    """Select successful statuses, preserving missing frames and empty schemas."""
+    if frame is None:
+        return None
+    if frame.empty or "status" not in frame.columns:
+        return frame.iloc[0:0]
+    status = frame["status"].astype(str).str.strip().str.lower()
+    return frame.loc[status == "success"]
 
 
 # --------------------------------------------------------------------------
@@ -502,11 +516,6 @@ class Project:
         frame = self._cached("diagnostics", path, lambda: self._read_csv(path))
         return frame if frame is not None else pd.DataFrame()
 
-    def iteration_summary(self) -> pd.DataFrame:
-        path = self.path("iteration_summary.csv")
-        frame = self._cached("iteration", path, lambda: self._read_csv(path))
-        return frame if frame is not None else pd.DataFrame()
-
     def json_artifact(self, name: str) -> dict[str, Any] | None:
         path = self.path(name)
         return self._cached(f"json:{name}", path, lambda: json.loads(path.read_text(encoding="utf-8")))
@@ -518,10 +527,6 @@ class Project:
             if isinstance(value, dict):
                 return value
         return None
-
-    def local_state(self) -> dict[str, Any] | None:
-        value = self.json_artifact("local_search_state.json")
-        return value if isinstance(value, dict) else None
 
     def pending(self) -> dict[str, Any]:
         value = self.json_artifact("pending_evaluations.json")

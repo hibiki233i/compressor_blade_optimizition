@@ -24,6 +24,14 @@ RAW_NAME = "flow_diagnostics.tsv"
 ANGLE_CONVENTION = "wrap180(180 - relative_flow_angle_deg - blade_beta_deg)"
 
 
+def run_cfx_post(command: list[str], work: Path) -> subprocess.CompletedProcess[str]:
+    """Capture a diagnostic CFX-Post launch; callers retain their receipt policies."""
+    return subprocess.run(
+        command, cwd=work, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, encoding="utf-8", errors="replace", check=False,
+    )
+
+
 def measurement_expressions(inlet: str, outlet: str, span_band: float) -> dict[str, str]:
     """CEL expressions with explicit SI conversion, in a stable output order."""
     if not 0.05 <= span_band <= 0.4:
@@ -254,16 +262,7 @@ def analyze_res(
         (work / "command.json").write_text(
             json.dumps({"argv": command, "cwd": str(work)}, indent=2), encoding="utf-8",
         )
-        process = subprocess.run(
-            command,
-            cwd=work,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-        )
+        process = run_cfx_post(command, work)
         (work / "cfxpost.log").write_text(process.stdout, encoding="utf-8")
         (work / "returncode.txt").write_text(str(process.returncode), encoding="utf-8")
         output = work / RAW_NAME

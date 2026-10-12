@@ -14,7 +14,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 ENTRY_SCRIPT = "blade_shape_active_learning.py"
-CFX_SCRIPT = "blade_shape_cfx_runner.py"
 
 BOUNDARY_STAGES = ["singles", "pairs", "extension"]
 REVIEW_DECISIONS = ("accept", "reject")
@@ -170,18 +169,6 @@ def build_review(config_path: str | Path, *, run_id: str = "", decision: str = "
         raise ValueError("请填写审核理由")
     args += ["--run-id", run_id, f"--{decision}", reason]
     return CommandSpec("review", args, ("接受" if decision == "accept" else "否决") + f"送审结果 {run_id}")
-
-
-def build_check_pre(config_path: str | Path, *, working_dir: str | Path,
-                    definition: str | Path | None = None) -> CommandSpec:
-    args = [
-        "check-pre",
-        *_config_args(config_path),
-        "--working-dir", str(working_dir),
-    ]
-    if definition:
-        args += ["--def", str(definition)]
-    return CommandSpec("check-pre", args, "生成并检查 CFX-Pre 输入（不求解）", script=CFX_SCRIPT)
 
 
 VALIDATION_SCRIPT = 'blade_shape_incidence_validation.py'

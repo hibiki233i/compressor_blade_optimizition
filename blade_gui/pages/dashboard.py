@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
 
 from .. import theme
 from ..charts import CategoryBarChart, Series, XYChart
-from ..project import OBJECTIVES, fmt, fmt_time
+from ..project import OBJECTIVES, PHASE_LABELS, fmt, fmt_time, successful_rows
 from ..widgets import (
     Badge,
     Card,
@@ -24,14 +24,6 @@ from ..widgets import (
     tool_button,
 )
 from .base import Page
-
-PHASE_LABELS = {
-    "doe": "初始 DOE",
-    "active_learning": "主动学习",
-    "boundary": "边界实验",
-    "fallback": "兜底随机",
-    "unknown": "未知",
-}
 
 
 def gate_rows(gate: dict) -> list[tuple[str, object, object, str, bool]]:
@@ -58,16 +50,6 @@ def gate_rows(gate: dict) -> list[tuple[str, object, object, str, bool]]:
                          str(gate.get(f"covered_2sigma_{objective}")),
                          bool(gate.get(f"passed_{objective}", False))))
     return rows
-
-
-def _successful(frame):
-    """Rows whose ``status`` is exactly ``success`` (empty frame when absent)."""
-    if frame is None:
-        return None
-    if getattr(frame, "empty", True) or "status" not in frame.columns:
-        return frame.iloc[0:0]
-    status = frame["status"].astype(str).str.strip().str.lower()
-    return frame.loc[status == "success"]
 
 
 class DashboardPage(Page):
@@ -242,7 +224,7 @@ class DashboardPage(Page):
 
     def _refresh_pareto(self) -> None:
         df = self.ctx.project.results()
-        success = _successful(df)
+        success = successful_rows(df)
         has_data = success is not None and not success.empty and "Efficiency" in success.columns
         self.pareto_chart.setVisible(bool(has_data))
         self.pareto_empty.setVisible(not has_data)

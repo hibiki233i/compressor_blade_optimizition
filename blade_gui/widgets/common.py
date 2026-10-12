@@ -180,19 +180,6 @@ class Badge(QLabel):
             "border-radius: 9px; padding: 2px 9px; font-size: 11px; font-weight: 700;"
         )
 
-    @staticmethod
-    def for_status(status: str) -> "Badge":
-        text = (status or "unknown").strip().lower()
-        mapping = {
-            "success": ("成功", "good"),
-            "failed": ("失败", "bad"),
-            "failure": ("失败", "bad"),
-            "unknown": ("未登记", "muted"),
-            "pending": ("等待", "warn"),
-        }
-        label, kind = mapping.get(text, (text or "—", "muted"))
-        return Badge(label, kind)
-
 
 class MessageBar(QFrame):
     """Inline advisory strip with an icon and a message."""
@@ -316,14 +303,6 @@ class FormRow(QWidget):
         self.hint.setFixedWidth(150)
         layout.addWidget(self.hint, 0)
         self.widget = widget
-
-
-def divider() -> QFrame:
-    """One-pixel horizontal rule in the border colour."""
-    line = QFrame()
-    line.setObjectName("Divider")
-    line.setFrameShape(QFrame.NoFrame)
-    return line
 
 
 def form_label(text: str) -> QLabel:

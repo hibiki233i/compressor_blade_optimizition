@@ -42,6 +42,7 @@ Impeller_profile.curve
 ekradi_madadi_2020.txt
 
 # Office/temp files
+.DS_Store
 ~$*
 *.tmp
 *.bak

@@ -17,16 +17,9 @@ from PySide6.QtWidgets import (
 
 from .. import theme
 from ..charts import CategoryBarChart, Series, XYChart
-from ..project import OBJECTIVES, fmt
+from ..project import OBJECTIVES, PHASE_LABELS, fmt, successful_rows
 from ..widgets import ChartCard
 from .base import Page
-
-PHASE_LABELS = {
-    "doe": "初始 DOE",
-    "active_learning": "主动学习",
-    "boundary": "边界实验",
-    "fallback": "兜底随机",
-}
 
 PHASE_COLORS = {
     "doe": "blue",
@@ -34,13 +27,6 @@ PHASE_COLORS = {
     "boundary": "amber",
     "fallback": "pink",
 }
-
-
-def _successful(frame: pd.DataFrame) -> pd.DataFrame:
-    if frame is None or frame.empty or "status" not in frame.columns:
-        return pd.DataFrame()
-    status = frame["status"].astype(str).str.strip().str.lower()
-    return frame.loc[status == "success"].copy()
 
 
 def _numeric(frame: pd.DataFrame, column: str) -> pd.Series:
@@ -210,7 +196,7 @@ class AnalyticsPage(Page):
     def refresh(self) -> None:
         # rows from other physical inputs are not results under the current ones
         df = self.ctx.project.results()
-        success = _successful(df)
+        success = successful_rows(df)
         diagnostics = self.ctx.project.diagnostics()
         if "run_id" in diagnostics.columns and "run_id" in df.columns:
             diagnostics = diagnostics.loc[diagnostics["run_id"].astype(str).isin(df["run_id"].astype(str))]
@@ -268,7 +254,7 @@ class AnalyticsPage(Page):
     def _refresh_variable_scatter(self) -> None:
         name = self.variable_box.currentText()
         objective = self.objective_box.currentText() or OBJECTIVES[0]
-        success = _successful(self.ctx.project.results())
+        success = successful_rows(self.ctx.project.results())
         chart: XYChart = self.scatter_card.chart
         chart.set_axis_labels(f"{name} (deg)", objective)
         if success.empty or not name or name not in success.columns:
@@ -286,7 +272,7 @@ class AnalyticsPage(Page):
         series: list[Series] = []
         phases = list(frame["_phase"].fillna("unknown").astype(str).unique())
         for phase in phases:
-            if phase not in PHASE_LABELS:
+            if phase not in PHASE_COLORS:
                 continue
             subset = frame.loc[frame["_phase"].fillna("unknown").astype(str) == phase]
             series.append(
@@ -300,7 +286,7 @@ class AnalyticsPage(Page):
                     marker=5.0,
                 )
             )
-        unknown = frame.loc[~frame["_phase"].fillna("unknown").astype(str).isin(PHASE_LABELS)]
+        unknown = frame.loc[~frame["_phase"].fillna("unknown").astype(str).isin(PHASE_COLORS)]
         if not unknown.empty:
             series.append(
                 Series(

@@ -11,13 +11,14 @@ import csv
 import json
 import math
 import shutil
-import subprocess
 import time
 import xml.etree.ElementTree as ET
 from pathlib import Path, PureWindowsPath
 from typing import Any
 
-from blade_shape_flow_diagnostics import LOCATION_NAME, RAW_NAME, parse_measurements, render_session
+from blade_shape_flow_diagnostics import (
+    LOCATION_NAME, RAW_NAME, parse_measurements, render_session, run_cfx_post,
+)
 from blade_shape_runtime import atomic_json, digest, file_identity, output_lock
 
 METHOD = 'forward_mass_velocity_triangle_v1'
@@ -421,8 +422,7 @@ def extract(spec: dict, post_exe: Path, output: Path) -> dict:
     atomic_json(output/'command.json',dict(argv=command,cwd=str(output)))
     atomic_json(output/'state.json',dict(status='running'))
     try:
-        process=subprocess.run(command,cwd=output,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,
-                               text=True,encoding='utf-8',errors='replace',check=False)
+        process=run_cfx_post(command,output)
         (output/'cfxpost.log').write_text(process.stdout,encoding='utf-8')
         atomic_json(output/'returncode.json',{'returncode':process.returncode})
         error=output/'cfdpost_error.log'
