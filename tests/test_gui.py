@@ -30,6 +30,7 @@ from blade_gui.project import (  # noqa: E402
 
 try:  # pragma: no cover - exercised only when PySide6 exists
     import PySide6  # noqa: F401
+    import psutil  # noqa: F401  - the runner needs it; both come from requirements-gui.txt
 
     PYSIDE_AVAILABLE = True
 except Exception:  # noqa: BLE001
@@ -587,8 +588,8 @@ class TestGuiWidgets(ProjectFixture):
         self.window._select_page(3)
         self._settle()
         page = self.window.pages[3]
-        self.assertEqual(page.stack.count(), 5)
-        for index in range(5):
+        self.assertEqual(page.stack.count(), 6)
+        for index in range(6):
             page.action_box.setCurrentIndex(index)
             self._settle(2)
             spec = page._build_spec()

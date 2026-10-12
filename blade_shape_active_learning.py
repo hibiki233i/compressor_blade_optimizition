@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 
 from blade_shape_cfx_runner import run_cfx_pipeline
-from blade_shape_convergence import ConvergencePolicy
+from blade_shape_convergence import ConvergencePolicy, ReviewPolicy
 from blade_shape_local_config import apply_local_paths
 import blade_shape_refinement as refinement
 import blade_shape_signature as signatures
@@ -103,6 +103,7 @@ def load_config(path: str | Path) -> dict[str, Any]:
         where = local["ini"] if local.get("found") else f"{local['ini']} (not found; copy blade_shape_local.ini.example)"
         print(f"Warning: empty paths {', '.join(empty)}; set them in {where}", file=sys.stderr)
     ConvergencePolicy.from_config(payload)
+    ReviewPolicy.from_config(payload)
     geometry_indices(payload)
     surrogate_choice(payload)
     refinement.active_indices(payload)
@@ -1213,6 +1214,7 @@ def evaluate_true_cfd(
             cores=int(runtime["cfx_cores"]),
             n_blades=int(runtime["n_blades"]),
             convergence=ConvergencePolicy.from_config(config),
+            review=ReviewPolicy.from_config(config),
         )
     except OSError as exc:
         row['failure_stage'] = 'environment'
@@ -1220,7 +1222,8 @@ def evaluate_true_cfd(
         (candidate_path.parent / 'environment.log').write_text(str(exc), encoding='utf-8')
         append_row(config, row)
         return CaseResult(row, False)
-    if not cfx.success:
+    review = getattr(cfx, 'review', False)  # stand-ins for CfxResult may omit it
+    if not cfx.success and not review:
         row["failure_stage"] = cfx.failure_stage or "cfx"
         row["message"] = cfx.message
         append_row(config, row)
@@ -1239,11 +1242,12 @@ def evaluate_true_cfd(
                           'CFX installation); the result is not recorded as a label. Inspect this case.')
         append_row(config, row)
         return CaseResult(row, False)
-    row["status"] = "success"
+    # A review row carries real metrics but is not a label until a person accepts it.
+    row["status"] = "review" if review else "success"
     row["failure_stage"] = ""
     row["message"] = cfx.message
     append_row(config, row)
-    return CaseResult(row, True)
+    return CaseResult(row, not review)
 
 
 def run_loop(args: argparse.Namespace) -> None:
@@ -1332,8 +1336,14 @@ def _run_loop(args: argparse.Namespace, config: dict[str, Any]) -> None:
         result=pending.run(config,baseline,max_new-used_new)
         used_new+=result['new_attempts'];failures+=result['failures'];summary.extend(result['summary'])
     write_iteration_summary(config,summary)
-    front=write_pareto(config,load_training(config))
-    print(f'Done. New CFD attempts: {used_new}. Failed outcomes: {failures}. Pareto rows: {len(front)}. Output: {out}')
+    final=load_training(config)
+    front=write_pareto(config,final)
+    reviews=final.loc[final.status.eq('review'),'run_id'].astype(str).tolist()
+    print(f'Done. New CFD attempts: {used_new}. Failed outcomes: {failures}. Awaiting review: {len(reviews)}. '
+          f'Pareto rows: {len(front)}. Output: {out}')
+    if reviews:
+        print(f"Awaiting manual review (not training labels yet): {', '.join(reviews)}. "
+              "Inspect each case, then run: review --run-id <case> --accept \"reason\" | --reject \"reason\"")
     if failures:
         raise SystemExit(1)
 
@@ -1385,6 +1395,29 @@ def refinement_command(args: argparse.Namespace) -> None:
         print(json.dumps(result, indent=2))
         if result['stage_status'] == 'failed':
             raise SystemExit(1)
+        if result['stage_status'] == 'awaiting_review':
+            waiting = [p['run_id'] for p in result['points'].values() if p.get('status') == 'review']
+            print(f"Stage paused: {', '.join(waiting)} awaiting manual review. Accept to continue the stage "
+                  "(review --run-id <case> --accept \"reason\"); a rejection fails it.")
+            raise SystemExit(REVIEW_EXIT)
+
+
+def review_command(args: argparse.Namespace) -> None:
+    import blade_shape_review as review
+    config = load_config(args.config)
+    if args.run_id is None:
+        if args.accept or args.reject:
+            raise SystemExit('review: --accept/--reject need --run-id')
+        print(json.dumps(review.awaiting(config), indent=2, ensure_ascii=False))
+        return
+    if not (args.accept or args.reject):
+        raise SystemExit('review: give --accept "reason" or --reject "reason"')
+    record = review.decide(config, args.run_id, 'accepted' if args.accept else 'rejected', args.accept or args.reject)
+    print(json.dumps(record, indent=2, ensure_ascii=False))
+
+
+#: Exit status of a boundary stage paused for manual review (1 is a failed stage).
+REVIEW_EXIT = 3
 
 
 ACCEPT_HELP = ("Declare that records produced under other physical inputs stay valid under the current "
@@ -1437,6 +1470,15 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument('--resume', action='store_true')
             command.add_argument('--accept-input-change', type=_reason, metavar='REASON', help=ACCEPT_HELP)
         command.set_defaults(func=refinement_command)
+
+    review = sub.add_parser("review", help="List results awaiting manual review, or accept/reject one of them.")
+    review.add_argument("--config", default=config_default)
+    review.add_argument("--run-id", help="The result to decide on; omit to list results awaiting review.")
+    decision = review.add_mutually_exclusive_group()
+    decision.add_argument("--accept", type=_reason, metavar="REASON",
+                          help="Accept it as a training label; the reason is recorded in review_decisions.json.")
+    decision.add_argument("--reject", type=_reason, metavar="REASON", help="Reject it; it is recorded as failed.")
+    review.set_defaults(func=review_command)
     return parser
 
 

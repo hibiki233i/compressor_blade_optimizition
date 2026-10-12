@@ -45,7 +45,7 @@ from ..widgets import (
     tool_button,
 )
 from .base import Page
-from blade_shape_convergence import RESTART_ITERATIONS_RANGE, RMS_TARGET_MAX  # noqa: E402 - path set by ..project
+from blade_shape_convergence import RESTART_ITERATIONS_RANGE, REVIEW_RMS_MAX, RMS_TARGET_MAX  # noqa: E402 - path set by ..project
 
 
 # --------------------------------------------------------------------------
@@ -126,6 +126,9 @@ RUNTIME_FIELDS = [
     Field("cfx_convergence.restart_iterations", "不收敛追加迭代数", "int",
           minimum=RESTART_ITERATIONS_RANGE[0], maximum=RESTART_ITERATIONS_RANGE[1]),
     Field("cfx_convergence.flow_analysis", "CFX Flow 名称", "text"),
+    Field("cfx_review.rms_limit", "送审残差上限", "float", minimum=0.000000000001, maximum=REVIEW_RMS_MAX,
+          decimals=12, step=0.00001),
+    Field("cfx_review.max_equations_above_target", "送审允许超标方程数", "int", minimum=0, maximum=20),
     Field("runtime.n_blades", "叶片数", "int", minimum=1, maximum=200),
     Field("runtime.rpm", "声明转速 (rpm)", "float", decimals=2, step=100.0),
     Field("runtime.mass_flow", "声明质量流量", "float", decimals=6, step=0.0001),
@@ -522,10 +525,11 @@ class ConfigPage(Page):
     def reload_from_context(self) -> None:
         """Populate the form from the current project's config."""
         config = copy.deepcopy(self.ctx.project.config)
-        from blade_shape_convergence import ConvergencePolicy
-        defaults = ConvergencePolicy().to_dict()
-        if isinstance(config.get("cfx_convergence", {}), dict):
-            config["cfx_convergence"] = {**defaults, **config.get("cfx_convergence", {})}
+        from blade_shape_convergence import ConvergencePolicy, ReviewPolicy
+        for section, defaults in (("cfx_convergence", ConvergencePolicy().to_dict()),
+                                  ("cfx_review", ReviewPolicy().to_dict())):
+            if isinstance(config.get(section, {}), dict):
+                config[section] = {**defaults, **config.get(section, {})}
         from blade_shape_refinement import DEFAULT_MIN_COVERAGE_2SIGMA
         refinement = config.get("refinement")
         if isinstance(refinement, dict) and isinstance(refinement.get("diagnostic_gate", {}), dict):

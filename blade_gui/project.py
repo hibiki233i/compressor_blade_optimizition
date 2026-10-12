@@ -91,7 +91,7 @@ def validate_config(config: dict[str, Any]) -> list[Issue]:
     issues: list[Issue] = []
     # A hand-edited file can hold the wrong JSON type anywhere; report it instead
     # of raising, because the GUI must still open to let the user repair it.
-    for section in ("paths", "runtime", "constraints", "search", "cfx_convergence"):
+    for section in ("paths", "runtime", "constraints", "search", "cfx_convergence", "cfx_review"):
         if section in config and not isinstance(config[section], dict):
             issues.append(Issue("error", f"{section} 必须是 JSON 对象。"))
     if any(issue.level == "error" for issue in issues):
@@ -101,6 +101,14 @@ def validate_config(config: dict[str, Any]) -> list[Issue]:
         ConvergencePolicy.from_config(config)
     except (ValueError, TypeError) as exc:
         issues.append(Issue("error", f"CFX 收敛设置无效：{exc}"))
+    try:
+        from blade_shape_convergence import ConvergencePolicy, ReviewPolicy
+        review = ReviewPolicy.from_config(config)
+        target = ConvergencePolicy.from_config(config).rms_target
+        if review.max_equations_above_target and review.rms_limit <= target:
+            issues.append(Issue("warning", f"cfx_review.rms_limit 不高于 RMS 门槛 {target:g}，不会有结果送审。"))
+    except (ValueError, TypeError) as exc:
+        issues.append(Issue("error", f"人工审核设置无效：{exc}"))
 
     try:
         cli_module().surrogate_choice(config)
@@ -265,6 +273,8 @@ class Summary:
     attempts: int = 0
     successes: int = 0
     failures: int = 0
+    # real CFD results close to the RMS target, not labels until a person accepts them
+    reviews: int = 0
     pareto_count: int = 0
     strict_count: int = 0
     best_efficiency: float = float("nan")
@@ -526,7 +536,8 @@ class Project:
         status = df["status"] if "status" in df.columns else pd.Series("", index=df.index, dtype=object)
         status = status.astype(str).str.strip().str.lower()
         out.successes = int((status == "success").sum())
-        out.failures = int(out.attempts - out.successes)
+        out.reviews = int((status == "review").sum())
+        out.failures = int(out.attempts - out.successes - out.reviews)
 
         classes = self.input_classes()
         evidence = classes != "other"
@@ -555,7 +566,7 @@ class Project:
                 for k, v in df["sample_phase"].fillna("unknown").astype(str).value_counts().items()
             }
         if "failure_stage" in df.columns:
-            failed = df.loc[status != "success", "failure_stage"].fillna("unspecified").astype(str)
+            failed = df.loc[~status.isin(["success", "review"]), "failure_stage"].fillna("unspecified").astype(str)
             failed = failed.replace({"": "unspecified", "nan": "unspecified"})
             out.failure_stages = {str(k): int(v) for k, v in failed.value_counts().items()}
         if "selection_source" in df.columns:

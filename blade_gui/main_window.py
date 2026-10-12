@@ -94,6 +94,7 @@ class MainWindow(QMainWindow):
         self.ctx.project_reloaded.connect(self._on_project_reloaded)
         self.ctx.status_message.connect(self._on_status)
         self.ctx.case_requested.connect(self._on_case_requested)
+        self.ctx.review_requested.connect(self._on_review_requested)
         for runner in self.ctx.command_runners:
             runner.started.connect(lambda *_: self._sync_busy())
             runner.finished.connect(lambda *_: QTimer.singleShot(0, self._sync_busy))
@@ -312,6 +313,13 @@ class MainWindow(QMainWindow):
                 page.select_run(run_id)
                 return
 
+    def _on_review_requested(self, run_id: str) -> None:
+        for index, page in enumerate(self.pages):
+            if hasattr(page, "request_review"):
+                self._select_page(index)
+                page.request_review(run_id)
+                return
+
     # ------------------------------------------------------------- state
     def _on_project_reloaded(self) -> None:
         project = self.ctx.project
@@ -404,6 +412,22 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------ closing
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt API
+        running = [runner for runner in self.ctx.command_runners if runner.running]
+        if running:
+            answer = QMessageBox.question(
+                self,
+                "任务仍在运行",
+                "关闭窗口会停止正在运行的命令，以及它启动的 CFturbo / TurboGrid / CFX 求解进程。\n"
+                "中断在几何或求解阶段的算例，下次续跑时记为失败（不会重算）。确定关闭？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                event.ignore()
+                return
+            # Qt's own teardown would kill only the CLI and orphan the solver.
+            for runner in running:
+                runner.stop(wait=True)
         self.ctx.write_setting("window/geometry", self.saveGeometry())
         self.ctx.sync_settings()
         super().closeEvent(event)

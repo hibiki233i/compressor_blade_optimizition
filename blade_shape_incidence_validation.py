@@ -575,6 +575,8 @@ def run_plan(path: Path, budget: int, resume: bool) -> dict:
             state['points'][key]=dict(status='running',run_id=f"case_{point['index']:06d}")
             atomic_json(state_path,state)
             current=copy.deepcopy(config);current['runtime']['p_out_pa']=point['p_out_pa']
+            # validation keeps the strict RMS criterion: no result is offered for manual review
+            current['cfx_review']={'max_equations_above_target':0}
             try:
                 result=al.evaluate_true_cfd(current,baseline,np.array(point['x']),point['index'],
                                             sample_phase='incidence_validation',experiment_id=signature,

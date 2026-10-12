@@ -452,11 +452,14 @@ def _run_boundary(config: dict[str,Any], path: Path, stage: str, max_new: int, r
                 existing=pd.read_csv(boundary_csv) if boundary_csv.exists() else pd.DataFrame()
                 if existing.empty or saved['run_id'] not in existing.run_id.values:
                     b.append_compatible_csv(boundary_csv,diagnostic,list(diagnostic))
-        elif saved.get('status') in ['success','failed']:
+        elif saved.get('status') in ['success','failed','review']:
             raise ValueError('Checkpoint outcome is missing from training_data.csv.')
     required=['singles'] if stage=='pairs' else ['singles','pairs'] if stage=='extension' else []
-    if any(state['points'].get(p['point_id'],{}).get('status')!='success' for p in plan['points'] if p['stage'] in required):
-        raise ValueError('Earlier stages must finish successfully before starting this stage.')
+    earlier=[state['points'].get(p['point_id'],{}) for p in plan['points'] if p['stage'] in required]
+    if any(s.get('status')!='success' for s in earlier):
+        waiting=[s['run_id'] for s in earlier if s.get('status')=='review']
+        raise ValueError('Earlier stages must finish successfully before starting this stage.'
+                         +(f" Awaiting manual review: {', '.join(waiting)}." if waiting else ''))
     if exists:
         atomic_json(state_path,state)
     baseline=b.extract_baseline(config)
@@ -467,6 +470,8 @@ def _run_boundary(config: dict[str,Any], path: Path, stage: str, max_new: int, r
         if saved.get('status')=='success':continue
         if saved.get('status')=='failed':
             raise ValueError('Failed point requires inspection and a new experiment; no automatic CFD retry.')
+        # Paused, not failed: an accept turns it into success and the stage goes on.
+        if saved.get('status')=='review':break
         if used>=max_new:break
         signatures.ensure_pinned(config)
         cfg=point_config(config,p);x=np.array(p['x'])
@@ -507,7 +512,7 @@ def _run_boundary(config: dict[str,Any], path: Path, stage: str, max_new: int, r
         atomic_json(state_path,state)
         result=b.evaluate_true_cfd(cfg,baseline,x,index,sample_phase='boundary',
                                    experiment_id=plan['plan_id'],design_role=p['point_id'],selection_source='predefined_boundary')
-        used+=1;saved['status']='success' if result.success else 'failed'
+        used+=1;saved['status']='success' if result.success else 'review' if result.row.get('status')=='review' else 'failed'
         saved.update(improvement_metrics(config,before,result.row))
         diagnostic={**saved['prediction'],**improvement_metrics(config,before,result.row),'status':result.row['status']}
         diagnostic.update({f'true_{o}':float(result.row[o]) if pd.notna(result.row.get(o)) else None for o in OBJECTIVES})
@@ -516,7 +521,8 @@ def _run_boundary(config: dict[str,Any], path: Path, stage: str, max_new: int, r
         b.write_pareto(config,b.load_training(config))
         if not result.success:break
     statuses=[state['points'].get(p['point_id'],{}).get('status','pending') for p in plan['points'] if p['stage']==stage]
-    stage_status='failed' if 'failed' in statuses else 'completed' if all(s=='success' for s in statuses) else 'budget_exhausted'
+    stage_status=('failed' if 'failed' in statuses else 'awaiting_review' if 'review' in statuses
+                  else 'completed' if all(s=='success' for s in statuses) else 'budget_exhausted')
     return {'new_cfd_attempts':used,'stage_status':stage_status,'state_path':str(state_path),'points':state['points']}
 
 

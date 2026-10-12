@@ -12,6 +12,7 @@
 | `blade_shape_acquisition.py` | 双目标期望超体积改进及采样 |
 | `blade_shape_refinement.py` | 活动/固定变量划分、条件代理、局部搜索、诊断和分阶段边界实验 |
 | `blade_shape_pending.py`、`blade_shape_runtime.py` | 待评估队列、断点恢复、算例预留、原子状态文件和进程锁 |
+| `blade_shape_review.py` | 略未达到 RMS 门槛的送审结果（`status=review`）的列出与人工接受/否决，决定写入 `review_decisions.json` |
 | `blade_shape_signature.py` | 物理签名（只含改变计算结果的输入，含 CFX 求解器版本）、训练记录的输入兼容判断、`--accept-input-change` 的确认记录 |
 | `Run-BladeShapeGeometryMeshing.ps1` | 将候选写入 CFturbo batch，并调用 CFturbo、TurboGrid |
 | `blade_shape_cfx_runner.py` | CFX-Pre、求解、后处理、结果解析及阶段恢复 |
@@ -24,7 +25,7 @@ GUI 是 CLI 的控制台和结果视图。新增运行能力应先放在 CLI/共
 
 ## 必须维持的行为
 
-- 最终 Pareto 只取 `training_data.csv` 中 `status=success`、目标值有效且物理签名与当前输入兼容的真实 CFD 记录。预测值、dry-run 和失败记录不得充当真实标签。工程容差前沿写入 `pareto_front.csv`，严格前沿写入 `pareto_front_strict.csv`。
+- 最终 Pareto 只取 `training_data.csv` 中 `status=success`、目标值有效且物理签名与当前输入兼容的真实 CFD 记录。预测值、dry-run、失败记录和待审核记录（`status=review`）不得充当真实标签；送审结果只能经用户用 `review --accept` 写明原因后变为 `success`，不要自动接受，GUI 也不要记住审核理由。工程容差前沿写入 `pareto_front.csv`，严格前沿写入 `pareto_front_strict.csv`。
 - `variables` 的名称和顺序与 Python 向量切片、CFturbo 写入映射、CSV 列对应。改变量定义时同步检查这三处、`search.active_variables` / `search.fixed_variables`、几何约束和测试。普通边界或运行预算调整优先改配置，避免把数值硬编码到算法或脚本。
 - 续跑是有状态操作：`pending_evaluations.json`、`cases/case_XXXXXX/`、训练 CSV、`geometry_state.json`、`cfx_state.json` 与输入文件身份共同决定能否恢复。保持已有 `run_id`、阶段元数据和历史 CSV 的额外列（含 `physical_signature`）；不要静默覆盖候选、重编号、伪造完成凭据或把残留 `.res` / `CFX_Results.txt` 当成成功。
 - 物理签名（`blade_shape_signature.py`）只包含改变同一设计点计算结果的输入；新增此类输入时加入 `physical_inputs`，选点或运行环境设置不要加入。签名不兼容时停下并列出差异，只有用户用 `--accept-input-change` 写明原因才继续；不要自动接受、改写旧行的签名，GUI 也不要记住接受原因。
@@ -34,10 +35,10 @@ GUI 是 CLI 的控制台和结果视图。新增运行能力应先放在 CLI/共
 
 ## 修改与验证方式
 
-在仓库根目录执行命令。项目使用 Python 3.10+、NumPy、Pandas；SciPy 和 scikit-learn 是相应采样/GP 功能的可选依赖；GUI 另需 `requirements-gui.txt` 中的 PySide6。真实几何、网格和 CFD 需要 Windows、PowerShell 7、CFturbo、TurboGrid、CFX 及未入库的 `Templates/`。本机路径不写进 JSON：`blade_shape_config.json` 的 `paths.*` 留空，由 `blade_shape_local_config.py` 从配置旁未入库的 `blade_shape_local.ini` 补齐（非空 JSON 值优先），`cfx_bin_dir` / `turbogrid_exe` 两处都空时由 `AWP_ROOT<版本>` 推导（多个版本须在 `[ansys] version` 指定），模板为 `blade_shape_local.ini.example`；运行前先检查该 INI，不要假设本机可用，也不要把机器路径提交回 JSON 或 PowerShell 默认值。
+在仓库根目录执行命令。项目使用 Python 3.10+、NumPy、Pandas；SciPy 和 scikit-learn 是相应采样/GP 功能的可选依赖；GUI 另需 `requirements-gui.txt` 中的 PySide6 和 psutil（停止时结束 CFX 求解进程）。真实几何、网格和 CFD 需要 Windows、PowerShell 7、CFturbo、TurboGrid、CFX 及未入库的 `Templates/`。本机路径不写进 JSON：`blade_shape_config.json` 的 `paths.*` 留空，由 `blade_shape_local_config.py` 从配置旁未入库的 `blade_shape_local.ini` 补齐（非空 JSON 值优先），`cfx_bin_dir` / `turbogrid_exe` 两处都空时由 `AWP_ROOT<版本>` 推导（多个版本须在 `[ansys] version` 指定），模板为 `blade_shape_local.ini.example`；运行前先检查该 INI，不要假设本机可用，也不要把机器路径提交回 JSON 或 PowerShell 默认值。
 
 ```powershell
-python -m py_compile blade_shape_active_learning.py blade_shape_acquisition.py blade_shape_refinement.py blade_shape_pending.py blade_shape_runtime.py blade_shape_signature.py blade_shape_cfx_runner.py blade_shape_incidence_validation.py blade_shape_aca_extraction.py blade_shape_local_config.py
+python -m py_compile blade_shape_active_learning.py blade_shape_acquisition.py blade_shape_refinement.py blade_shape_pending.py blade_shape_runtime.py blade_shape_signature.py blade_shape_review.py blade_shape_cfx_runner.py blade_shape_incidence_validation.py blade_shape_aca_extraction.py blade_shape_local_config.py
 python -m unittest discover -s tests -v
 ```
 

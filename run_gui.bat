@@ -5,12 +5,12 @@ chcp 65001 >nul
 setlocal
 cd /d "%~dp0"
 
-python -c "import PySide6" >nul 2>&1
+python -c "import PySide6, psutil" >nul 2>&1
 if errorlevel 1 (
-    echo [i] PySide6 not found. Installing GUI dependencies...
+    echo [i] PySide6 or psutil not found. Installing GUI dependencies...
     python -m pip install -r requirements-gui.txt
     if errorlevel 1 (
-        echo [!] Install failed. Run: python -m pip install PySide6
+        echo [!] Install failed. Run: python -m pip install -r requirements-gui.txt
         pause
         exit /b 1
     )

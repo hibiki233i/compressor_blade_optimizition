@@ -29,7 +29,9 @@ from ..project import CaseRecord, fmt, fmt_time, human_size, read_text, tail_tex
 from ..widgets import Badge, Card, EmptyState, MessageBar, tool_button
 from .base import Page
 
-STATUS_FILTERS = [("全部状态", "all"), ("仅成功", "success"), ("仅失败", "failed"), ("未登记", "unknown")]
+STATUS_FILTERS = [("全部状态", "all"), ("仅成功", "success"), ("待审核", "review"), ("仅失败", "failed"),
+                  ("未登记", "unknown")]
+STATUS_LABELS = {"success": "成功", "failed": "失败", "failure": "失败", "review": "待审核"}
 LOG_SUFFIXES = {".log", ".txt", ".out", ".err", ".lst", ".trn"}
 
 
@@ -119,6 +121,10 @@ class CasesPage(Page):
         header_row.addWidget(self.detail_title)
         self.detail_badge = Badge("—", "muted")
         header_row.addWidget(self.detail_badge)
+        self.review_button = tool_button("审核…", "check", "ghost", "到「运行控制」接受或否决这个送审结果")
+        self.review_button.clicked.connect(self._request_review)
+        self.review_button.setVisible(False)
+        header_row.addWidget(self.review_button)
         header_row.addStretch(1)
         self.detail_path = QLabel("")
         self.detail_path.setObjectName("CardHint")
@@ -253,7 +259,9 @@ class CasesPage(Page):
         for record in self._records:
             if status_key == "success" and record.status != "success":
                 continue
-            if status_key == "failed" and record.status == "success":
+            if status_key == "failed" and record.status in ("success", "review"):
+                continue
+            if status_key == "review" and record.status != "review":
                 continue
             if status_key == "unknown" and record.registered:
                 continue
@@ -336,15 +344,20 @@ class CasesPage(Page):
             self.detail_path.setText("")
             self.detail_badge.setText("—")
             self.detail_badge.set_kind("muted")
+            self.review_button.setVisible(False)
+
+    def _request_review(self) -> None:
+        if self._selected is not None:
+            self.ctx.review_requested.emit(self._selected.run_id)
 
     def _show_case(self, record: CaseRecord) -> None:
         self._selected = record
         self._set_detail_visible(True)
         self.detail_title.setText(record.run_id)
-        self.detail_badge.setText(
-            {"success": "成功", "failed": "失败", "failure": "失败"}.get(record.status, record.status or "未登记")
-        )
-        self.detail_badge.set_kind("good" if record.ok else ("bad" if record.registered else "muted"))
+        self.detail_badge.setText(STATUS_LABELS.get(record.status, record.status or "未登记"))
+        self.detail_badge.set_kind("good" if record.ok else "warn" if record.status == "review"
+                                   else ("bad" if record.registered else "muted"))
+        self.review_button.setVisible(record.status == "review")
         self.detail_path.setText(str(record.path))
         message = record.message or "（无失败信息）"
         self.detail_message.setText(message)

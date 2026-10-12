@@ -180,7 +180,8 @@ class DashboardPage(Page):
 
         self.tile_attempts.set_value(str(summary.attempts), f"最近更新 {fmt_time(summary.last_modified)}")
         self.tile_success.set_value(str(summary.successes), f"成功率 {summary.success_rate * 100:.1f}%")
-        self.tile_failed.set_value(str(summary.failures), "见下方失败阶段分布")
+        self.tile_failed.set_value(str(summary.failures),
+                                   f"另有 {summary.reviews} 个待审核" if summary.reviews else "见下方失败阶段分布")
         self.tile_pareto.set_value(
             str(summary.pareto_count), f"严格前沿 {summary.strict_count} 个"
         )
@@ -208,6 +209,12 @@ class DashboardPage(Page):
                 "info",
                 f"尚未在 {project.output_dir} 找到 training_data.csv。可在「运行控制」启动主动学习，"
                 "或在「项目设置」把数据目录指向已有结果。",
+            )
+        elif summary is not None and summary.reviews:
+            self.message.set_level(
+                "warn",
+                f"{summary.reviews} 个结果略未达到 RMS 门槛，正等待人工审核；审核通过前不进训练集和 Pareto。"
+                "在「算例浏览」筛选「待审核」查看，或到「运行控制 → 审核送审点」处理。",
             )
         elif other_inputs:
             self.message.set_level(

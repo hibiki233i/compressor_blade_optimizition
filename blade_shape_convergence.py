@@ -15,6 +15,9 @@ RMS_TARGET_MAX = 1e-5
 #: restart did so within about 1500–2000 extra iterations; fewer rarely
 #: converged and more rarely helped. Revisit for a different machine or mesh.
 RESTART_ITERATIONS_RANGE = (1500, 2000)
+#: Loosest residual a reviewer may be asked to accept: 1e-4 is the usual
+#: "loosely converged" level for steady turbomachinery. Configs may tighten it.
+REVIEW_RMS_MAX = 1e-4
 
 
 @dataclass(frozen=True)
@@ -39,6 +42,48 @@ class ConvergencePolicy:
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class ReviewPolicy:
+    """Which unconverged results are offered for manual review instead of discarded.
+
+    A result qualifies when at most ``max_equations_above_target`` equations of
+    the final residual table miss the RMS target and each of them stays within
+    ``rms_limit``. It never becomes a label by itself: a person accepts or
+    rejects it. Not a physical input (it does not change any computed value).
+    """
+    rms_limit: float = REVIEW_RMS_MAX
+    max_equations_above_target: int = 3
+
+    def __post_init__(self) -> None:
+        if not math.isfinite(self.rms_limit) or not 0 < self.rms_limit <= REVIEW_RMS_MAX:
+            raise ValueError(f'cfx_review.rms_limit must be positive and <= {REVIEW_RMS_MAX:g}')
+        if type(self.max_equations_above_target) is not int or self.max_equations_above_target < 0:
+            raise ValueError('cfx_review.max_equations_above_target must be a non-negative integer (0 disables review)')
+
+    @classmethod
+    def from_config(cls, config: dict) -> 'ReviewPolicy':
+        return cls(**config.get('cfx_review', {}))
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+def review_evidence(report: dict, convergence: ConvergencePolicy, review: ReviewPolicy) -> dict | None:
+    """Why an unconverged final table may be accepted by a person, or None.
+
+    Every equation in the table counts, turbulence included: "most equations
+    meet the target" is judged on what the reviewer sees.
+    """
+    if report['converged']:
+        return None
+    above = {name: value for name, value in report['rms'].items() if value > convergence.rms_target}
+    if not 0 < len(above) <= review.max_equations_above_target:
+        return None
+    if any(value > review.rms_limit for value in above.values()):
+        return None
+    return {'equations_above_target': above, 'rms_target': convergence.rms_target, **review.to_dict()}
 
 
 ITERATION = re.compile(r'OUTER\s+LOOP\s+ITERATION\s*=\s*(\d+)(?:\s*\(\s*(\d+)\s*\))?', re.I)
@@ -83,6 +128,23 @@ def _residuals(block: str) -> dict[str, float]:
     return values
 
 
+WALL_NOTICE = re.compile(
+    r'A wall has been placed at portion\(s\) of an (INLET|OUTLET) boundary condition '
+    r'\(at\s*([\d.]+)% of the faces,\s*([\d.]+)% of the area\).*?'
+    r'The boundary condition name is:\s*(.+?)\.\s', re.I)
+
+
+def wall_notices(block: str) -> list[dict]:
+    """Inlet/outlet faces CFX walled off (backflow) in an iteration block, for review."""
+    flat = ' '.join(line.strip().strip('|').strip() for line in block.splitlines()) + ' '
+    flat = re.sub(r'\s+', ' ', flat)
+    notices = {}
+    for side, faces, area, name in WALL_NOTICE.findall(flat):
+        notices[(side.lower(), name.strip())] = {'side': side.lower(), 'boundary': name.strip(),
+                                                  'faces_percent': float(faces), 'area_percent': float(area)}
+    return list(notices.values())
+
+
 def assess_out(text: str, policy: ConvergencePolicy) -> dict:
     matches = list(ITERATION.finditer(text))
     if not matches:
@@ -112,9 +174,9 @@ def assess_out(text: str, policy: ConvergencePolicy) -> dict:
     max_rms = max(values[name] for name in REQUIRED)
     converged = max_rms <= policy.rms_target
     return dict(iteration=int(last.group(1)), run_iteration=int(last.group(2) or last.group(1)),
-                rms=values, checked_equations=sorted(REQUIRED), max_rms=max_rms,
+                rms=values, wall_notices=wall_notices(final), checked_equations=sorted(REQUIRED), max_rms=max_rms,
                 rms_target=policy.rms_target,
-                converged=converged, iteration_limit_reached=exhausted,
+                converged=converged, iteration_limit_stop=limit_stop, iteration_limit_reached=exhausted,
                 declared_iteration_limit=declared_limit)
 
 

@@ -1,6 +1,8 @@
 """Synthetic steady CFX output, using the documented equation-table layout."""
-def output(rms='2.0E-06', iteration=100, exhausted=False):
-    rows='\n'.join(f'| {eq:<20} | 0.90 | {rms} | 8.0E-03 | 1.0E-04 OK |'
+def output(rms='2.0E-06', iteration=100, exhausted=False, overrides=None):
+    """``overrides`` maps an equation (as written below) to its own RMS value."""
+    overrides=overrides or {}
+    rows='\n'.join(f'| {eq:<20} | 0.90 | {overrides.get(eq, rms)} | 8.0E-03 | 1.0E-04 OK |'
                     for eq in ['U - Mom','V - Mom','W - Mom','P - Mass','H-Energy','TurbKE','TurbFreq'])
     return (f'Maximum Number of Iterations = {iteration if exhausted else 2000}\n'
             f'OUTER LOOP ITERATION = {iteration}\n'
@@ -8,6 +10,11 @@ def output(rms='2.0E-06', iteration=100, exhausted=False):
             '+----------------------+------+---------+---------+------------------+\n'
             + ('Execution terminating: maximum number of time-step iterations, or maximum time has been reached.\n' if exhausted else 'Convergence criteria satisfied.\n')
             + 'CFD Solver finished: synthetic test\n')
+
+
+def p_mass_output(rms='1.3E-05', iteration=2000, exhausted=True):
+    """Only P-Mass misses a 1e-5 target; every other equation is at 2e-6."""
+    return output('2.0E-06', iteration, exhausted, {'P - Mass': rms})
 
 
 def outer_iteration_limit_output(rms='2.0E-04', iteration=2000, exhausted=True):
@@ -125,3 +132,55 @@ REAL_FINAL_ITERATION = """ Maximum Number of Iterations = 2000
 def real_output(turbfreq='2.2E-05'):
     """The real final iteration and run tail; ``turbfreq`` replaces O-TurbFreq's RMS."""
     return REAL_FINAL_ITERATION.replace('| 1.02 | 2.2E-05 |', f'| 1.02 | {turbfreq} |') + REAL_RUN_TAIL
+
+
+#: Final iteration of a real run (2026-10-12): every equation but P-Mass meets
+#: 1e-5; P-Mass has stalled at 1.3E-05 with walled-off inlet and outlet faces.
+NEAR_CONVERGED_ITERATION = """ Maximum Number of Iterations = 2000
+ ======================================================================
+ OUTER LOOP ITERATION = 1804                    CPU SECONDS = 8.376E+04
+ ----------------------------------------------------------------------
+ |       Equation       | Rate | RMS Res | Max Res |  Linear Solution |
+ +----------------------+------+---------+---------+------------------+
+ | Wallscale            | 1.00 | 1.0E-05 | 4.2E-05 |  6.0  8.6E-03  OK|
+ +----------------------+------+---------+---------+------------------+
+ | U-Mom                | 1.04 | 1.2E-06 | 1.3E-04 |       1.1E-02  OK|
+ | V-Mom                | 1.06 | 1.3E-06 | 1.7E-04 |       1.2E-02  OK|
+ | W-Mom                | 1.06 | 1.3E-06 | 1.4E-04 |       1.1E-02  OK|
+ | P-Mass               | 1.00 | 1.3E-05 | 1.4E-03 |  5.4  4.1E-03  OK|
+ +--------------------------------------------------------------------+
+ |                     ****** Notice ******                           |
+ |  A wall has been placed at portion(s) of an INLET                  |
+ |  boundary condition (at   3.6% of the faces,   0.2% of the area)   |
+ |  to prevent fluid from flowing out of the domain.                  |
+ |  The boundary condition name is: R1 Inlet.                         |
+ |  The fluid name is: HE3.                                           |
+ |  If this situation persists, consider switching                    |
+ |  to an Opening type boundary condition instead.                    |
+ +--------------------------------------------------------------------+
+ +--------------------------------------------------------------------+
+ |                     ****** Notice ******                           |
+ |  A wall has been placed at portion(s) of an OUTLET                 |
+ |  boundary condition (at  15.8% of the faces,   1.9% of the area)   |
+ |  to prevent fluid from flowing into the domain.                    |
+ |  The boundary condition name is: R1 Outlet.                        |
+ |  The fluid name is: HE3.                                           |
+ |  If this situation persists, consider switching                    |
+ |  to an Opening type boundary condition instead.                    |
+ +--------------------------------------------------------------------+
+ +----------------------+------+---------+---------+------------------+
+ | H-Energy             | 1.01 | 1.8E-07 | 2.3E-05 |  6.1  6.6E-03  OK|
+ +----------------------+------+---------+---------+------------------+
+ | K-TurbKE             | 1.00 | 1.6E-06 | 2.0E-05 |  6.0  7.0E-03  OK|
+ | O-TurbFreq           | 1.00 | 1.7E-06 | 3.6E-04 |  7.3  6.5E-07  OK|
+ +----------------------+------+---------+---------+------------------+
+
+ CFD Solver finished: Mon Oct 12 09:00:00 2026
+
+ ======================================================================
+              Termination and Interrupt Condition Summary
+ ======================================================================
+
+ CFD Solver: Run duration reached
+   (Maximum number of outer iterations)
+"""

@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .project import CODE_DIR  # noqa: F401 - puts the repository modules on sys.path
-from blade_shape_convergence import RESTART_ITERATIONS_RANGE, RMS_TARGET_MAX  # noqa: E402
+from blade_shape_convergence import RESTART_ITERATIONS_RANGE, REVIEW_RMS_MAX, RMS_TARGET_MAX  # noqa: E402
 
 _RMS = f"{RMS_TARGET_MAX:g}"
 _RESTART = f"{RESTART_ITERATIONS_RANGE[0]}–{RESTART_ITERATIONS_RANGE[1]}"
@@ -52,10 +52,22 @@ HELP: dict[str, Help] = {
         (CFX, PHYSICAL)),
     "cfx_convergence.restart_iterations": Help(
         _RESTART,
-        "首次求解用完模板中的最大迭代数仍未达到 RMS 门槛时，自动从该结果续算一次，续算的最大迭代数取此值。"
+        "首次求解用完模板中的最大迭代数仍未达到 RMS 门槛时，自动接着该结果的运行历史续算一次（迭代编号累计，aitern 不归零），续算追加的最大迭代数取此值。"
         f"只续算一次；代码限定为 {_RESTART} 的整数（blade_shape_convergence.RESTART_ITERATIONS_RANGE）。"
         "该范围来自本叶轮的经验：此前未收敛的算例若能从续算达到门槛，基本在这一追加步数内；更少很少收敛，更多也很少有帮助。",
         (CFX, PHYSICAL)),
+    "cfx_review.rms_limit": Help(
+        f"推荐 {REVIEW_RMS_MAX:g}；上限 {REVIEW_RMS_MAX:g}",
+        "续算用完追加步数仍未达到 RMS 门槛时，如果最终残差表中超标的方程都不超过此值（且个数不超过下一项），"
+        "该点照常做 CFX-Post，记为 status=review（待审核），而不是直接丢弃。待审核的点不进训练集和 Pareto，"
+        "要在「运行控制 → 审核送审点」或命令行 review 中人工接受后才成为训练标签；否决则记为失败。\n"
+        f"代码只接受 (0, {REVIEW_RMS_MAX:g}]（blade_shape_convergence.REVIEW_RMS_MAX）：{REVIEW_RMS_MAX:g} 是常说的宽松收敛水平。\n"
+        "不进入物理签名：它只决定结果是否交给人判断，不改变计算结果；修改后已有记录照常使用，已分类的点不会重新分类。"),
+    "cfx_review.max_equations_above_target": Help(
+        "推荐 3；0 关闭送审",
+        "最终残差表中（湍流、Wallscale 等方程也算在内）最多允许几个方程高于 RMS 门槛仍可送审；超过这个数直接记为失败。"
+        "设为 0 关闭人工审核，恢复严格判据。攻角验证始终使用严格判据。\n"
+        "不进入物理签名。"),
     "cfx_convergence.flow_analysis": Help(
         "与模板一致",
         "CFX 模板中求解分析对象 FLOW 的名称（默认 “Flow Analysis 1”），用于指定收敛控制 CCL 作用于哪一个分析。"

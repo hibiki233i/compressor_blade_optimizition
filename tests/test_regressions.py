@@ -184,6 +184,38 @@ class GuiRegressionTests(ProjectFixture):
         # red; it must look like plain background (sampled where nothing is drawn).
         self.assertEqual(pixel(0.75, 0.3), pixel(0.25, 0.85))
 
+    def test_result_awaiting_review_is_counted_filtered_and_opens_the_review_action(self):
+        path = self.out / 'training_data.csv'
+        frame = pd.read_csv(path)
+        frame.loc[frame.run_id.eq('case_000002'), 'status'] = 'review'
+        frame.to_csv(path, index=False)
+        self.ctx.reload()
+        self.app.processEvents()
+        summary = self.ctx.project.summary()
+        self.assertEqual((summary.successes, summary.reviews, summary.failures), (2, 1, 1))
+        self.assertEqual(summary.failure_stages, {'mesh': 1})
+
+        cases = next(page for page in self.window.pages if hasattr(page, 'select_run'))
+        self.window._select_page(self.window.pages.index(cases))
+        cases.status_filter.setCurrentIndex(cases.status_filter.findData('review'))
+        self.app.processEvents()
+        self.assertEqual(cases.table.rowCount(), 1)
+        cases.select_run('case_000002')
+        self.app.processEvents()
+        self.assertFalse(cases.review_button.isHidden())
+        cases.review_button.click()
+        self.app.processEvents()
+
+        run = next(page for page in self.window.pages if hasattr(page, 'request_review'))
+        self.assertIs(self.window.stack.currentWidget(), run)
+        self.assertEqual(run.action_box.currentData(), 'review')
+        self.assertEqual(run.review_run.currentText(), 'case_000002')
+        run.review_decision.setCurrentIndex(run.review_decision.findData('accept'))
+        run.review_reason.setText('P-Mass flat at 1.3e-5')
+        args = run._build_spec().args
+        self.assertEqual(args[0], 'review')
+        self.assertEqual(args[-4:], ['--run-id', 'case_000002', '--accept', 'P-Mass flat at 1.3e-5'])
+
     def test_runner_stop_does_not_block_the_event_loop(self):
         import sys
         import time
@@ -209,6 +241,132 @@ class GuiRegressionTests(ProjectFixture):
             self.app.processEvents()
             time.sleep(.05)
         self.assertFalse(runner.running)
+
+    def _start_with_grandchild(self, runner):
+        """Child and grandchild both ignore SIGTERM, like console programs on Windows."""
+        import sys
+        import time
+        lines = []
+        runner.line.connect(lambda _channel, text: lines.append(text))
+        runner.start([sys.executable, '-c',
+                      'import signal,subprocess,sys,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); '
+                      'g = subprocess.Popen([sys.executable, "-c", "import signal,time; '
+                      'signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)"]); '
+                      'print("grandchild", g.pid, flush=True); time.sleep(60)'])
+        deadline = time.monotonic() + 10
+        while not any(line.startswith('grandchild') for line in lines) and time.monotonic() < deadline:
+            self.app.processEvents()
+            time.sleep(.02)
+        return int(next(line for line in lines if line.startswith('grandchild')).split()[1])
+
+    @staticmethod
+    def _alive(pid):
+        import sys
+        if sys.platform == 'win32':  # os.kill(pid, 0) would terminate it on Windows
+            listing = subprocess.run(['tasklist', '/FI', f'PID eq {pid}', '/NH'], capture_output=True, text=True).stdout
+            return str(pid) in listing.split()
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        return True
+
+    def _wait_until(self, condition, seconds=10):
+        import time
+        deadline = time.monotonic() + seconds
+        while not condition() and time.monotonic() < deadline:
+            self.app.processEvents()
+            time.sleep(.05)
+        return condition()
+
+    def test_runner_stop_ends_the_processes_the_cli_started(self):
+        # The CLI starts cfx5solve, which starts solver-mpi.exe; stopping only
+        # the CLI left the solver running (seen as exit=62097 reason=crashed).
+        from blade_gui.runner import CommandRunner
+
+        runner = CommandRunner(Path.cwd())
+        grandchild = self._start_with_grandchild(runner)
+        self.assertTrue(self._alive(grandchild))
+        runner.stop()
+        self.assertTrue(self._wait_until(lambda: not runner.running))
+        self.assertTrue(self._wait_until(lambda: not self._alive(grandchild)), 'grandchild survived Stop')
+
+    def test_descendants_follow_parent_links_only(self):
+        from blade_gui.runner import descendants
+
+        pairs = [(1, 0), (10, 1), (11, 10), (12, 11), (13, 10), (20, 1), (21, 20), (30, 30)]
+        self.assertEqual(sorted(descendants(10, pairs)), [11, 12, 13])
+        self.assertEqual(descendants(12, pairs), [])
+        self.assertEqual(descendants(30, pairs), [])
+
+    def test_stop_ends_a_process_whose_parent_already_exited(self):
+        # CLI -> middle -> leaf; the middle exits, so the leaf is no longer in
+        # the CLI's tree. The identity recorded while it was must still be used.
+        import sys
+        from blade_gui.runner import CommandRunner
+
+        runner = CommandRunner(Path.cwd())
+        lines = []
+        runner.line.connect(lambda _channel, text: lines.append(text))
+        leaf = 'import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)'
+        middle = (f'import subprocess,sys,time; l = subprocess.Popen([sys.executable, "-c", {leaf!r}]); '
+                  'print("leaf", l.pid, flush=True); time.sleep(2)')
+        runner.start([sys.executable, '-c',
+                      'import signal,subprocess,sys,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); '
+                      f'subprocess.run([sys.executable, "-c", {middle!r}]); '
+                      'print("middle-done", flush=True); time.sleep(60)'])
+        self.assertTrue(self._wait_until(lambda: any(line.startswith('leaf') for line in lines)))
+        runner._track()  # what the periodic tracker does while the middle is alive
+        pid = int(next(line for line in lines if line.startswith('leaf')).split()[1])
+        self.assertTrue(self._wait_until(lambda: 'middle-done' in lines))
+        runner.stop()
+        self.assertTrue(self._wait_until(lambda: not runner.running))
+        self.assertTrue(self._wait_until(lambda: not self._alive(pid)), 'orphaned leaf survived Stop')
+
+    def test_stop_ends_cfx_processes_outside_the_tree_only_in_the_run_directory(self):
+        import sys
+        import psutil
+        import blade_gui.runner as runner_module
+        from blade_gui.runner import CommandRunner
+
+        inside_dir = Path(tempfile.mkdtemp(dir=self.root))
+        outside_dir = Path(tempfile.mkdtemp(dir=self.root))
+        runner = CommandRunner(Path.cwd())
+        runner.start([sys.executable, '-c', 'import time; time.sleep(60)'], scope=[inside_dir])
+        self.assertTrue(self._wait_until(lambda: runner.running))
+        # Started by the test, not the CLI: like MPI workers launched by a service.
+        sleeper = [sys.executable, '-c', 'import time; time.sleep(60)']
+        inside = subprocess.Popen(sleeper, cwd=inside_dir)
+        outside = subprocess.Popen(sleeper, cwd=outside_dir)
+        try:
+            name = psutil.Process(inside.pid).name().lower()
+            with patch.object(runner_module, 'CFX_PROCESS_NAMES', frozenset({name})):
+                runner.stop()
+            self.assertTrue(self._wait_until(lambda: not runner.running))
+            self.assertTrue(self._wait_until(lambda: inside.poll() is not None), 'scoped CFX process survived')
+            self.assertIsNone(outside.poll(), 'a process in another directory was stopped')
+        finally:
+            for proc in (inside, outside):
+                proc.kill()
+                proc.wait()
+
+    def test_closing_the_window_asks_and_then_ends_the_run(self):
+        from PySide6.QtWidgets import QMessageBox
+        import blade_gui.main_window as main_window
+
+        runner = self.ctx.command_runners[0]
+        grandchild = self._start_with_grandchild(runner)
+        try:
+            with patch.object(main_window.QMessageBox, 'question', return_value=QMessageBox.No):
+                self.assertFalse(self.window.close())
+            self.assertTrue(runner.running)
+            with patch.object(main_window.QMessageBox, 'question', return_value=QMessageBox.Yes) as asked:
+                self.assertTrue(self.window.close())
+            asked.assert_called_once()
+            self.assertFalse(runner.running)  # stop(wait=True) returns once the CLI is gone
+            self.assertTrue(self._wait_until(lambda: not self._alive(grandchild)), 'grandchild survived close')
+        finally:
+            runner.stop(wait=True)
 
 
 if __name__ == '__main__':

@@ -85,7 +85,7 @@ def run(config: dict[str,Any], baseline: Any, budget: int) -> dict[str,Any]:
                 raise ValueError('Pending input and recorded CFD row do not match.')
             if row['sample_phase']!=entry['arguments']['sample_phase']:
                 raise ValueError('Pending sample phase mismatch.')
-            if row['status'] not in ['success','failed']:raise ValueError('Unrecognized recorded CFD outcome.')
+            if row['status'] not in ['success','failed','review']:raise ValueError('Unrecognized recorded CFD outcome.')
             result=b.CaseResult(row.to_dict(),row['status']=='success')
         else:
             if used>=budget:break
@@ -121,10 +121,10 @@ def run(config: dict[str,Any], baseline: Any, budget: int) -> dict[str,Any]:
             r.write_diagnostics(config)
             r.update_local_search(config,entry['run_id'],metrics,result.success)
         b.write_pareto(config,b.load_training(config))
-        entry['status']='success' if result.success else 'failed'
+        entry['status']='success' if result.success else 'review' if result.row.get('status')=='review' else 'failed'
         entry['finalized']=True
         atomic_json(path_for(config),queue)
-        failures+=int(not result.success)
+        failures+=int(entry['status']=='failed')
         summary.append({'sample_phase':entry['arguments']['sample_phase'],'iteration':entry['arguments'].get('al_iteration',-1),
                         'batch_index':entry['arguments'].get('batch_index',''),'run_id':entry['run_id'],'status':entry['status']})
     return {'new_attempts':used,'failures':failures,'summary':summary}
