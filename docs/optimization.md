@@ -172,8 +172,8 @@ python blade_shape_active_learning.py run --config blade_shape_config.json --res
   python blade_shape_active_learning.py review --config blade_shape_config.json --run-id case_000123 --reject "出口回流持续扩大"
   ```
 
-  接受后该行变为 `status=success`，加上 `review_decision`、`review_reason`、`reviewed_at` 三列，`pareto_front*.csv` 当即重写，下一次运行起进入训练集（导出的 Pareto CSV 也带这三列，能看出哪些点是人工接受的）。否决后变为 `status=failed`、`failure_stage=review_rejected`。每个决定连同依据（`.out` 的文件指纹、超标方程、目标值）追加写入 `review_decisions.json`。理由必填。如果 `.out` / `.res` 在送审之后被改动过，程序拒绝做决定。决定之后不能再改；中途被打断时，再执行一次相同的决定即可补完，相反的决定会被拒绝。
-- **局部搜索**：送审点在计算当时按“没有改进”计入局部搜索的连续计数，事后接受不会回溯修改这个计数。
+  接受后该行变为 `status=success`，`message` 改写为审核结论和理由，加上 `review_decision`、`review_reason`、`reviewed_at` 三列，`pareto_front*.csv` 当即重写，下一次运行起进入训练集（导出的 Pareto CSV 也带这三列，能看出哪些点是人工接受的）。否决后变为 `status=failed`、`failure_stage=review_rejected`。每个决定连同依据（`.out` 的文件指纹、超标方程、目标值）追加写入 `review_decisions.json`。理由必填。如果 `.out` / `.res` 在送审之后被改动过，程序拒绝做决定。决定之后不能再改；中途被打断时，再执行一次相同的决定即可补完，相反的决定会被拒绝。
+- **局部搜索与诊断**：送审点在计算当时按“没有改进”计入局部搜索的连续计数；`active_learning_diagnostics.csv` / `boundary_diagnostics.csv` 中的 `hv_gain`、`delta_best_*`、`engineering_nondominated` 也是按非成功点算的。事后接受只把这两份诊断表的 `status` 改为 `success`，不回溯重算这些字段和计数。
 - **攻角验证**始终使用严格判据，不送审。
 
 相关设置在配置的 `cfx_review` 中，不属于物理签名（它不改变任何计算结果，只决定结果是否交给人判断），修改后已有记录照常使用，已经分好类的点也不会重新分类：
@@ -185,7 +185,7 @@ python blade_shape_active_learning.py run --config blade_shape_config.json --res
 }
 ```
 
-`rms_limit` 只能收紧（不超过 `1e-4`）；`max_equations_above_target` 设为 0 即关闭送审，恢复严格判据。
+`rms_limit` 只能收紧（不超过 `1e-4`）；`max_equations_above_target` 设为 0 即关闭送审，恢复严格判据。配置里没有 `cfx_review` 时按上面的默认值**启用**送审：沿用旧配置的输出目录会开始出现待审核结果，边界阶段也可能因此暂停。
 
 **续跑时的核对**：每个算例目录下有 `geometry_state.json` 和 `cfx_state.json`，记录了这个算例用的输入文件指纹和各阶段的完成情况。续跑时如果发现输入变了、或者某阶段没有完成记录，程序不会把残留文件当成成功，而是要求人工检查。CFX 的核数和安装目录不参与这项核对，只追加记录在 `cfx_state.json` 的 `environments` 中，换核数或把同一版本挪到别处后，已完成的阶段照常复用。换了 CFX 版本（版本号文件夹或 `cfx5solve.exe` 内容不同）则不复用，并且按物理输入变化处理。2026-10 之前写下的 `cfx_state.json` 没有记录版本，只在安装路径完全相同时复用。
 

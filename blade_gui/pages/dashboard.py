@@ -210,12 +210,6 @@ class DashboardPage(Page):
                 f"尚未在 {project.output_dir} 找到 training_data.csv。可在「运行控制」启动主动学习，"
                 "或在「项目设置」把数据目录指向已有结果。",
             )
-        elif summary is not None and summary.reviews:
-            self.message.set_level(
-                "warn",
-                f"{summary.reviews} 个结果略未达到 RMS 门槛，正等待人工审核；审核通过前不进训练集和 Pareto。"
-                "在「算例浏览」筛选「待审核」查看，或到「运行控制 → 审核送审点」处理。",
-            )
         elif other_inputs:
             self.message.set_level(
                 "warn",
@@ -230,6 +224,12 @@ class DashboardPage(Page):
                 "warn",
                 f"有 {unverified} 条训练记录无法核对物理输入（{reason}）。它们仍显示在结果中，"
                 "请在装有工程模板和 CFX 的机器上确认。",
+            )
+        elif summary is not None and summary.reviews:
+            self.message.set_level(
+                "warn",
+                f"{summary.reviews} 个结果略未达到 RMS 门槛，正等待人工审核；审核通过前不进训练集和 Pareto。"
+                "在「算例浏览」筛选「待审核」查看，或到「运行控制 → 审核送审点」处理。",
             )
         elif warnings:
             self.message.set_level(

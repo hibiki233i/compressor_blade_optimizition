@@ -109,6 +109,25 @@ class ReviewDecisionTests(unittest.TestCase):
         self.assertEqual((row.status, row.review_reason), ('success', 'first'))
         self.assertEqual(len(json.loads(review.decisions_path(self.c).read_text())['decisions']), 1)
 
+    def test_a_decision_interrupted_after_the_row_was_rewritten_can_be_finished(self):
+        diagnostics = b.diagnostics_csv_path(self.c)
+        pd.DataFrame([{'run_id': 'case_000004', 'status': 'review', 'pred_Efficiency': .8}]).to_csv(diagnostics, index=False)
+        with patch.object(b, 'write_pareto', side_effect=KeyboardInterrupt('interrupted')):
+            with self.assertRaises(KeyboardInterrupt):
+                review.decide(self.c, 'case_000004', 'accepted', 'flat P-Mass')
+        self.assertEqual(b.load_training(self.c).set_index('run_id').loc['case_000004'].status, 'success')
+        self.assertNotIn('case_000004', set(pd.read_csv(self.out / 'pareto_front.csv').run_id)
+                         if (self.out / 'pareto_front.csv').exists() else set())
+        with self.assertRaisesRegex(ValueError, 'not awaiting review'):
+            review.decide(self.c, 'case_000004', 'rejected', 'changed my mind')
+        review.decide(self.c, 'case_000004', 'accepted', 'repeat')
+        self.assertIn('case_000004', set(pd.read_csv(self.out / 'pareto_front.csv').run_id))
+        self.assertEqual(pd.read_csv(diagnostics).status.tolist(), ['success'])
+        row = b.load_training(self.c).set_index('run_id').loc['case_000004']
+        self.assertEqual(row.review_reason, 'flat P-Mass')
+        self.assertEqual(row.message, 'Manually accepted after review: flat P-Mass (RMS above 1e-05 on p-mass 1.3e-05)')
+        self.assertEqual(len(json.loads(review.decisions_path(self.c).read_text())['decisions']), 1)
+
     def test_cli_lists_and_decides(self):
         config_path = self.out / 'config.json'
         config_path.write_text(json.dumps(self.c))

@@ -215,6 +215,11 @@ class GuiRegressionTests(ProjectFixture):
         args = run._build_spec().args
         self.assertEqual(args[0], 'review')
         self.assertEqual(args[-4:], ['--run-id', 'case_000002', '--accept', 'P-Mass flat at 1.3e-5'])
+        # a case that is not awaiting review in the configured output dir clears the choice
+        run.request_review('case_999999')
+        self.assertEqual(run.review_run.currentIndex(), -1)
+        with self.assertRaisesRegex(ValueError, '请选择待审核的算例'):
+            run._build_spec()
 
     def test_runner_stop_does_not_block_the_event_loop(self):
         import sys
@@ -322,6 +327,56 @@ class GuiRegressionTests(ProjectFixture):
         runner.stop()
         self.assertTrue(self._wait_until(lambda: not runner.running))
         self.assertTrue(self._wait_until(lambda: not self._alive(pid)), 'orphaned leaf survived Stop')
+
+    def test_a_cli_that_exits_by_itself_reports_processes_it_left_running(self):
+        import signal
+        import sys
+        from blade_gui.runner import CommandRunner
+
+        runner = CommandRunner(Path.cwd())
+        lines = []
+        runner.line.connect(lambda _channel, text: lines.append(text))
+        runner.start([sys.executable, '-c',
+                      'import subprocess,sys,time; g = subprocess.Popen([sys.executable, "-c", "import time; '
+                      'time.sleep(60)"]); print("grandchild", g.pid, flush=True); time.sleep(1.5)'])
+        self.assertTrue(self._wait_until(lambda: any(line.startswith('grandchild') for line in lines)))
+        pid = int(next(line for line in lines if line.startswith('grandchild')).split()[1])
+        try:
+            runner._track()  # what the periodic tracker does while the CLI runs
+            self.assertTrue(self._wait_until(lambda: not runner.running))
+            warning = [line for line in lines if '命令已结束' in line]
+            self.assertEqual(len(warning), 1)
+            self.assertIn(f'PID={pid}', warning[0])
+        finally:
+            os.kill(pid, signal.SIGTERM)
+
+    def test_a_stale_parent_pid_does_not_adopt_unrelated_processes(self):
+        # On Windows a process keeps the PID of a parent that exited long ago; once
+        # that PID is reused by this run's CLI, the old process must not look like a child.
+        import sys
+        import blade_gui.runner as runner_module
+        from blade_gui.runner import CommandRunner
+
+        runner = CommandRunner(Path.cwd())
+        runner.start([sys.executable, '-c', 'import time; time.sleep(60)'])
+        self.assertTrue(self._wait_until(lambda: runner.running))
+        root, started = runner._root_pid, runner._started_at
+
+        class Fake:
+            def __init__(self, pid, ppid, created, name):
+                self.pid, self.info = pid, {'ppid': ppid, 'create_time': created, 'name': name}
+
+        table = [Fake(root, 1, started + .1, 'python.exe'),
+                 Fake(900001, root, started - 86400, 'explorer.exe'),   # parent died a day ago
+                 Fake(900002, 900001, started + 1, 'notepad.exe'),     # started from that one
+                 Fake(900003, root, started + .5, 'cfx5solve.exe'),    # this run's child
+                 Fake(900004, 900003, started + .6, 'solver-mpi.exe')]
+        with patch.object(runner_module.psutil, 'process_iter', return_value=table):
+            runner._track()
+        self.assertEqual(sorted(pid for pid, _ in runner._known), sorted([root, 900003, 900004]))
+        runner._known = {}  # the fakes must not be signalled
+        runner.stop()
+        self.assertTrue(self._wait_until(lambda: not runner.running))
 
     def test_stop_ends_cfx_processes_outside_the_tree_only_in_the_run_directory(self):
         import sys

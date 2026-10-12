@@ -80,7 +80,7 @@ class ReviewClassificationTests(unittest.TestCase):
 
     def test_real_near_converged_table_is_offered_for_review_with_its_backflow(self):
         report = assess_out(NEAR_CONVERGED_ITERATION, ConvergencePolicy())
-        self.assertFalse(report['converged'])
+        self.assertFalse(report['converged']);self.assertTrue(report['iteration_limit_reached'])
         # Wallscale at exactly 1.0E-05 meets the target; only P-Mass is above it.
         self.assertEqual(review_evidence(report, ConvergencePolicy(), ReviewPolicy())['equations_above_target'],
                          {'p-mass': 1.3e-05})
@@ -194,6 +194,27 @@ class PipelineConvergenceTests(unittest.TestCase):
         self.assertTrue(again.review);self.assertEqual(again.metrics,result.metrics)
         (self.root/'Impeller_002.out').write_text('changed')
         self.assertFalse(cfx.run_cfx_pipeline(self.root,'case_0',review=ReviewPolicy(),**self.kw).review)
+
+    def test_real_near_converged_restart_goes_through_the_pipeline_to_review(self):
+        result,calls=self.run_case([('x',True),('x',True)],exhausted_output=lambda r,i,e:NEAR_CONVERGED_ITERATION,
+                                  initial_iteration=2000,review=ReviewPolicy())
+        self.assertTrue(result.review,result.message)
+        self.assertIn('p-mass 1.3e-05',result.message)
+        self.assertEqual(sum(Path(c[0]).name=='cfx5post.exe' for c in calls),1)
+        state=json.loads((self.root/'cfx_state.json').read_text())
+        self.assertEqual(state['stages']['solve']['convergence']['wall_notices'][1]['faces_percent'],15.8)
+
+    def test_restart_stopped_early_is_not_blamed_on_an_accumulated_limit(self):
+        def early(rms,iteration,exhausted):
+            # limit wording, one count only (1804, no accumulated count in parentheses), below the limit
+            return outer_iteration_limit_output('2.0E-06',iteration).replace(
+                '| P - Mass             | 0.90 | 2.0E-06 |','| P - Mass             | 0.90 | 1.3E-05 |').replace(
+                'OUTER LOOP ITERATION = ','OUTER LOOP ITERATION =  ')
+        result,_=self.run_case([('x',True),('x',True)],exhausted_output=early,initial_iteration=2000,
+                               restart_iteration=1804,review=ReviewPolicy())
+        self.assertFalse(result.review)
+        self.assertNotIn('continued history',result.message)
+        self.assertIn('stopped after 1804 of its 2000 iterations',result.message)
 
     def test_without_a_review_policy_a_close_restart_is_still_discarded(self):
         result,calls=self.run_case([('1.3E-05',True),('1.3E-05',True)],exhausted_output=p_mass_output,

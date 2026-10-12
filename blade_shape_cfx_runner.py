@@ -371,9 +371,13 @@ def _run_cfx_pipeline(
                 stages['solve'].update(status='review', exit_code=0, review=reviewable, **evidence)
                 atomic_json(receipt, state)
                 break
+            limit = report['declared_iteration_limit']
             if not attempt:
                 reason = 'not a normal iteration-limit stop'
-            elif report['iteration_limit_stop'] and not report['iteration_limit_reached']:
+            elif report['iteration_limit_reached']:
+                reason = 'extra iteration budget exhausted'
+            elif (report['iteration_limit_stop'] and limit is not None
+                  and report['iteration'] >= limit > report['run_iteration']):
                 # The CFX documentation does not say whether the limit counts the
                 # continued history. A converged run is accepted either way; an
                 # unconverged one must not read as an exhausted budget.
@@ -382,7 +386,8 @@ def _run_cfx_pipeline(
                           "Maximum Number of Iterations over the continued history, so the restart "
                           "budget was not applied")
             else:
-                reason = 'extra iteration budget exhausted'
+                reason = (f"continued run stopped after {report['run_iteration']} of its "
+                          f"{convergence.restart_iterations} iterations without a normal iteration-limit stop")
             message = f"RMS {report['max_rms']:.6g} exceeds {convergence.rms_target:.6g}; {reason}; point discarded"
             stages['solve'].update(status='failed', message=message, **evidence)
             atomic_json(receipt, state)

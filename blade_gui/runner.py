@@ -27,6 +27,9 @@ CFX_PROCESS_NAMES = frozenset({"solver-mpi.exe", "solver.exe", "cfx5solve.exe", 
 STOP_GRACE_MS = 2500
 #: How often the processes a run has started are recorded while it runs.
 TRACK_INTERVAL_MS = 5000
+#: Tolerance between psutil start times and the GUI clock (Linux derives start
+#: times from a boot time truncated to whole seconds).
+CLOCK_SLACK_S = 1.0
 
 
 class CommandRunner(QObject):
@@ -46,6 +49,7 @@ class CommandRunner(QObject):
         self._command: list[str] = []
         self._scope: list[Path] = []
         self._started_at = 0.0
+        self._root_pid = 0
         self._stopping = False
         # (pid, start time) -> process: identities outlive the parent links
         self._known: dict[tuple[int, float], psutil.Process] = {}
@@ -105,6 +109,7 @@ class CommandRunner(QObject):
         self._process = process
         self.started.emit(self._command)
         process.start()
+        self._root_pid = int(process.processId())
         self._tracker.start()
         return True
 
@@ -124,7 +129,7 @@ class CommandRunner(QObject):
             return
         self._stopping = True
         self._track()
-        root = int(process.processId())
+        root = self._root_pid
         targets = sorted(self._known.values(), key=lambda proc: proc.pid == root)  # the CLI last
         names = Counter(_name(proc) for proc in targets)
         self.line.emit("out", "[GUI] 停止：结束本次运行启动的 {} 个进程（{}）".format(
@@ -132,36 +137,38 @@ class CommandRunner(QObject):
         # terminate() is TerminateProcess on Windows; console programs ignore
         # QProcess.terminate() there, which only posts WM_CLOSE.
         self._signal(targets, kill=False)
+        # Never wait on the CLI through psutil: reaping it would hide its exit from QProcess.
+        others = [proc for proc in targets if proc.pid != root]
         if wait:
-            # Never wait on the CLI through psutil: reaping it would hide its
-            # exit from QProcess.
-            others = [proc for proc in targets if proc.pid != root]
             psutil.wait_procs(others, timeout=STOP_GRACE_MS / 1000)
             if not process.waitForFinished(STOP_GRACE_MS):
                 process.kill()
                 process.waitForFinished(STOP_GRACE_MS)
-            self._finish_stop(targets, root)
+            self._signal(others, kill=True)
+            psutil.wait_procs(others, timeout=1)
+            self._report_survivors(others)
         else:
-            QTimer.singleShot(STOP_GRACE_MS, lambda: self._kill_if_running(process, targets, root))
+            QTimer.singleShot(STOP_GRACE_MS, lambda: self._kill_if_running(process, others))
 
-    def _kill_if_running(self, process: QProcess, targets: list[psutil.Process], root: int) -> None:
+    def _kill_if_running(self, process: QProcess, others: list[psutil.Process]) -> None:
+        """Kill what outlived the grace period; report a second later, without blocking."""
         try:
             if process.state() != QProcess.NotRunning:
                 process.kill()
-            self._finish_stop(targets, root)
+            self._signal(others, kill=True)
+            QTimer.singleShot(1000, lambda: self._report_survivors(others))
         except RuntimeError:  # the runner or QProcess was already deleted
             pass
 
-    def _finish_stop(self, targets: list[psutil.Process], root: int) -> None:
-        """Kill what outlived the grace period and say whether anything survived."""
-        others = [proc for proc in targets if proc.pid != root]
-        self._signal(others, kill=True)
-        _, alive = psutil.wait_procs(others, timeout=1)
-        if alive:
-            self.line.emit("out", "[GUI] 仍未结束的进程：" + "，".join(
-                f"{_name(proc)} PID={proc.pid}" for proc in alive) + "。请在任务管理器中结束后再续跑。")
-        else:
-            self.line.emit("out", "[GUI] 本次运行启动的进程已全部结束。")
+    def _report_survivors(self, others: list[psutil.Process]) -> None:
+        try:
+            alive = [proc for proc in others if _alive(proc)]
+            if alive:
+                self.line.emit("out", "[GUI] 仍未结束的进程：" + _listing(alive) + "。请在任务管理器中结束后再续跑。")
+            else:
+                self.line.emit("out", "[GUI] 本次运行启动的进程已全部结束。")
+        except RuntimeError:  # the runner was already deleted
+            pass
 
     def _signal(self, targets: list[psutil.Process], *, kill: bool) -> None:
         for proc in targets:
@@ -177,30 +184,37 @@ class CommandRunner(QObject):
         """Record the processes this run has started while the parent links show them.
 
         A process stays recorded after its parent exits, and psutil refuses to
-        signal a PID that has been reused since. CFX processes outside the tree
-        are picked up by name inside the run's directories.
+        signal a PID that has been reused since. A parent link only counts for a
+        process started after the run and not before its parent: on Windows a
+        process keeps the PID of a parent that exited long ago, and that PID may
+        since belong to this run. CFX processes outside the tree are picked up
+        by name inside the run's directories.
         """
-        process = self._process
-        if process is None or process.state() == QProcess.NotRunning:
+        if self._process is None or not self._root_pid:
             return
+        since = self._started_at - CLOCK_SLACK_S
         table = {proc.pid: proc for proc in psutil.process_iter(["ppid", "name", "create_time"])}
-        pairs = [(pid, proc.info["ppid"]) for pid, proc in table.items() if proc.info["ppid"] is not None]
-        self._known = {(pid, created): proc for (pid, created), proc in self._known.items()
-                       if pid in table and table[pid].info["create_time"] == created}
-        roots = {int(process.processId())} | {pid for pid, _ in self._known}
-        roots |= {pid for pid, proc in table.items() if self._is_scoped_cfx(proc)}
+        created = {pid: proc.info["create_time"] for pid, proc in table.items()}
+        pairs = [(pid, proc.info["ppid"]) for pid, proc in table.items()
+                 if proc.info["ppid"] in table and created[pid] is not None and created[pid] >= since
+                 and created[pid] >= (created[proc.info["ppid"]] or 0)]
+        self._known = {(pid, start): proc for (pid, start), proc in self._known.items()
+                       if pid in table and created[pid] == start}
+        roots = {pid for pid, _ in self._known}
+        if self._root_pid in table and (created[self._root_pid] or 0) >= since:
+            roots.add(self._root_pid)
+        roots |= {pid for pid, proc in table.items() if self._is_scoped_cfx(proc, since)}
         found = set(roots)
         for pid in roots:
             found.update(descendants(pid, pairs))
         for pid in found:
-            proc = table.get(pid)
-            if proc is not None and proc.info["create_time"] is not None:
-                self._known[(pid, proc.info["create_time"])] = proc
+            if created[pid] is not None:
+                self._known[(pid, created[pid])] = table[pid]
 
-    def _is_scoped_cfx(self, proc: psutil.Process) -> bool:
+    def _is_scoped_cfx(self, proc: psutil.Process, since: float) -> bool:
         if not self._scope or _name(proc).lower() not in CFX_PROCESS_NAMES:
             return False
-        if (proc.info["create_time"] or 0) < self._started_at:
+        if (proc.info["create_time"] or 0) < since:
             return False
         try:
             directory = os.path.normcase(os.path.realpath(proc.cwd()))
@@ -236,6 +250,14 @@ class CommandRunner(QObject):
     def _on_finished(self, exit_code: int, status) -> None:
         self._tracker.stop()
         self._flush()
+        if not self._stopping:
+            # The CLI ended by itself (possibly crashed): Stop is no longer
+            # available, so say if anything it started is still running.
+            self._track()
+            alive = [proc for proc in self._known.values() if proc.pid != self._root_pid and _alive(proc)]
+            if alive:
+                self.line.emit("out", "[GUI] 命令已结束，但它启动的进程仍在运行：" + _listing(alive)
+                               + "。请确认后在任务管理器中结束，再续跑。")
         reason = "normal"
         if self._stopping:
             reason = "stopped"
@@ -248,6 +270,7 @@ class CommandRunner(QObject):
 
     def _on_error(self, error) -> None:
         if error == QProcess.FailedToStart:
+            self._tracker.stop()
             self.failed.emit(f"无法启动进程：{self._command[0] if self._command else ''}")
             self._process = None
 
@@ -275,6 +298,17 @@ def descendants(root: int, pairs: list[tuple[int, int]]) -> list[int]:
 
 def _name(proc: psutil.Process) -> str:
     return (getattr(proc, "info", {}) or {}).get("name") or "?"
+
+
+def _alive(proc: psutil.Process) -> bool:
+    try:
+        return proc.is_running() and proc.status() != psutil.STATUS_ZOMBIE
+    except psutil.Error:
+        return False
+
+
+def _listing(processes: list[psutil.Process]) -> str:
+    return "，".join(f"{_name(proc)} PID={proc.pid}" for proc in processes)
 
 
 # --------------------------------------------------------------------------

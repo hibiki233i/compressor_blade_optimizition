@@ -356,7 +356,12 @@ class RunPage(Page):
         """Open the review action on ``run_id`` (from the case browser)."""
         self._sync_review_runs()
         self.action_box.setCurrentIndex(self.action_box.findData("review"))
-        self.review_run.setCurrentText(run_id)
+        # -1 clears the choice: never leave another case selected in its place
+        index = self.review_run.findText(run_id)
+        self.review_run.setCurrentIndex(index)
+        if index < 0:
+            self.ctx.report(f"{run_id} 不在配置的输出目录 {self._configured_project().output_dir} 的待审核列表中"
+                            "（可能正在用「设置数据目录」查看别的目录）；审核只作用于配置的输出目录。")
         self.review_reason.setFocus()
 
     @staticmethod
@@ -606,6 +611,8 @@ class RunPage(Page):
         if action == "review":
             if not self.review_run.count():
                 self.guard.set_level("info", "当前没有待审核的结果。")
+            elif self.review_decision.currentData() and self.review_run.currentIndex() < 0:
+                self.guard.set_level("warn", "请选择待审核的算例。")
             elif self.review_decision.currentData() and not self.review_reason.text().strip():
                 self.guard.set_level("warn", "请填写审核理由；它会和决定一起写入 review_decisions.json。")
             elif self.review_decision.currentData():

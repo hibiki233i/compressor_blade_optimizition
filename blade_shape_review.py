@@ -69,41 +69,42 @@ def decide(config: dict[str, Any], run_id: str, decision: str, reason: str) -> d
             raise ValueError(f'{run_id}: expected one training row, found {len(rows)}.')
         index = rows[0]
         status = str(frame.at[index, 'status'])
-        if status != 'review':
-            raise ValueError(f'{run_id} is not awaiting review (status={status}).')
         case, solve = _solve_state(config, run_id)
-        if solve.get('status') != 'review' or not solve.get('review'):
-            raise ValueError(f'{case / "cfx_state.json"} does not record {run_id} as awaiting review; inspect it.')
-        if (file_identity(case / solve['out_file']) != solve.get('out_identity')
-                or file_identity(case / solve['result_file']) != solve.get('result_identity')):
-            raise ValueError(f'{run_id}: the .out/.res no longer match the recorded solve; '
-                             'a decision cannot be based on changed evidence.')
-
         registry_path = decisions_path(config)
         registry = json.loads(registry_path.read_text()) if registry_path.exists() else {'decisions': []}
-        # A decision recorded before an interruption is applied, never contradicted.
         earlier = [d for d in registry['decisions']
-                   if d['run_id'] == run_id and d['out_identity'] == solve['out_identity']]
-        if earlier and earlier[-1]['decision'] != decision:
-            raise ValueError(f"{run_id} was already {earlier[-1]['decision']} at {earlier[-1]['decided_at']} "
-                             f"({earlier[-1]['reason']}); that decision stands.")
-        if earlier:
+                   if d['run_id'] == run_id and d['out_identity'] == solve.get('out_identity')]
+        if status != 'review':
+            # Interrupted after the training row was rewritten: only the same
+            # decision may finish what is left.
+            if not earlier or earlier[-1]['decision'] != decision or OUTCOME[decision][0] != status:
+                raise ValueError(f'{run_id} is not awaiting review (status={status}).')
             record = earlier[-1]
         else:
-            record = {'run_id': run_id, 'decision': decision, 'reason': reason.strip(),
-                      'decided_at': datetime.now(timezone.utc).isoformat(timespec='seconds'),
-                      'objectives': {o: float(frame.at[index, o]) for o in b.OBJECTIVE_COLUMNS},
-                      signatures.COLUMN: str(frame.at[index, signatures.COLUMN])
-                      if signatures.COLUMN in frame else None,
-                      'out_file': solve['out_file'], 'out_identity': solve['out_identity'],
-                      'review': solve['review']}
-            registry['decisions'].append(record)
-            atomic_json(registry_path, registry)
+            if solve.get('status') != 'review' or not solve.get('review'):
+                raise ValueError(f'{case / "cfx_state.json"} does not record {run_id} as awaiting review; inspect it.')
+            if (file_identity(case / solve['out_file']) != solve.get('out_identity')
+                    or file_identity(case / solve['result_file']) != solve.get('result_identity')):
+                raise ValueError(f'{run_id}: the .out/.res no longer match the recorded solve; '
+                                 'a decision cannot be based on changed evidence.')
+            # A decision recorded before an interruption is applied, never contradicted.
+            if earlier and earlier[-1]['decision'] != decision:
+                raise ValueError(f"{run_id} was already {earlier[-1]['decision']} at {earlier[-1]['decided_at']} "
+                                 f"({earlier[-1]['reason']}); that decision stands.")
+            if earlier:
+                record = earlier[-1]
+            else:
+                record = {'run_id': run_id, 'decision': decision, 'reason': reason.strip(),
+                          'decided_at': datetime.now(timezone.utc).isoformat(timespec='seconds'),
+                          'objectives': {o: float(frame.at[index, o]) for o in b.OBJECTIVE_COLUMNS},
+                          signatures.COLUMN: str(frame.at[index, signatures.COLUMN])
+                          if signatures.COLUMN in frame else None,
+                          'out_file': solve['out_file'], 'out_identity': solve['out_identity'],
+                          'review': solve['review']}
+                registry['decisions'].append(record)
+                atomic_json(registry_path, registry)
 
         new_status, failure_stage = OUTCOME[record['decision']]
-        values = {'status': new_status, 'failure_stage': failure_stage, 'review_decision': record['decision'],
-                  'review_reason': record['reason'], 'reviewed_at': record['decided_at']}
-        _set(path, run_id, values)
         for other in (b.diagnostics_csv_path(config), b.output_dir(config) / 'boundary_diagnostics.csv'):
             _set(other, run_id, {'status': new_status}, only_existing=True)
         queue = pending.load(config)
@@ -112,8 +113,20 @@ def decide(config: dict[str, Any], run_id: str, decision: str, reason: str) -> d
             entry['status'] = new_status
         if entries:
             atomic_json(pending.path_for(config), queue)
+        # The training row goes last but one: while it still says review, the
+        # first branch above is not needed to finish an interrupted decision.
+        _set(path, run_id, {'status': new_status, 'failure_stage': failure_stage, 'message': _message(record),
+                            'review_decision': record['decision'], 'review_reason': record['reason'],
+                            'reviewed_at': record['decided_at']})
         b.write_pareto(config, b.load_training(config))
     return record
+
+
+def _message(record: dict[str, Any]) -> str:
+    review = record.get('review') or {}
+    above = ', '.join(f'{name} {value:.2g}' for name, value in sorted(review.get('equations_above_target', {}).items()))
+    detail = f" (RMS above {review['rms_target']:g} on {above})" if above else ''
+    return f"Manually {record['decision']} after review: {record['reason']}{detail}"
 
 
 def _set(path: Path, run_id: str, values: dict[str, Any], *, only_existing: bool = False) -> None:

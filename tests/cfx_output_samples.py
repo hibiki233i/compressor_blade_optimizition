@@ -134,11 +134,14 @@ def real_output(turbfreq='2.2E-05'):
     return REAL_FINAL_ITERATION.replace('| 1.02 | 2.2E-05 |', f'| 1.02 | {turbfreq} |') + REAL_RUN_TAIL
 
 
-#: Final iteration of a real run (2026-10-12): every equation but P-Mass meets
-#: 1e-5; P-Mass has stalled at 1.3E-05 with walled-off inlet and outlet faces.
+#: Residual table of a real run (2026-10-12, an iteration near the end; later
+#: ones looked the same): every equation but P-Mass meets 1e-5, P-Mass has
+#: stalled at 1.3E-05, inlet and outlet faces are walled off. The iteration
+#: number and the termination summary are those of a run that used its 2000
+#: iterations, the only kind that is offered for review.
 NEAR_CONVERGED_ITERATION = """ Maximum Number of Iterations = 2000
  ======================================================================
- OUTER LOOP ITERATION = 1804                    CPU SECONDS = 8.376E+04
+ OUTER LOOP ITERATION = 2000                    CPU SECONDS = 8.376E+04
  ----------------------------------------------------------------------
  |       Equation       | Rate | RMS Res | Max Res |  Linear Solution |
  +----------------------+------+---------+---------+------------------+
