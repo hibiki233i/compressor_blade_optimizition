@@ -14,7 +14,7 @@ from pathlib import Path
 
 from blade_shape_runtime import atomic_json, digest, file_identity, output_lock
 from blade_shape_signature import solver_identity
-from blade_shape_convergence import ConvergencePolicy, assess_out, convergence_ccl
+from blade_shape_convergence import ConvergencePolicy, ReviewPolicy, assess_out, convergence_ccl, review_evidence
 
 
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
@@ -54,6 +54,8 @@ class CfxResult:
     metrics: dict[str, float]
     message: str
     failure_stage: str = ""
+    #: Post ran and ``metrics`` are real, but the residuals need a person's decision.
+    review: bool = False
 
 
 def _as_posix(path: str | Path) -> str:
@@ -156,23 +158,41 @@ def run_cfx_pipeline(
     cfx_bin_dir: str | Path, template_cfx: str | Path, template_cse: str | Path,
     cores: int = 8, n_blades: int = 10,
     convergence: ConvergencePolicy | None = None,
+    review: ReviewPolicy | None = None,
 ) -> CfxResult:
+    """``review`` None keeps the strict criterion: nothing is offered for review."""
     with output_lock(working_dir):
         return _run_cfx_pipeline(working_dir, run_id, p_out_pa=p_out_pa,
                                  cfx_bin_dir=cfx_bin_dir, template_cfx=template_cfx,
                                  template_cse=template_cse, cores=cores, n_blades=n_blades,
-                                 convergence=convergence or ConvergencePolicy())
+                                 convergence=convergence or ConvergencePolicy(),
+                                 review=review or ReviewPolicy(max_equations_above_target=0))
+
+
+def _review_message(solve: dict) -> str:
+    review = solve['review']
+    above = ', '.join(f'{name} {value:.2g}' for name, value in sorted(review['equations_above_target'].items()))
+    return (f"Awaiting manual review: RMS above {review['rms_target']:g} on {above} "
+            f"(each within {review['rms_limit']:g}); not a training label until accepted")
+
+
+def _outcome(solve: dict, metrics: dict[str, float], message: str) -> CfxResult:
+    if solve.get('status') == 'review':
+        return CfxResult(False, metrics, _review_message(solve), 'review', review=True)
+    return CfxResult(True, metrics, message)
 
 
 def _run_cfx_pipeline(
     working_dir: str | Path, run_id: str, *, p_out_pa: float,
     cfx_bin_dir: str | Path, template_cfx: str | Path, template_cse: str | Path,
-    cores: int, n_blades: int, convergence: ConvergencePolicy,
+    cores: int, n_blades: int, convergence: ConvergencePolicy, review: ReviewPolicy,
 ) -> CfxResult:
     """Accept only results linked to a recorded, successful Solve and matching inputs.
 
     Final RMS acceptance is mandatory; conservation and mesh checks remain separate.
-    Only a normally exhausted first solve may receive one bounded continuation.
+    Only a normally exhausted first solve may receive one bounded continuation. A
+    continuation that exhausts its budget close to the target (``review``) is
+    post-processed and handed to a person instead of being discarded.
     """
     work = Path(working_dir)
     mesh, definition = work / 'Impeller_Mesh.gtm', work / 'Impeller.def'
@@ -211,7 +231,7 @@ def _run_cfx_pipeline(
     solve = stages.get('solve', {})
     if solve.get('status') in {'running', 'failed', 'needs_restart'}:
         return CfxResult(False, {}, 'Previous Solve is incomplete or failed; its .res is not an accepted final result. Inspect the case before a new attempt.', 'solve')
-    if solve.get('status') == 'complete':
+    if solve.get('status') in {'complete', 'review'}:
         res_file = work / solve['result_file']
         if solve.get('exit_code') != 0 or file_identity(res_file) != solve.get('result_identity'):
             return CfxResult(False, {}, 'Completed Solve result is missing or changed.', 'solve')
@@ -224,17 +244,23 @@ def _run_cfx_pipeline(
         if not controls_valid:
             return CfxResult(False, {}, 'Recorded solver definition/controls changed.', 'solve')
         out_file = work / solve.get('out_file', '')
-        if not solve.get('convergence', {}).get('converged') or not out_file.is_file() or file_identity(out_file) != solve.get('out_identity'):
+        if solve['status'] == 'review':
+            # The classification recorded at solve time stands; a later policy change does not redo it.
+            accepted = bool(solve.get('review'))
+        else:
+            accepted = bool(solve.get('convergence', {}).get('converged'))
+        if not accepted or not out_file.is_file() or file_identity(out_file) != solve.get('out_identity'):
             return CfxResult(False, {}, 'Final RMS acceptance evidence is missing or changed.', 'solve')
-        try:
-            if not assess_out(out_file.read_text(encoding='utf-8', errors='replace'), convergence)['converged']:
-                return CfxResult(False, {}, 'Final RMS criterion is not satisfied.', 'solve')
-        except ValueError as exc:
-            return CfxResult(False, {}, str(exc), 'solve')
+        if solve['status'] == 'complete':
+            try:
+                if not assess_out(out_file.read_text(encoding='utf-8', errors='replace'), convergence)['converged']:
+                    return CfxResult(False, {}, 'Final RMS criterion is not satisfied.', 'solve')
+            except ValueError as exc:
+                return CfxResult(False, {}, str(exc), 'solve')
         post = stages.get('post', {})
         if post.get('status') == 'complete' and file_identity(output) == post.get('result_identity'):
             try:
-                return CfxResult(True, _parse_results(output, n_blades), 'Recovered verified completed CFD result')
+                return _outcome(solve, _parse_results(output, n_blades), 'Recovered verified completed CFD result')
             except (ValueError, OSError) as exc:
                 return CfxResult(False, {}, f'Cannot parse verified post result: {exc}', 'post')
     else:
@@ -295,14 +321,16 @@ def _run_cfx_pipeline(
                        '-ccl', str(work/'update_bc.ccl'), '-ccl', str(controls),
                        '-double', '-par-local', '-part', str(cores), '-batch']
             if previous_result is not None:
-                # Reset the counter while reusing the last flow field. This makes
-                # the extra iteration budget independent of accumulated history.
+                # Continue the run history, not just the flow field: expressions
+                # ramped on the accumulated iteration (aitern), such as the tip
+                # slip correction, must not start their ramp again. The budget is
+                # counted on this run's iterations, the number in parentheses.
                 controls = work / 'restart_convergence.ccl'
                 controls.write_text(convergence_ccl(convergence, restart=True), encoding='utf-8')
                 command[command.index(str(work/'convergence.ccl'))] = str(controls)
-                command += ['-initial-file', str(previous_result)]
+                command += ['-continue-from-file', str(previous_result)]
                 state['restart'] = {'iterations': convergence.restart_iterations,
-                                    'method': 'initial_file_reset_counter',
+                                    'method': 'continue_from_file',
                                     'source': previous_result.name,
                                     'source_identity': file_identity(previous_result),
                                     'ccl_identity': file_identity(controls)}
@@ -338,9 +366,29 @@ def _run_cfx_pipeline(
                 atomic_json(receipt, state)
                 previous_result = res_file
                 continue
-            message = (f"RMS {report['max_rms']:.6g} exceeds {convergence.rms_target:.6g}; "
-                       + ('extra iteration budget exhausted; point discarded' if attempt else
-                          'not a normal iteration-limit stop; point discarded'))
+            reviewable = review_evidence(report, convergence, review) if report['iteration_limit_reached'] else None
+            if attempt and reviewable is not None:
+                stages['solve'].update(status='review', exit_code=0, review=reviewable, **evidence)
+                atomic_json(receipt, state)
+                break
+            limit = report['declared_iteration_limit']
+            if not attempt:
+                reason = 'not a normal iteration-limit stop'
+            elif report['iteration_limit_reached']:
+                reason = 'extra iteration budget exhausted'
+            elif (report['iteration_limit_stop'] and limit is not None
+                  and report['iteration'] >= limit > report['run_iteration']):
+                # The CFX documentation does not say whether the limit counts the
+                # continued history. A converged run is accepted either way; an
+                # unconverged one must not read as an exhausted budget.
+                reason = (f"continued run stopped at its iteration limit after {report['run_iteration']} "
+                          f"iterations of this run (accumulated {report['iteration']}): CFX counted "
+                          "Maximum Number of Iterations over the continued history, so the restart "
+                          "budget was not applied")
+            else:
+                reason = (f"continued run stopped after {report['run_iteration']} of its "
+                          f"{convergence.restart_iterations} iterations without a normal iteration-limit stop")
+            message = f"RMS {report['max_rms']:.6g} exceeds {convergence.rms_target:.6g}; {reason}; point discarded"
             stages['solve'].update(status='failed', message=message, **evidence)
             atomic_json(receipt, state)
             return CfxResult(False, {}, message, 'solve')
@@ -358,7 +406,7 @@ def _run_cfx_pipeline(
         return CfxResult(False, {}, f'CFX result parsing failed: {exc}', 'post')
     stages['post'].update(status='complete', result_identity=file_identity(output))
     atomic_json(receipt, state)
-    return CfxResult(True, metrics, 'Success (final RMS accepted; recorded Pre/Solve/Post completion)')
+    return _outcome(stages['solve'], metrics, 'Success (final RMS accepted; recorded Pre/Solve/Post completion)')
 
 
 # runtime.rpm / mass_flow / alpha0 are declared operating-point metadata: they

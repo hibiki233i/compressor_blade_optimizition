@@ -2,5 +2,7 @@
 #
 # The optimizer itself needs only NumPy/Pandas plus optional SciPy/scikit-learn.
 # The GUI adds Qt (PySide6 6.11 ships a cp310-abi3 wheel, so it installs on
-# Python 3.10+ including 3.14).
+# Python 3.10+ including 3.14). psutil lets Stop end the CFX solver processes
+# a run started, including MPI workers outside the CLI's process tree.
 PySide6>=6.6
+psutil>=5.9

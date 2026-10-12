@@ -17,6 +17,9 @@ ENTRY_SCRIPT = "blade_shape_active_learning.py"
 CFX_SCRIPT = "blade_shape_cfx_runner.py"
 
 BOUNDARY_STAGES = ["singles", "pairs", "extension"]
+REVIEW_DECISIONS = ("accept", "reject")
+#: Exit status of a boundary stage paused for manual review (blade_shape_active_learning.REVIEW_EXIT).
+REVIEW_EXIT = 3
 
 
 def format_command(argv: list[str], *, windows: bool | None = None) -> str:
@@ -150,6 +153,23 @@ def build_run_boundary(
         args.append("--resume")
     args += _accept_args(accept_input_change)
     return CommandSpec("run-boundary", args, f"运行边界阶段：{stage}")
+
+
+def build_review(config_path: str | Path, *, run_id: str = "", decision: str = "",
+                 reason: str = "") -> CommandSpec:
+    """List results awaiting review, or accept/reject one (a reason is required)."""
+    args = ["review", *_config_args(config_path)]
+    if not decision:
+        return CommandSpec("review", args, "列出待人工审核的结果")
+    if decision not in REVIEW_DECISIONS:
+        raise ValueError(f"未知审核决定：{decision}")
+    run_id, reason = (run_id or "").strip(), (reason or "").strip()
+    if not run_id:
+        raise ValueError("请选择待审核的算例")
+    if not reason:
+        raise ValueError("请填写审核理由")
+    args += ["--run-id", run_id, f"--{decision}", reason]
+    return CommandSpec("review", args, ("接受" if decision == "accept" else "否决") + f"送审结果 {run_id}")
 
 
 def build_check_pre(config_path: str | Path, *, working_dir: str | Path,

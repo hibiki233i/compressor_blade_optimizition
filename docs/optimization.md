@@ -131,7 +131,7 @@ python blade_shape_active_learning.py run --config blade_shape_config.json --res
 
 **几何脚本版本**：程序在开始任何算例前，会检查 `paths.geometry_script_path` 指向的 PowerShell 脚本是否声明了 `BladeCount` 参数。如果是旧版本的脚本副本，会直接报错停止，请换成仓库里的新版本。脚本内容属于物理签名，换脚本后已有记录会按上一段的方式停下等你确认。
 
-**不要删除 `.optimizer.lock`**。它防止两个进程同时写同一个输出目录或算例。进程退出后锁会自动释放，锁文件本身留在原地是正常的。中断后先确认没有残留的 CFX 求解进程（父进程停了，求解器可能还在跑），再续跑。
+**不要删除 `.optimizer.lock`**。它防止两个进程同时写同一个输出目录或算例。进程退出后锁会自动释放，锁文件本身留在原地是正常的。界面的「停止」会连同 CFX 求解进程一起结束；在终端里中断、或入口进程异常退出时，先确认没有残留的 CFX 求解进程（父进程停了，求解器可能还在跑），再续跑。
 
 **旧的残留算例**：如果 `cases/` 里有目录没在任何记录里登记过，程序会在挑新点之前列出来。这些目录不会被当成成功结果导入，需要人工查看，必要时用新算例重算。
 
@@ -140,8 +140,9 @@ python blade_shape_active_learning.py run --config blade_shape_config.json --res
 求解器正常退出、生成了 `.res` 文件，**还不算成功**。程序要求：
 
 1. 读取 `.out` 文件中**最后一步**的 RMS 残差，动量（U/V/W-Mom）、质量（P-Mass）、能量（H-Energy）方程都要达到 `1e-5`，或配置的更严格的值。湍流方程（K-TurbKE、O-TurbFreq）只记录、不卡，这和 CFX 自己判断收敛停算的规则一致。实测中 CFX 曾在 O-TurbFreq 为 2.2e-5 时报告收敛并停下，如果也卡湍流，这类点既通不过，又因为不是步数用完而没有续算机会。
-2. 如果没达标、但原因是步数用完了（不是崩溃或被中断），程序会从最后的流场出发**再追加最多 2000 步**（可设为 1500–2000），步数重新计数。
-3. 追加之后仍不达标，记为 `failure_stage=solve` 的失败。日志和结果文件都会保留，供人工检查。
+2. 如果没达标、但原因是步数用完了（不是崩溃或被中断），程序会接着上一次的运行历史**再追加最多 2000 步**（可设为 1500–2000）。续算用 `-continue-from-file`：迭代编号接着累计（`.out` 中显示为 `2001 (1)`，括号内是本次运行的步数），按累计迭代数（CEL 变量 `aitern`）逐步加入的表达式，例如叶顶间隙的滑移修正，不会从头再加一遍。追加的步数按括号内的本次步数计。CFX 文档没有写明续接历史时步数上限按哪种计数；如果续算因为按累计步数到达上限而提前停下：此时已达标就照常接受；未达标则记为失败，消息中注明原因，不会写成“追加步数已用完”。2026-10 之前的续算用 `-initial-file`，步数从 1 重新计数，`aitern` 也随之归零（`cfx_state.json` 中 `restart.method` 为 `initial_file_reset_counter`）。
+3. 追加的步数用完后仍不达标，但只差一点（见下面的“人工审核”），照常做 CFX-Post，记为 `status=review`，等人决定。
+4. 其余情况记为 `failure_stage=solve` 的失败。日志和结果文件都会保留，供人工检查。
 
 因此一个设计点最多可能调用两次求解器，但在 `--max-new-cfd` 里只算一个点。
 
@@ -156,6 +157,35 @@ python blade_shape_active_learning.py run --config blade_shape_config.json --res
 ```
 
 `flow_analysis` 必须和 CFX 模板里的 Flow 名称一致。
+
+### 人工审核
+
+`1e-5` 的门槛有时过严：例如最终残差表里其他方程都远低于 `1e-5`，只有 P-Mass 卡在 `1.3e-5`、Rate 1.00 走平了。这类结果往往可用，但要人来判断。程序的做法：
+
+- **什么样的结果送审**：只有续算把追加步数正常用完的点才可能送审。最终残差表中（湍流、Wallscale 等方程也算在内）高于 RMS 门槛的方程不超过 3 个，而且每个都不超过 `1e-4`。第一次求解异常停止、续算因为按累计步数到达上限而提前停下、超标方程太多或超过 `1e-4`，都仍然直接记为失败。
+- **送审结果**：照常跑 CFX-Post，效率、流量等写进 `training_data.csv`，但 `status=review`，**不进训练集，也不进 Pareto**。`cfx_state.json` 记录了超标的方程、全部方程的残差，以及 `.out` 里进出口被临时加墙（回流）的面积比例。运行结束时会列出所有待审核的算例；送审不算失败，不会让 `run` 以非零状态退出。
+- **审核**：先打开该算例的 `.out` 检查残差曲线是否走平、进出口质量是否守恒、效率与流量监测点是否稳定、进出口回流是否严重，然后：
+
+  ```powershell
+  python blade_shape_active_learning.py review --config blade_shape_config.json                      # 列出待审核结果及证据
+  python blade_shape_active_learning.py review --config blade_shape_config.json --run-id case_000123 --accept "P-Mass 1.3e-5 已走平，监测量稳定"
+  python blade_shape_active_learning.py review --config blade_shape_config.json --run-id case_000123 --reject "出口回流持续扩大"
+  ```
+
+  接受后该行变为 `status=success`，`message` 改写为审核结论和理由，加上 `review_decision`、`review_reason`、`reviewed_at` 三列，`pareto_front*.csv` 当即重写，下一次运行起进入训练集（导出的 Pareto CSV 也带这三列，能看出哪些点是人工接受的）。否决后变为 `status=failed`、`failure_stage=review_rejected`。每个决定连同依据（`.out` 的文件指纹、超标方程、目标值）追加写入 `review_decisions.json`。理由必填。如果 `.out` / `.res` 在送审之后被改动过，程序拒绝做决定。决定之后不能再改；中途被打断时，再执行一次相同的决定即可补完，相反的决定会被拒绝。
+- **局部搜索与诊断**：送审点在计算当时按“没有改进”计入局部搜索的连续计数；`active_learning_diagnostics.csv` / `boundary_diagnostics.csv` 中的 `hv_gain`、`delta_best_*`、`engineering_nondominated` 也是按非成功点算的。事后接受只把这两份诊断表的 `status` 改为 `success`，不回溯重算这些字段和计数。
+- **攻角验证**始终使用严格判据，不送审。
+
+相关设置在配置的 `cfx_review` 中，不属于物理签名（它不改变任何计算结果，只决定结果是否交给人判断），修改后已有记录照常使用，已经分好类的点也不会重新分类：
+
+```json
+"cfx_review": {
+  "rms_limit": 0.0001,
+  "max_equations_above_target": 3
+}
+```
+
+`rms_limit` 只能收紧（不超过 `1e-4`）；`max_equations_above_target` 设为 0 即关闭送审，恢复严格判据。配置里没有 `cfx_review` 时按上面的默认值**启用**送审：沿用旧配置的输出目录会开始出现待审核结果，边界阶段也可能因此暂停。
 
 **续跑时的核对**：每个算例目录下有 `geometry_state.json` 和 `cfx_state.json`，记录了这个算例用的输入文件指纹和各阶段的完成情况。续跑时如果发现输入变了、或者某阶段没有完成记录，程序不会把残留文件当成成功，而是要求人工检查。CFX 的核数和安装目录不参与这项核对，只追加记录在 `cfx_state.json` 的 `environments` 中，换核数或把同一版本挪到别处后，已完成的阶段照常复用。换了 CFX 版本（版本号文件夹或 `cfx5solve.exe` 内容不同）则不复用，并且按物理输入变化处理。2026-10 之前写下的 `cfx_state.json` 没有记录版本，只在安装路径完全相同时复用。
 
@@ -224,6 +254,7 @@ python blade_shape_active_learning.py run-boundary --config blade_shape_config.j
 ```
 
 - 只要有一个点失败，就立即停止，且不会自动重算。需要重算时请人工检查后建立新实验。
+- 出现送审点时阶段暂停（`stage_status=awaiting_review`，退出码 3），不再开始新的点。用 `review` 接受后，重新运行该阶段即可继续；否决则该点算失败，阶段按上一条终止。前一阶段还有待审核的点时，下一阶段不能开始。
 - 预算用完时停下的状态是 `budget_exhausted`，加 `--resume` 可以接着跑。
 - 进度保存在 `boundary_plan_v2.state.json`，预测与真实结果对比保存在 `boundary_diagnostics.csv`。
 - 边界实验的成功结果会进入训练数据，也可以进入 Pareto 前沿。

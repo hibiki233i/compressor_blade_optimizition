@@ -32,7 +32,7 @@ CFturbo 改叶型 → TurboGrid 生成网格 → CFX 求解并后处理
 
 ```powershell
 python -m pip install numpy pandas
-python -m pip install -r requirements-gui.txt   # 桌面界面需要 PySide6
+python -m pip install -r requirements-gui.txt   # 桌面界面需要 PySide6 和 psutil
 ```
 
 需要 Python 3.10 以上。SciPy 和 scikit-learn 可选，有 scikit-learn 时使用 GP/Kriging 代理模型，没有时自动换成精度稍低的 RBF 模型。

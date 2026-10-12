@@ -485,10 +485,12 @@ class ValidationPage(Page):
         self.log.clear()
         self._append('$ ' + spec.preview(default_python()), 'info')
         self.tabs.setCurrentIndex(1)
-        self.runner.start(spec.argv(default_python()))
+        # a frozen plan runs its CFD cases under the plan's directory
+        plan = self.forms['run']['plan'].text().strip() if action == 'run' else ''
+        self.runner.start(spec.argv(default_python()), scope=[Path(plan).parent] if plan else [])
 
     def stop(self) -> None:
-        self._append('正在停止入口进程。外部求解器可能仍在运行，请检查后再恢复。', 'warn')
+        self._append('正在停止入口进程及其启动的求解进程。被中断的点不会自动重算，请检查后再恢复。', 'warn')
         self.runner.stop()
 
     def set_running(self, running: bool, message: str) -> None:
@@ -515,12 +517,15 @@ class ValidationPage(Page):
             message = 'ACA CSV 已导出并填入「复现报告20点指标」；仍须填写同一 .res 几何的 hub/shroud 前缘金属角'
         elif code == 0 and reason == 'normal':
             message = '完成'
+        elif reason == 'stopped':
+            message = '已按请求停止'
         elif code == 2:
             message = '质量或工况检查未通过，请查看诊断与日志'
         else:
             message = f'执行失败：{code} / {reason}'
         self.set_running(False, message)
-        self._append(f'进程结束：exit={code} reason={reason}', 'good' if code == 0 else 'error')
+        self._append(f'进程结束：exit={code} reason={reason}',
+                     'good' if code == 0 else 'warn' if reason == 'stopped' else 'error')
         self.ctx.report('验证：' + message)
         self._load_output(action, code)
         self._refresh_guard()

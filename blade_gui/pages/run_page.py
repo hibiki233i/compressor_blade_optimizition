@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
 
 from .. import commands, theme
 from ..persist import remember
-from ..project import CODE_DIR, Project, config_errors, external_tools
+from ..project import CODE_DIR, Project, config_errors, external_tools, same_directory
 from ..runner import CommandRunner, default_python
 from ..widgets import (
     Badge,
@@ -47,7 +47,9 @@ ACTIONS = [
     ("diagnose", "离线诊断"),
     ("write-boundary-plan", "生成边界方案"),
     ("run-boundary", "运行边界阶段"),
+    ("review", "审核送审点"),
 ]
+REVIEW_CHOICES = [("列出待审核结果", ""), ("接受，纳入训练样本", "accept"), ("否决，记为失败", "reject")]
 
 ERROR_HINTS = ("error", "traceback", "failed", "failure", "exception", "错误", "失败")
 WARN_HINTS = ("warning", "warn", "deprecat", "注意")
@@ -108,6 +110,7 @@ class RunPage(Page):
         self.stack.addWidget(self._build_diagnose_form())
         self.stack.addWidget(self._build_plan_form())
         self.stack.addWidget(self._build_boundary_form())
+        self.stack.addWidget(self._build_review_form())
         params_card.body.addWidget(self.stack)
         left_layout.addWidget(params_card)
 
@@ -326,6 +329,47 @@ class RunPage(Page):
         form.addRow("确认输入变化", self.boundary_accept)
         return page
 
+    def _build_review_form(self) -> QWidget:
+        page = QWidget()
+        form = QFormLayout(page)
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setSpacing(7)
+        self.review_run = QComboBox()
+        self.review_decision = QComboBox()
+        for label, key in REVIEW_CHOICES:
+            self.review_decision.addItem(label, key)
+        # Deliberately not remembered, like the input-change reason: every decision is typed afresh.
+        self.review_reason = QLineEdit()
+        self.review_reason.setPlaceholderText("必填：依据，例如“P-Mass 1.3e-5 已走平，效率/流量监测稳定，进出口守恒 <0.1%”")
+        form.addRow("待审核算例", self.review_run)
+        form.addRow("决定", self.review_decision)
+        form.addRow("理由", self.review_reason)
+        note = QLabel("送审结果是真实 CFD，但个别方程的 RMS 略高于门槛。接受前请查看该算例的 .out："
+                      "残差是否已经走平、进出口质量是否守恒、效率与流量监测点是否稳定、进出口回流（wall notice）是否严重。"
+                      "接受后计入训练集和 Pareto，否决后记为失败；决定写入 review_decisions.json，之后不能再改。")
+        note.setObjectName("CardHint")
+        note.setWordWrap(True)
+        form.addRow("", note)
+        return page
+
+    def request_review(self, run_id: str, directory: str | Path | None = None) -> None:
+        """Open the review action on ``run_id`` seen in ``directory`` (from the case browser)."""
+        self._sync_review_runs()
+        self.action_box.setCurrentIndex(self.action_box.findData("review"))
+        configured = self._configured_project().output_dir
+        if directory is not None and not same_directory(directory, configured):
+            # Output directories reuse case IDs: never decide on the configured case of that ID.
+            self.review_run.setCurrentIndex(-1)
+            self.ctx.report(f"{run_id} 来自 {directory}，不是配置的输出目录 {configured}；不能在这里审核。")
+            return
+        # -1 clears the choice: never leave another case selected in its place
+        index = self.review_run.findText(run_id)
+        self.review_run.setCurrentIndex(index)
+        if index < 0:
+            self.ctx.report(f"{run_id} 不在配置的输出目录 {self._configured_project().output_dir} 的待审核列表中"
+                            "（可能正在用「设置数据目录」查看别的目录）；审核只作用于配置的输出目录。")
+        self.review_reason.setFocus()
+
     @staticmethod
     def _accept_field() -> QLineEdit:
         # Deliberately not remembered: a stored reason would silently accept the next change.
@@ -352,6 +396,7 @@ class RunPage(Page):
             self.run_resume, self.cand_index, self.cand_seed, self.cand_dry, self.cand_offline,
             self.plan_center, self.plan_path, self.boundary_stage, self.boundary_max,
             self.boundary_resume, self.boundary_plan, self.run_accept, self.boundary_accept,
+            self.review_run, self.review_decision, self.review_reason,
         ]
 
     def _connect_dirty(self, widget: QWidget) -> None:
@@ -373,6 +418,7 @@ class RunPage(Page):
             self._params_initialized = True
         self._sync_center_runs()
         self._sync_plans()
+        self._sync_review_runs()
         self._refresh_environment()
         self._update_preview()
 
@@ -423,6 +469,22 @@ class RunPage(Page):
         if current:
             self.plan_center.setCurrentText(current)
         self.plan_center.blockSignals(blocked)
+
+    def _sync_review_runs(self) -> None:
+        df = self._configured_project().results()
+        runs: list[str] = []
+        if not df.empty and "status" in df.columns and "run_id" in df.columns:
+            status = df["status"].astype(str).str.strip().str.lower()
+            runs = [str(value) for value in df.loc[status == "review", "run_id"].tolist()]
+        if [self.review_run.itemText(i) for i in range(self.review_run.count())] == runs:
+            return
+        current = self.review_run.currentText()
+        blocked = self.review_run.blockSignals(True)
+        self.review_run.clear()
+        self.review_run.addItems(runs)
+        if current in runs:
+            self.review_run.setCurrentText(current)
+        self.review_run.blockSignals(blocked)
 
     def _sync_plans(self) -> None:
         current = self.boundary_plan.currentText()
@@ -495,6 +557,13 @@ class RunPage(Page):
                 center_run_id=self.plan_center.currentText().strip(),
                 plan=self.plan_path.text().strip() or "boundary_plan_v2.json",
             )
+        if action == "review":
+            return commands.build_review(
+                config_path,
+                run_id=self.review_run.currentText(),
+                decision=self.review_decision.currentData(),
+                reason=self.review_reason.text(),
+            )
         return commands.build_run_boundary(
             config_path,
             plan=self.boundary_plan.currentText().strip(),
@@ -545,6 +614,18 @@ class RunPage(Page):
                     "另起研究请换输出目录；确认它们在当前输入下仍然有效时，在「确认输入变化」中填写原因。",
                 )
                 return
+        if action == "review":
+            if not self.review_run.count():
+                self.guard.set_level("info", "当前没有待审核的结果。")
+            elif self.review_decision.currentData() and self.review_run.currentIndex() < 0:
+                self.guard.set_level("warn", "请选择待审核的算例。")
+            elif self.review_decision.currentData() and not self.review_reason.text().strip():
+                self.guard.set_level("warn", "请填写审核理由；它会和决定一起写入 review_decisions.json。")
+            elif self.review_decision.currentData():
+                self.guard.set_level("warn", "审核决定不可撤销：接受后该结果作为训练标签进入训练集和 Pareto。")
+            else:
+                self.guard.set_level("info", "列出待审核结果及其超标方程、回流提示和 .out 路径（只读）。")
+            return
         if action == "write-boundary-plan" and not self.plan_center.currentText().strip():
             self.guard.set_level("warn", "请选择一个成功算例的 run_id 作为中心点。")
             return
@@ -591,22 +672,40 @@ class RunPage(Page):
             if answer != QMessageBox.Yes:
                 return
 
+        if action == "review" and self.review_decision.currentData():
+            try:
+                self._build_spec()
+            except ValueError as exc:
+                QMessageBox.warning(self, "无法审核", str(exc))
+                return
+            accept = self.review_decision.currentData() == "accept"
+            message = (f"{'接受' if accept else '否决'} {self.review_run.currentText()}？\n\n"
+                       f"理由：{self.review_reason.text().strip()}\n\n"
+                       + ("它将作为训练标签进入训练集和 Pareto 前沿。" if accept else "它将记为失败（failure_stage=review_rejected）。")
+                       + "\n决定写入 review_decisions.json，之后不能再改。")
+            if QMessageBox.question(self, "确认审核", message,
+                                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+                return
+
         spec = self._build_spec()
         argv = spec.argv(default_python())
         self.log.clear()
         self._append("info", f"$ {spec.preview(default_python())}")
         self.progress.setVisible(True)
-        self.runner.start(argv)
+        # CFX processes outside the CLI's process tree are matched in this directory
+        self.runner.start(argv, scope=[self._configured_project().output_dir])
         if not self.runner.running:
             self.progress.setVisible(False)
         else:
             self.run_accept.clear()
             self.boundary_accept.clear()
+            self.review_reason.clear()
 
     def stop(self) -> None:
         if not self.runner.running:
             return
-        self._append("warn", "正在请求停止子进程…（CFD 求解器的子进程可能需要手动确认）")
+        self._append("warn", "正在停止命令及其启动的 CFturbo / TurboGrid / CFX 求解进程…"
+                             "中断在几何或求解阶段的算例，下次续跑时记为失败（不会重算），需要人工检查。")
         self.runner.stop()
 
     # ------------------------------------------------------------ signals
@@ -636,6 +735,14 @@ class RunPage(Page):
             self.status_badge.setText("已完成")
             self.status_badge.set_kind("good")
             self._append("good", f"进程正常结束（exit=0），用时 {self.elapsed.text()}。")
+        elif exit_code == commands.REVIEW_EXIT and "run-boundary" in self.runner.command:
+            self.status_badge.setText("待审核")
+            self.status_badge.set_kind("warn")
+            self._append("warn", "边界阶段已暂停：有结果等待人工审核。接受后重新运行该阶段即可继续，否决则该阶段失败。")
+        elif reason == "stopped":
+            self.status_badge.setText("已停止")
+            self.status_badge.set_kind("warn")
+            self._append("warn", f"已按请求停止（exit={exit_code}），用时 {self.elapsed.text()}。")
         else:
             self.status_badge.setText("异常结束")
             self.status_badge.set_kind("bad")

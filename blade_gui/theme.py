@@ -61,6 +61,7 @@ STATUS_COLORS: dict[str, str] = {
     "failed": PALETTE["bad"],
     "failure": PALETTE["bad"],
     "pending": PALETTE["amber"],
+    "review": PALETTE["amber"],
     "running": PALETTE["blue"],
     "skipped": PALETTE["text_faint"],
 }

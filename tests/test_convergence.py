@@ -5,9 +5,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from blade_shape_convergence import ConvergencePolicy, assess_out, convergence_ccl
+from blade_shape_convergence import ConvergencePolicy, ReviewPolicy, assess_out, convergence_ccl, review_evidence
 import blade_shape_cfx_runner as cfx
-from tests.cfx_output_samples import output, real_output, outer_iteration_limit_output
+from tests.cfx_output_samples import (NEAR_CONVERGED_ITERATION, output, outer_iteration_limit_output,
+                                      p_mass_output, real_output)
 
 
 class ResidualTests(unittest.TestCase):
@@ -73,6 +74,38 @@ class ResidualTests(unittest.TestCase):
                 self.assertFalse(assess_out(other,ConvergencePolicy())['iteration_limit_reached'])
 
 
+class ReviewClassificationTests(unittest.TestCase):
+    def evidence(self, text, review=ReviewPolicy()):
+        return review_evidence(assess_out(text, ConvergencePolicy()), ConvergencePolicy(), review)
+
+    def test_real_near_converged_table_is_offered_for_review_with_its_backflow(self):
+        report = assess_out(NEAR_CONVERGED_ITERATION, ConvergencePolicy())
+        self.assertFalse(report['converged']);self.assertTrue(report['iteration_limit_reached'])
+        # Wallscale at exactly 1.0E-05 meets the target; only P-Mass is above it.
+        self.assertEqual(review_evidence(report, ConvergencePolicy(), ReviewPolicy())['equations_above_target'],
+                         {'p-mass': 1.3e-05})
+        self.assertEqual(report['wall_notices'], [
+            {'side': 'inlet', 'boundary': 'R1 Inlet', 'faces_percent': 3.6, 'area_percent': 0.2},
+            {'side': 'outlet', 'boundary': 'R1 Outlet', 'faces_percent': 15.8, 'area_percent': 1.9}])
+
+    def test_review_needs_few_equations_above_target_and_all_within_the_limit(self):
+        self.assertIsNotNone(self.evidence(output('2.0E-06', 2000, True, {
+            'U - Mom': '2E-5', 'P - Mass': '9E-5', 'TurbFreq': '3E-5'})))
+        self.assertIsNone(self.evidence(output('2.0E-06', 2000, True, {
+            'U - Mom': '2E-5', 'V - Mom': '2E-5', 'P - Mass': '9E-5', 'TurbFreq': '3E-5'})), 'four above target')
+        self.assertIsNone(self.evidence(p_mass_output('1.1E-04')), 'above the review limit')
+        self.assertIsNone(self.evidence(output()), 'converged results need no review')
+        self.assertIsNone(self.evidence(p_mass_output(), ReviewPolicy(max_equations_above_target=0)), 'disabled')
+        self.assertIsNone(self.evidence(p_mass_output('5E-5'), ReviewPolicy(rms_limit=4e-5)))
+
+    def test_review_policy_may_only_tighten(self):
+        for bad in [dict(rms_limit=2e-4), dict(rms_limit=0), dict(max_equations_above_target=-1),
+                    dict(max_equations_above_target=1.5)]:
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                ReviewPolicy(**bad)
+        self.assertEqual(ReviewPolicy.from_config({}), ReviewPolicy())
+
+
 class PipelineConvergenceTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
@@ -81,7 +114,7 @@ class PipelineConvergenceTests(unittest.TestCase):
             (self.root/name).write_text('synthetic')
         self.kw=dict(p_out_pa=10,cfx_bin_dir=self.root,template_cfx=self.root/'template.cfx',template_cse=self.root/'extract.cse')
 
-    def run_case(self,residuals,*,exhausted_output=output,initial_iteration=100):
+    def run_case(self,residuals,*,exhausted_output=output,initial_iteration=100,restart_iteration=2000,review=None):
         calls=[];solves=0
         def command(cmd,cwd,log):
             nonlocal solves
@@ -91,19 +124,24 @@ class PipelineConvergenceTests(unittest.TestCase):
                 rms,limit=residuals[solves];solves+=1
                 (cwd/f'Impeller_{solves:03}.res').write_text(f'result{solves}')
                 render=exhausted_output if limit else output
-                iteration=2000 if solves>1 else initial_iteration
-                (cwd/f'Impeller_{solves:03}.out').write_text(render(rms,iteration,limit))
+                iteration=restart_iteration if solves>1 else initial_iteration
+                text=render(rms,iteration,limit)
+                if solves>1:  # continued history: accumulated count, this run's in parentheses
+                    text=text.replace(f'OUTER LOOP ITERATION = {iteration}\n',
+                                      f'OUTER LOOP ITERATION = {initial_iteration+iteration} ({iteration})\n')
+                (cwd/f'Impeller_{solves:03}.out').write_text(text)
             else:(cwd/'CFX_Results.txt').write_text('.76,2,1,.42,2.1')
             return 0
         with patch.object(cfx,'_run_logged',side_effect=command):
-            result=cfx.run_cfx_pipeline(self.root,'case_0',**self.kw)
+            result=cfx.run_cfx_pipeline(self.root,'case_0',review=review,**self.kw)
         return result,calls
 
     def test_one_restart_then_accept_and_recover_without_resolve(self):
         result,calls=self.run_case([('2E-4',True),('2E-6',False)])
         self.assertTrue(result.success)
         solve=[c for c in calls if Path(c[0]).name=='cfx5solve.exe']
-        self.assertEqual(len(solve),2);self.assertIn('-initial-file',solve[1])
+        self.assertEqual(len(solve),2);self.assertIn('-continue-from-file',solve[1])
+        self.assertNotIn('-initial-file',solve[1])
         self.assertTrue(solve[1][-1].endswith('Impeller_001.res'))
         with patch.object(cfx,'_run_logged',side_effect=AssertionError('unexpected external work')):
             self.assertTrue(cfx.run_cfx_pipeline(self.root,'case_0',**self.kw).success)
@@ -131,11 +169,89 @@ class PipelineConvergenceTests(unittest.TestCase):
         self.assertTrue(result.success)
         solve=[c for c in calls if Path(c[0]).name=='cfx5solve.exe']
         self.assertEqual(len(solve),2)
-        self.assertIn('-initial-file',solve[1])
+        self.assertIn('-continue-from-file',solve[1])
         self.assertTrue(solve[1][-1].endswith('Impeller_001.res'))
         state=json.loads((self.root/'cfx_state.json').read_text())
         self.assertEqual(state['restart']['iterations'],2000)
+        self.assertEqual(state['restart']['method'],'continue_from_file')
         self.assertEqual(len(state['solve_attempts']),2)
+        final=state['stages']['solve']['convergence']
+        self.assertEqual((final['iteration'],final['run_iteration']),(4000,2000))
+
+    def test_restart_close_to_the_target_is_post_processed_for_review(self):
+        result,calls=self.run_case([('1.3E-05',True),('1.3E-05',True)],exhausted_output=p_mass_output,
+                                  initial_iteration=2000,review=ReviewPolicy())
+        self.assertFalse(result.success);self.assertTrue(result.review);self.assertEqual(result.failure_stage,'review')
+        self.assertIn('p-mass',result.message)
+        self.assertAlmostEqual(result.metrics['Efficiency'],.76)
+        self.assertEqual(sum(Path(c[0]).name=='cfx5solve.exe' for c in calls),2)
+        state=json.loads((self.root/'cfx_state.json').read_text())
+        self.assertEqual(state['stages']['solve']['status'],'review')
+        self.assertEqual(state['stages']['solve']['review']['equations_above_target'],{'p-mass':1.3e-5})
+        # A resume returns the same verdict without new solver or Post work.
+        with patch.object(cfx,'_run_logged',side_effect=AssertionError('unexpected external work')):
+            again=cfx.run_cfx_pipeline(self.root,'case_0',review=ReviewPolicy(),**self.kw)
+        self.assertTrue(again.review);self.assertEqual(again.metrics,result.metrics)
+        (self.root/'Impeller_002.out').write_text('changed')
+        self.assertFalse(cfx.run_cfx_pipeline(self.root,'case_0',review=ReviewPolicy(),**self.kw).review)
+
+    def test_real_near_converged_restart_goes_through_the_pipeline_to_review(self):
+        result,calls=self.run_case([('x',True),('x',True)],exhausted_output=lambda r,i,e:NEAR_CONVERGED_ITERATION,
+                                  initial_iteration=2000,review=ReviewPolicy())
+        self.assertTrue(result.review,result.message)
+        self.assertIn('p-mass 1.3e-05',result.message)
+        self.assertEqual(sum(Path(c[0]).name=='cfx5post.exe' for c in calls),1)
+        state=json.loads((self.root/'cfx_state.json').read_text())
+        self.assertEqual(state['stages']['solve']['convergence']['wall_notices'][1]['faces_percent'],15.8)
+
+    def test_restart_stopped_early_is_not_blamed_on_an_accumulated_limit(self):
+        def early(rms,iteration,exhausted):
+            # limit wording, one count only (1804, no accumulated count in parentheses), below the limit
+            return outer_iteration_limit_output('2.0E-06',iteration).replace(
+                '| P - Mass             | 0.90 | 2.0E-06 |','| P - Mass             | 0.90 | 1.3E-05 |').replace(
+                'OUTER LOOP ITERATION = ','OUTER LOOP ITERATION =  ')
+        result,_=self.run_case([('x',True),('x',True)],exhausted_output=early,initial_iteration=2000,
+                               restart_iteration=1804,review=ReviewPolicy())
+        self.assertFalse(result.review)
+        self.assertNotIn('continued history',result.message)
+        self.assertIn('stopped after 1804 of its 2000 iterations',result.message)
+
+    def test_without_a_review_policy_a_close_restart_is_still_discarded(self):
+        result,calls=self.run_case([('1.3E-05',True),('1.3E-05',True)],exhausted_output=p_mass_output,
+                                  initial_iteration=2000)
+        self.assertFalse(result.success);self.assertFalse(result.review)
+        self.assertFalse(any(Path(c[0]).name=='cfx5post.exe' for c in calls))
+
+    def test_only_a_restart_that_used_its_budget_is_offered_for_review(self):
+        # an abnormal first stop (only P-Mass above, no iteration-limit stop) gets no restart and no review
+        result,calls=self.run_case([('1.3E-05',True)],exhausted_output=lambda r,i,e:p_mass_output(r,i,False),
+                                   review=ReviewPolicy())
+        self.assertFalse(result.review);self.assertIn('not a normal iteration-limit stop',result.message)
+        self.assertEqual(sum(Path(c[0]).name=='cfx5solve.exe' for c in calls),1)
+        # a continued run cut short by an accumulated iteration limit did not use its budget
+        def cut_short(rms,iteration,exhausted):
+            return outer_iteration_limit_output('2.0E-06',iteration).replace(
+                '| P - Mass             | 0.90 | 2.0E-06 |','| P - Mass             | 0.90 | 1.3E-05 |')
+        self.tmp.cleanup();self.setUp()
+        result,_=self.run_case([('x',True),('x',True)],exhausted_output=cut_short,initial_iteration=2000,
+                               restart_iteration=1,review=ReviewPolicy())
+        self.assertFalse(result.review);self.assertIn('continued history',result.message)
+
+    def test_converged_restart_is_accepted_even_if_the_limit_was_also_reported(self):
+        result,_=self.run_case([('1.4E-4',True),('2E-6',True)],exhausted_output=outer_iteration_limit_output,
+                               initial_iteration=2000,restart_iteration=1)
+        self.assertTrue(result.success)
+
+    def test_restart_cut_short_by_an_accumulated_iteration_limit_is_reported(self):
+        # If CFX counted Maximum Number of Iterations over the continued history,
+        # a run that already used 2000 would stop at once: 2001 (1).
+        result,calls=self.run_case([('1.4E-4',True),('1.4E-4',True)],exhausted_output=outer_iteration_limit_output,
+                                  initial_iteration=2000,restart_iteration=1)
+        self.assertFalse(result.success);self.assertEqual(result.failure_stage,'solve')
+        self.assertIn('counted Maximum Number of Iterations over the continued history',result.message)
+        self.assertFalse(any(Path(c[0]).name=='cfx5post.exe' for c in calls))
+        with patch.object(cfx,'_run_logged',side_effect=AssertionError('must not retry failed CFD')):
+            self.assertFalse(cfx.run_cfx_pipeline(self.root,'case_0',**self.kw).success)
 
     def test_real_outer_iteration_limit_summary_still_discards_second_failure(self):
         result,calls=self.run_case([('1.4E-4',True),('1.4E-4',True)],
