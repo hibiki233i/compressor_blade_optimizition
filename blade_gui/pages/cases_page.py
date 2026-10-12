@@ -348,7 +348,7 @@ class CasesPage(Page):
 
     def _request_review(self) -> None:
         if self._selected is not None:
-            self.ctx.review_requested.emit(self._selected.run_id)
+            self.ctx.review_requested.emit(self._selected.run_id, str(self.ctx.project.output_dir))
 
     def _show_case(self, record: CaseRecord) -> None:
         self._selected = record
@@ -358,6 +358,13 @@ class CasesPage(Page):
         self.detail_badge.set_kind("good" if record.ok else "warn" if record.status == "review"
                                    else ("bad" if record.registered else "muted"))
         self.review_button.setVisible(record.status == "review")
+        # Output directories reuse case IDs: a decision on a case seen in another
+        # directory would land on the configured directory's case of that ID.
+        configured = self.ctx.project.views_configured_output
+        self.review_button.setEnabled(configured)
+        self.review_button.setToolTip("到「运行控制」接受或否决这个送审结果" if configured else
+                                      "正在用「设置数据目录」查看其他目录；审核只作用于配置的输出目录，"
+                                      "请先切回配置的输出目录。")
         self.detail_path.setText(str(record.path))
         message = record.message or "（无失败信息）"
         self.detail_message.setText(message)

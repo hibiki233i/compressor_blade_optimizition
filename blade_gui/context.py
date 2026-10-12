@@ -41,7 +41,7 @@ class AppContext(QObject):
     status_message = Signal(str)
     navigate = Signal(str)  # page key
     case_requested = Signal(str)  # run_id
-    review_requested = Signal(str)  # run_id awaiting manual review
+    review_requested = Signal(str, str)  # run_id awaiting manual review, directory it was seen in
 
     def __init__(self, config_path: str | Path | None = None, data_dir: str | Path | None = None,
                  *, settings_path: str | Path | None = None):

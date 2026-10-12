@@ -221,6 +221,37 @@ class GuiRegressionTests(ProjectFixture):
         with self.assertRaisesRegex(ValueError, '请选择待审核的算例'):
             run._build_spec()
 
+    def test_a_case_seen_in_another_data_dir_cannot_be_reviewed_in_the_configured_one(self):
+        import shutil
+        # both directories hold a case_000002 awaiting review: IDs repeat across outputs
+        other = self.root / 'other_runs'
+        shutil.copytree(self.out, other)
+        for directory in (self.out, other):
+            frame = pd.read_csv(directory / 'training_data.csv')
+            frame.loc[frame.run_id.eq('case_000002'), 'status'] = 'review'
+            frame.to_csv(directory / 'training_data.csv', index=False)
+        self.ctx.set_data_dir(other)
+        self.app.processEvents()
+        self.assertFalse(self.ctx.project.views_configured_output)
+        cases = next(page for page in self.window.pages if hasattr(page, 'select_run'))
+        cases.select_run('case_000002')
+        self.app.processEvents()
+        self.assertFalse(cases.review_button.isHidden())
+        self.assertFalse(cases.review_button.isEnabled())
+
+        run = next(page for page in self.window.pages if hasattr(page, 'request_review'))
+        run.request_review('case_000002', str(other))
+        self.assertGreaterEqual(run.review_run.findText('case_000002'), 0)  # the configured one exists...
+        self.assertEqual(run.review_run.currentIndex(), -1)                  # ...but is not chosen
+
+        self.ctx.set_data_dir(None)
+        self.app.processEvents()
+        cases.select_run('case_000002')
+        self.app.processEvents()
+        self.assertTrue(cases.review_button.isEnabled())
+        run.request_review('case_000002', str(self.out))
+        self.assertEqual(run.review_run.currentText(), 'case_000002')
+
     def test_runner_stop_does_not_block_the_event_loop(self):
         import sys
         import time

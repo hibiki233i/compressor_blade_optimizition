@@ -82,6 +82,11 @@ class Issue:
         return f"[{self.level}] {self.message}"
 
 
+def same_directory(a: str | Path, b: str | Path) -> bool:
+    """Relative paths resolve from the repository, like the CLI's working directory."""
+    return (CODE_DIR / Path(a)).resolve() == (CODE_DIR / Path(b)).resolve()
+
+
 def validate_config(config: dict[str, Any]) -> list[Issue]:
     """Validate a config dict and return human-readable issues.
 
@@ -340,11 +345,19 @@ class Project:
     # --------------------------------------------------------------- paths
     @property
     def output_dir(self) -> Path:
-        if self.data_dir_override:
-            return self.data_dir_override
+        return self.data_dir_override or self.configured_output_dir
+
+    @property
+    def configured_output_dir(self) -> Path:
+        """Where CLI actions write, whatever directory the GUI is viewing."""
         paths = self.config.get("paths")
         value = paths.get("output_dir") if isinstance(paths, dict) else None
         return Path(str(value)) if value else CODE_DIR / "blade_al_runs"
+
+    @property
+    def views_configured_output(self) -> bool:
+        """False while a --data-dir override shows another directory than the CLI writes to."""
+        return self.data_dir_override is None or same_directory(self.data_dir_override, self.configured_output_dir)
 
     def path(self, name: str) -> Path:
         return self.output_dir / name

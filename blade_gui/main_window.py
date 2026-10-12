@@ -313,11 +313,11 @@ class MainWindow(QMainWindow):
                 page.select_run(run_id)
                 return
 
-    def _on_review_requested(self, run_id: str) -> None:
+    def _on_review_requested(self, run_id: str, directory: str) -> None:
         for index, page in enumerate(self.pages):
             if hasattr(page, "request_review"):
                 self._select_page(index)
-                page.request_review(run_id)
+                page.request_review(run_id, directory)
                 return
 
     # ------------------------------------------------------------- state

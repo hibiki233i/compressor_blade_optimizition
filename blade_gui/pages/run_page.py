@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
 
 from .. import commands, theme
 from ..persist import remember
-from ..project import CODE_DIR, Project, config_errors, external_tools
+from ..project import CODE_DIR, Project, config_errors, external_tools, same_directory
 from ..runner import CommandRunner, default_python
 from ..widgets import (
     Badge,
@@ -352,10 +352,16 @@ class RunPage(Page):
         form.addRow("", note)
         return page
 
-    def request_review(self, run_id: str) -> None:
-        """Open the review action on ``run_id`` (from the case browser)."""
+    def request_review(self, run_id: str, directory: str | Path | None = None) -> None:
+        """Open the review action on ``run_id`` seen in ``directory`` (from the case browser)."""
         self._sync_review_runs()
         self.action_box.setCurrentIndex(self.action_box.findData("review"))
+        configured = self._configured_project().output_dir
+        if directory is not None and not same_directory(directory, configured):
+            # Output directories reuse case IDs: never decide on the configured case of that ID.
+            self.review_run.setCurrentIndex(-1)
+            self.ctx.report(f"{run_id} 来自 {directory}，不是配置的输出目录 {configured}；不能在这里审核。")
+            return
         # -1 clears the choice: never leave another case selected in its place
         index = self.review_run.findText(run_id)
         self.review_run.setCurrentIndex(index)
