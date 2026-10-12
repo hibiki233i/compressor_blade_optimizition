@@ -12,6 +12,7 @@ import sys
 import time
 from collections import Counter
 from pathlib import Path
+from typing import Callable
 
 import psutil
 from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QTimer, Signal
@@ -189,34 +190,53 @@ class CommandRunner(QObject):
         process keeps the PID of a parent that exited long ago, and that PID may
         since belong to this run. CFX processes outside the tree are picked up
         by name inside the run's directories.
+
+        This runs on the GUI thread every few seconds, so it reads parent links
+        from one system snapshot and start times only for processes that may be
+        this run's. Asking psutil every process for ppid/create_time took one
+        system snapshot per process on Windows: minutes for the first pass
+        with ~460 processes and CFX on every core, about a second for each later one.
         """
         if self._process is None or not self._root_pid:
             return
         since = self._started_at - CLOCK_SLACK_S
-        table = {proc.pid: proc for proc in psutil.process_iter(["ppid", "name", "create_time"])}
-        created = {pid: proc.info["create_time"] for pid, proc in table.items()}
-        pairs = [(pid, proc.info["ppid"]) for pid, proc in table.items()
-                 if proc.info["ppid"] in table and created[pid] is not None and created[pid] >= since
-                 and created[pid] >= (created[proc.info["ppid"]] or 0)]
-        self._known = {(pid, start): proc for (pid, start), proc in self._known.items()
-                       if pid in table and created[pid] == start}
+        parents = ppid_map()
+        # psutil keeps these objects between calls and caches name and start time in them
+        table = {proc.pid: proc for proc in psutil.process_iter(["name"]) if proc.pid in parents}
+
+        def created(pid: int) -> float | None:
+            try:
+                return table[pid].create_time()
+            except (KeyError, psutil.Error):
+                return None
+
+        self._known = {(pid, start): table[pid] for (pid, start), _ in self._known.items()
+                       if pid in table and created(pid) == start}
         roots = {pid for pid, _ in self._known}
-        if self._root_pid in table and (created[self._root_pid] or 0) >= since:
+        if self._root_pid in table and (created(self._root_pid) or 0) >= since:
             roots.add(self._root_pid)
-        roots |= {pid for pid, proc in table.items() if self._is_scoped_cfx(proc, since)}
+        roots |= {pid for pid, proc in table.items() if pid not in roots and self._is_scoped_cfx(proc, since)}
+
+        def started_by(pid: int, parent: int) -> bool:
+            start = created(pid)
+            return start is not None and start >= since and start >= (created(parent) or 0)
+
+        pairs = list(parents.items())
         found = set(roots)
         for pid in roots:
-            found.update(descendants(pid, pairs))
+            found.update(descendants(pid, pairs, accept=started_by))
         for pid in found:
-            if created[pid] is not None:
-                self._known[(pid, created[pid])] = table[pid]
+            start = created(pid)
+            if start is not None:
+                self._known[(pid, start)] = table[pid]
 
     def _is_scoped_cfx(self, proc: psutil.Process, since: float) -> bool:
+        # the name is cached; start time and working directory are read only for CFX names
         if not self._scope or _name(proc).lower() not in CFX_PROCESS_NAMES:
             return False
-        if (proc.info["create_time"] or 0) < since:
-            return False
         try:
+            if proc.create_time() < since:
+                return False
             directory = os.path.normcase(os.path.realpath(proc.cwd()))
         except (psutil.Error, OSError):
             return False
@@ -278,8 +298,13 @@ class CommandRunner(QObject):
 # --------------------------------------------------------------------------
 # process tree
 # --------------------------------------------------------------------------
-def descendants(root: int, pairs: list[tuple[int, int]]) -> list[int]:
-    """PIDs started directly or indirectly by ``root``, from ``(pid, ppid)`` pairs."""
+def descendants(root: int, pairs: list[tuple[int, int]],
+                accept: Callable[[int, int], bool] | None = None) -> list[int]:
+    """PIDs started directly or indirectly by ``root``, from ``(pid, ppid)`` pairs.
+
+    ``accept(pid, parent)`` can refuse a parent link; it is asked only for the
+    processes reached from ``root``.
+    """
     children: dict[int, list[int]] = {}
     for pid, ppid in pairs:
         if pid != ppid:
@@ -288,12 +313,25 @@ def descendants(root: int, pairs: list[tuple[int, int]]) -> list[int]:
     seen = {root}
     frontier = [root]
     while frontier:
-        for pid in children.get(frontier.pop(), []):
-            if pid not in seen:
+        parent = frontier.pop()
+        for pid in children.get(parent, []):
+            if pid not in seen and (accept is None or accept(pid, parent)):
                 seen.add(pid)
                 found.append(pid)
                 frontier.append(pid)
     return found
+
+
+def ppid_map() -> dict[int, int]:
+    """PID -> parent PID of every process, from one system snapshot.
+
+    On Windows psutil's per-process ``ppid()`` takes a snapshot of all
+    processes each time; ``_ppid_map`` is what ``Process.children()`` uses.
+    """
+    snapshot = getattr(psutil, "_ppid_map", None)
+    if snapshot is not None:
+        return dict(snapshot())
+    return {proc.pid: proc.info["ppid"] for proc in psutil.process_iter(["ppid"])}
 
 
 def _name(proc: psutil.Process) -> str:
