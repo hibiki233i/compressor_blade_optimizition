@@ -97,7 +97,7 @@ class ExtractTests(unittest.TestCase):
             if error:
                 (cwd / 'cfdpost_error.log').write_text(error)
             return subprocess.CompletedProcess(command, code, stdout='mock post')
-        return patch('blade_shape_flow_diagnostics.subprocess.run', side_effect=run)
+        return patch('blade_shape_runtime.subprocess.run', side_effect=run)
 
     def test_success_writes_two_column_csv_and_evidence(self):
         out = self.root / 'aca'
@@ -150,12 +150,12 @@ class ExtractTests(unittest.TestCase):
             (Path(kwargs['cwd']) / 'aca_raw.csv').write_text(raw_export())
             self.res.write_text('rewritten')
             return subprocess.CompletedProcess(command, 0, stdout='')
-        with patch('blade_shape_flow_diagnostics.subprocess.run', side_effect=run), \
+        with patch('blade_shape_runtime.subprocess.run', side_effect=run), \
                 self.assertRaisesRegex(ValueError, 'Input changed'):
             aca.extract_aca(self.res, self.post, self.session, self.root / 'changed')
 
     def test_rejects_unsafe_inputs_before_cfx_post(self):
-        with patch('blade_shape_flow_diagnostics.subprocess.run') as run:
+        with patch('blade_shape_runtime.subprocess.run') as run:
             with self.assertRaisesRegex(ValueError, 'independent'):
                 aca.extract_aca(self.res, self.post, self.session, self.res.parent / 'aca')
             with self.assertRaisesRegex(ValueError, 'existing .res'):

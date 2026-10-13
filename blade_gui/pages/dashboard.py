@@ -225,7 +225,7 @@ class DashboardPage(Page):
     def _refresh_pareto(self) -> None:
         df = self.ctx.project.results()
         success = successful_rows(df)
-        has_data = success is not None and not success.empty and "Efficiency" in success.columns
+        has_data = not success.empty and "Efficiency" in success.columns
         self.pareto_chart.setVisible(bool(has_data))
         self.pareto_empty.setVisible(not has_data)
         if not has_data:

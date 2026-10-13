@@ -277,7 +277,7 @@ class AnalyticsPage(Page):
             subset = frame.loc[frame["_phase"].fillna("unknown").astype(str) == phase]
             series.append(
                 Series(
-                    PHASE_LABELS[phase],
+                    PHASE_LABELS.get(phase, phase),
                     theme.color(PHASE_COLORS[phase]),
                     subset["_x"].tolist(),
                     subset["_y"].tolist(),

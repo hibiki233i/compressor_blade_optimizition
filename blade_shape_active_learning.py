@@ -931,24 +931,21 @@ def build_diagnostic_row(
 
 
 def next_case_index(config: dict[str, Any], df: pd.DataFrame) -> int:
-    ids = []
-    case_names = []
+    names = []
     if not df.empty and "run_id" in df.columns:
-        case_names.extend(value for value in df["run_id"].dropna().astype(str) if value.startswith("case_"))
-    reserved = list(case_reservations(output_dir(config)))
-    queue = pending.load(config)
-    reserved.extend(entry['run_id'] for entry in queue['entries'])
-    for name in reserved:
-        number = parse_case_number(name)
-        if number is not None:
-            ids.append(number)
-    case_names.extend(path.name for path in (output_dir(config) / "cases").glob("case_*"))
-    # Historical CSV and directory names used the first numeric token; queue
-    # and reservation IDs use the stricter parser. Preserve both interpretations.
-    for name in case_names:
+        names.extend(df["run_id"].dropna().astype(str))
+    names.extend(case_reservations(output_dir(config)))
+    names.extend(entry['run_id'] for entry in pending.load(config)['entries'])
+    names.extend(path.name for path in (output_dir(config) / "cases").glob("case_*"))
+    # The first numeric token counts, so suffixed names such as
+    # ``case_000007_archive`` still block their number from reuse.
+    ids = []
+    for name in map(str, names):
+        if not name.startswith("case_"):
+            continue
         try:
             ids.append(int(name.split("_")[1]))
-        except Exception:
+        except ValueError:
             pass
     return max(ids) + 1 if ids else 0
 

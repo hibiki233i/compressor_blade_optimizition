@@ -16,8 +16,7 @@ import shutil
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
-from blade_shape_flow_diagnostics import run_cfx_post
-from blade_shape_runtime import atomic_json, file_identity
+from blade_shape_runtime import atomic_json, file_identity, run_cfx_post
 
 METHOD = 'cfx_post_saved_session_aca_20_v1'
 SPAN_POINTS = 20

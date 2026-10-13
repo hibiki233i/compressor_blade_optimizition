@@ -40,8 +40,8 @@ class ReliabilityTests(unittest.TestCase):
         (self.out/'cases'/'case_000009_archive').mkdir(parents=True)
         self.assertEqual(b.next_case_index(self.c,frame),10)
         r.atomic_json(self.out/'case_reservations.json',{
-            'case_000011':{'plan_id':'synthetic','point_id':'single'},
-            'case_000999_archive':{'plan_id':'synthetic','point_id':'legacy'},
+            'case_000010':{'plan_id':'synthetic','point_id':'single'},
+            'case_000011_archive':{'plan_id':'synthetic','point_id':'legacy'},
         })
         self.assertEqual(b.next_case_index(self.c,frame),12)
         b.pending.enqueue(self.c,[b.SelectedCandidate(self.x,1,'doe')],[{'sample_phase':'doe','doe_index':12}])

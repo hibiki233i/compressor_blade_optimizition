@@ -16,10 +16,8 @@ import xml.etree.ElementTree as ET
 from pathlib import Path, PureWindowsPath
 from typing import Any
 
-from blade_shape_flow_diagnostics import (
-    LOCATION_NAME, RAW_NAME, parse_measurements, render_session, run_cfx_post,
-)
-from blade_shape_runtime import atomic_json, digest, file_identity, output_lock
+from blade_shape_flow_diagnostics import LOCATION_NAME, RAW_NAME, parse_measurements, render_session
+from blade_shape_runtime import atomic_json, digest, file_identity, output_lock, run_cfx_post
 
 METHOD = 'forward_mass_velocity_triangle_v1'
 

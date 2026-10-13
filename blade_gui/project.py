@@ -43,10 +43,8 @@ PHASE_LABELS = {
 }
 
 
-def successful_rows(frame: pd.DataFrame | None) -> pd.DataFrame | None:
-    """Select successful statuses, preserving missing frames and empty schemas."""
-    if frame is None:
-        return None
+def successful_rows(frame: pd.DataFrame) -> pd.DataFrame:
+    """Select successful statuses, preserving empty schemas."""
     if frame.empty or "status" not in frame.columns:
         return frame.iloc[0:0]
     status = frame["status"].astype(str).str.strip().str.lower()

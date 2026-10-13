@@ -308,10 +308,9 @@ class TestSuccessfulRows(unittest.TestCase):
         self.assertEqual(selected.index.tolist(), [5, 2])
         self.assertEqual(selected.columns.tolist(), frame.columns.tolist())
 
-    def test_missing_frames_and_empty_schemas_are_preserved(self) -> None:
+    def test_empty_schemas_are_preserved(self) -> None:
         import pandas as pd
 
-        self.assertIsNone(successful_rows(None))
         for frame in (
             pd.DataFrame(columns=["status", "run_id"]),
             pd.DataFrame({"run_id": ["unregistered"]}),

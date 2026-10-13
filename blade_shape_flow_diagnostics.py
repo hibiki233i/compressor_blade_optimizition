@@ -12,24 +12,16 @@ import csv
 import json
 import math
 import re
-import subprocess
 import tempfile
 from pathlib import Path
 
 from blade_shape_cfx_runner import command_file_version
+from blade_shape_runtime import run_cfx_post
 
 
 LOCATION_NAME = re.compile(r"[A-Za-z0-9 _.-]+")
 RAW_NAME = "flow_diagnostics.tsv"
 ANGLE_CONVENTION = "wrap180(180 - relative_flow_angle_deg - blade_beta_deg)"
-
-
-def run_cfx_post(command: list[str], work: Path) -> subprocess.CompletedProcess[str]:
-    """Capture a diagnostic CFX-Post launch; callers retain their receipt policies."""
-    return subprocess.run(
-        command, cwd=work, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, encoding="utf-8", errors="replace", check=False,
-    )
 
 
 def measurement_expressions(inlet: str, outlet: str, span_band: float) -> dict[str, str]:

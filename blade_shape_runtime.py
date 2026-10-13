@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import subprocess
 import threading
 from typing import Any, Iterator
 
@@ -53,6 +54,14 @@ def file_identity(path: str | Path) -> dict[str, Any] | None:
         for block in iter(lambda: stream.read(1024 * 1024), b''):
             sha.update(block)
     return {'size': path.stat().st_size, 'sha256': sha.hexdigest()}
+
+
+def run_cfx_post(command: list[str], work: Path) -> subprocess.CompletedProcess[str]:
+    """Capture a diagnostic CFX-Post launch; callers retain their receipt policies."""
+    return subprocess.run(
+        command, cwd=work, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, encoding='utf-8', errors='replace', check=False,
+    )
 
 
 def digest(value: Any) -> str:
