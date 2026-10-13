@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import glob
 import json
 import math
 import os
@@ -58,12 +57,8 @@ class CfxResult:
     review: bool = False
 
 
-def _as_posix(path: str | Path) -> str:
-    return str(path).replace("\\", "/")
-
-
 def _cfx_path(path: str | Path) -> str:
-    return _as_posix(path)
+    return str(path).replace("\\", "/")
 
 
 def _run_logged(cmd: list[str], cwd: Path, log_path: Path) -> int:

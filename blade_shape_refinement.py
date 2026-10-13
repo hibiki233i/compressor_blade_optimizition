@@ -6,7 +6,6 @@ never promotes a prediction or a dry-run to a successful CFD observation.
 from __future__ import annotations
 
 import copy
-import hashlib
 import itertools
 import json
 from pathlib import Path
@@ -17,7 +16,7 @@ import pandas as pd
 
 from blade_shape_acquisition import hv_reference_point
 import blade_shape_signature as signatures
-from blade_shape_runtime import output_lock, case_reservations, reserve_case, stream_seed, atomic_json as durable_json
+from blade_shape_runtime import output_lock, case_reservations, reserve_case, stream_seed, atomic_json, digest
 
 OBJECTIVES = ['Efficiency', 'MassFlow']
 
@@ -178,14 +177,6 @@ def hypervolume_2d(values: np.ndarray, reference: np.ndarray) -> float:
             area += (a-reference[0])*(f-top)
             top=f
     return float(area)
-
-
-def atomic_json(path: Path, value: dict[str,Any]) -> None:
-    durable_json(path, value)
-
-
-def digest(value: Any) -> str:
-    return hashlib.sha256(json.dumps(value,sort_keys=True,allow_nan=False).encode()).hexdigest()
 
 
 def hv_reference(config: dict[str,Any], frame: pd.DataFrame) -> np.ndarray | None:

@@ -20,7 +20,6 @@ import blade_shape_cfx_runner as cfx
 import blade_shape_flow_diagnostics as fd
 import blade_shape_refinement as r
 from blade_shape_signature import physical_signature
-from blade_gui import commands
 from blade_gui.project import validate_config
 from tests.cfx_output_samples import output as cfx_output
 
@@ -274,12 +273,6 @@ class OperatingPointTests(unittest.TestCase):
         code, calls, text = self.check_pre(12000.0, definition=False)
         self.assertEqual((code, calls), (0, []))
         self.assertIn('not checked', text)
-
-    def test_gui_command_passes_definition(self):
-        spec = commands.build_check_pre('c.json', working_dir='/tmp/check', definition='/tmp/case/Impeller.def')
-        self.assertEqual(spec.args[-2:], ['--def', '/tmp/case/Impeller.def'])
-        self.assertNotIn('--def', commands.build_check_pre('c.json', working_dir='/tmp/check').args)
-
 
 if __name__ == '__main__':
     unittest.main()

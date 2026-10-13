@@ -43,7 +43,7 @@ class FlowDiagnosticsTests(unittest.TestCase):
             post = root / "cfx5post.exe"
             post.touch()
             logs = root / "logs"
-            with patch("blade_shape_flow_diagnostics.subprocess.run") as run:
+            with patch("blade_shape_runtime.subprocess.run") as run:
                 run.return_value = subprocess.CompletedProcess([], 0, stdout="expression failed")
                 with self.assertRaisesRegex(RuntimeError, "logs retained"):
                     analyze_res(res, post, inlet="R1 Inlet", outlet="R1 Outlet",
@@ -66,7 +66,7 @@ class FlowDiagnosticsTests(unittest.TestCase):
                 (work / "flow_diagnostics.tsv").write_text("__complete__\t1\n")
                 (work / "cfdpost_error.log").write_text("Failed to evaluate")
                 return subprocess.CompletedProcess(command, 0, stdout="done")
-            with patch("blade_shape_flow_diagnostics.subprocess.run", side_effect=fake_run):
+            with patch("blade_shape_runtime.subprocess.run", side_effect=fake_run):
                 with self.assertRaisesRegex(RuntimeError, "Failed to evaluate"):
                     analyze_res(res, post, inlet="R1 Inlet", outlet="R1 Outlet",
                                 span_band=0.2, log_dir=root / "logs")

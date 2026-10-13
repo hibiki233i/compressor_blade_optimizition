@@ -13,11 +13,10 @@ import csv
 import math
 import re
 import shutil
-import subprocess
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
-from blade_shape_runtime import atomic_json, file_identity
+from blade_shape_runtime import atomic_json, file_identity, run_cfx_post
 
 METHOD = 'cfx_post_saved_session_aca_20_v1'
 SPAN_POINTS = 20
@@ -133,8 +132,7 @@ def extract_aca(res: Path, post_exe: Path, session: Path, output: Path) -> dict[
     summary_path = output / SUMMARY_NAME
     atomic_json(summary_path, dict(method=METHOD, status='running'))
     try:
-        process = subprocess.run(command, cwd=output, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                 text=True, encoding='utf-8', errors='replace', check=False)
+        process = run_cfx_post(command, output)
         (output / 'cfxpost.log').write_text(process.stdout or '', encoding='utf-8')
         atomic_json(output / 'returncode.json', {'returncode': process.returncode})
         raw, error = (output / raw_name).resolve(), output / 'cfdpost_error.log'

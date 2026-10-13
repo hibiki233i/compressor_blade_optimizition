@@ -12,11 +12,11 @@ import csv
 import json
 import math
 import re
-import subprocess
 import tempfile
 from pathlib import Path
 
 from blade_shape_cfx_runner import command_file_version
+from blade_shape_runtime import run_cfx_post
 
 
 LOCATION_NAME = re.compile(r"[A-Za-z0-9 _.-]+")
@@ -254,16 +254,7 @@ def analyze_res(
         (work / "command.json").write_text(
             json.dumps({"argv": command, "cwd": str(work)}, indent=2), encoding="utf-8",
         )
-        process = subprocess.run(
-            command,
-            cwd=work,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-        )
+        process = run_cfx_post(command, work)
         (work / "cfxpost.log").write_text(process.stdout, encoding="utf-8")
         (work / "returncode.txt").write_text(str(process.returncode), encoding="utf-8")
         output = work / RAW_NAME

@@ -16,7 +16,6 @@ from typing import Callable
 
 import psutil
 from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QTimer, Signal
-from .commands import format_command
 
 #: CFX processes that can run outside the CLI's process tree (MPI workers may
 #: be started by the MPI launcher rather than under cfx5solve). They are only
@@ -66,9 +65,6 @@ class CommandRunner(QObject):
     @property
     def command(self) -> list[str]:
         return list(self._command)
-
-    def command_text(self) -> str:
-        return format_command(self._command)
 
     # -------------------------------------------------------------- start
     def start(self, argv: list[str], extra_env: dict[str, str] | None = None, *,
@@ -355,13 +351,3 @@ def _listing(processes: list[psutil.Process]) -> str:
 def default_python() -> str:
     """Interpreter used for child processes (same one running the GUI)."""
     return sys.executable or "python"
-
-
-def python_argv(entry_script: str, arguments: list[str]) -> list[str]:
-    return [default_python(), "-u", entry_script, *arguments]
-
-
-def child_environment() -> dict[str, str]:
-    env = {key: value for key, value in os.environ.items()}
-    env["PYTHONIOENCODING"] = "utf-8"
-    return env
