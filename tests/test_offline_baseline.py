@@ -16,6 +16,21 @@ import pandas as pd
 
 @unittest.skipUnless(importlib.util.find_spec('scipy'), 'offline reference uses SciPy LHS/Sobol')
 class OfflineBaselineTests(unittest.TestCase):
+    def test_changed_sampling_seed_fails_numerical_reference(self):
+        # Exercise a real upstream parameter change, not a corrupted CSV.
+        # Selection, objective values and diagnostics must stay tied to seed 42.
+        runner = self.runner()
+        compare = runpy.run_path('benchmarks/compare_offline_baseline.py')['compare_outputs']
+        config = json.loads(Path('benchmarks/offline_baseline/config.json').read_text())
+        config['runtime']['seed'] = 43
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            changed_config = root / 'config.json'
+            changed_config.write_text(json.dumps(config), encoding='utf-8')
+            runner['run_baseline'](root / 'output', changed_config)
+            with self.assertRaisesRegex(ValueError, r'training_data\.csv:'):
+                compare(root / 'output')
+
     def runner(self):
         script = Path('benchmarks/run_offline_baseline.py')
         self.assertTrue(script.is_file(), 'one-command offline benchmark is missing')
