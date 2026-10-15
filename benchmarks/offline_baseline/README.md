@@ -66,3 +66,20 @@ PressureRatio = 2.0, Power = 1.0, totalpressureratio = 2.1
 | case_000015 | 0.760937 | 4.298475 |
 
 比对失败时先检查运行目录的 `benchmark.json` 和依赖版本，再检查脚本指出的文件、行与列。脚本不会自动更新参考值；有意改变算法或基准时，应单独审查参考差异及原因。
+
+## 回归测试与 CI
+
+`python -m unittest discover -s tests -p test_offline_baseline.py -v` 覆盖参考数值、重复运行、
+输出隔离及参考比对的敏感性。新增用例把临时配置中的种子从 42 改为 43，运行完整优化流程，
+确认比对器拒绝变化后的选点/目标值；入库配置和参考值不会被修改。
+
+GitHub Actions 在 Ubuntu + Python 3.11 上安装上述固定数值依赖及 `requirements-gui.txt`，
+使用 `QT_QPA_PLATFORM=offscreen` 运行全部离线测试。可用同一环境在本地执行：
+
+```sh
+python -m pip install -r benchmarks/offline_baseline/requirements.txt -r requirements-gui.txt
+QT_QPA_PLATFORM=offscreen python -m unittest discover -s tests -v
+```
+
+手工故障注入：临时把入库 `config.json` 的 `runtime.seed` 改为 43，运行上述基准测试命令，
+应因与 `reference.json` 不符而返回非零；恢复 42 后重跑应通过。
