@@ -10,10 +10,7 @@ import numpy as np
 import pandas as pd
 import blade_shape_active_learning as b
 from blade_shape_signature import physical_signature
-
-def fake_geometry(config, candidate_path, dry_run=False):
-    (candidate_path.parent/'Impeller_Mesh.gtm').write_text('synthetic test mesh')
-    return True,'ok'
+from tests.synthetic_pipeline import fake_geometry
 
 class RefinementTests(unittest.TestCase):
     def setUp(self):
