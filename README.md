@@ -82,6 +82,17 @@ python blade_shape_active_learning.py run --config blade_shape_config.json --res
 
 只要输出目录里已经有数据，`run` 就必须加 `--resume`，以免误覆盖。`--max-new-cfd` 用来限制这次最多新增多少个 CFD，建议每次都写上。
 
+### 基准算例（离线）
+
+从干净环境安装固定版本的依赖后，一条命令运行并比对参考结果（Python 3.11+，无需工程软件或 GUI）：
+
+```powershell
+python -m pip install -r benchmarks/offline_baseline/requirements.txt
+python benchmarks/run_offline_baseline.py
+```
+
+基准固定 `seed=42`，复用合成平均线模板和测试替身，运行 12 个初始点及两轮各 3 个主动学习点。每次在 `benchmarks/offline_baseline/runs/run-*` 新建目录，产出训练、Pareto 和诊断 CSV，并自动检查入库参考值。结果是合成评分，不代表真实 CFD 性能，也不要导入工程训练目录。配置、参考摘要、容差及单独比对命令见 [基准说明](benchmarks/offline_baseline/README.md)。
+
 ## 输出文件
 
 输出目录由配置中的 `paths.output_dir` 决定，通常写在 `blade_shape_local.ini` 里。

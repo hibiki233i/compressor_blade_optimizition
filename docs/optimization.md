@@ -39,6 +39,17 @@
 
 两端的 beta 控制点会同步写入 CFturbo 里的进口角 `Beta1` 和出口角 `Beta2`。
 
+写入 batch 的字段映射如下；所有角度先由度偏移转为弧度，再加到模板基值上。hub 对应 `TMeanLine Index=0`，shroud 对应 `Index=1`。
+
+| 变量后缀（hub / shroud） | CFturbo batch 字段 |
+| --- | --- |
+| `beta_0_deg_offset` | `BladePropsML[@Name='Main blade']/Beta1/Value`（Index 0 / 1）；使用 `ProgPoints` 时同时写 0 号点的 `y` |
+| `beta_1..3_deg_offset` | `TMeanLine/InnerProgPoints/Value` 的 0..2 号 `y`；旧格式为 `ProgPoints` 的 1..3 号 `y` |
+| `beta_4_deg_offset` | 同一 `BladePropsML` 的 `Beta2/Value`（Index 0 / 1）；使用 `ProgPoints` 时同时写 4 号点的 `y` |
+| `theta_deg_offset` | `TMeanLine/lePos` 和 `StackingPhi`（写入其中存在的字段；读取基值时优先使用 `lePos`） |
+
+实现见 `candidate_geometry()` 和 `Run-BladeShapeGeometryMeshing.ps1` 的 `Set-MeanLineShape`。
+
 **当前搜索 7 个，固定 5 个。** 配置中的 `search.active_variables` 列出参与搜索的变量：hub_beta_0、hub_beta_3、hub_beta_4、shroud_beta_0、shroud_beta_2、shroud_beta_3、hub_theta。其余 5 个在 `search.fixed_variables` 里固定为某个具体值。写入 CFturbo 时仍然是完整的 12 个值。
 
 **上下限和几何约束都在配置里改**，不要去改代码：
