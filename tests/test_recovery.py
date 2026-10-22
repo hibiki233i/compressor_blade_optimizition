@@ -320,6 +320,32 @@ class LegacyInterruptionTests(unittest.TestCase):
                 self.assertEqual(before, {path: file_identity(path) for path in before})
                 self.assertEqual(receipts, {path: file_identity(path) for path in receipts})
 
+    def test_registered_evidence_changed_before_resume_is_refused_without_archiving(self):
+        case, x = self.failed_queue_point()
+        atomic_json(case/'geometry_state.json', {'status': 'running'})
+        atomic_json(case/'candidate.json', {'run_id': 'case_000000',
+                                            'variables': dict(zip(b.variable_names(self.config), x.tolist()))})
+        recovery.retry_interrupted(self.config, 'case_000000', 'confirmed old geometry stop')
+        changes = {'cfx_state.json': json.dumps({'version': 2, 'stages': {'pre': {'status': 'running'}}}),
+                   'geometry_state.json': json.dumps({'status': 'running', 'note': 'edited'}),
+                   'candidate.json': json.dumps({**json.loads((case/'candidate.json').read_text()), 'note': 'edited'})}
+        for name, text in changes.items():
+            with self.subTest(changed=name):
+                path = case/name
+                original = path.read_bytes() if path.exists() else None
+                path.write_text(text)
+                with patch.object(b, 'run_geometry', side_effect=AssertionError('changed evidence was recomputed')):
+                    with self.assertRaisesRegex(ValueError, f'retry-interrupted changed.*{name}'):
+                        pending.run(self.config, self.baseline, 1)
+                self.assertFalse((case/'attempts').exists())
+                self.assertEqual(json.loads((case/interruption.ATTEMPT).read_text())['status'], 'interrupted')
+                path.write_bytes(original) if original is not None else path.unlink()
+        with patch.object(b, 'run_geometry', side_effect=fake_geometry), \
+                patch.object(b, 'run_cfx_pipeline', return_value=cfx.CfxResult(True, METRICS, 'ok')):
+            self.assertEqual(pending.run(self.config, self.baseline, 1)['new_attempts'], 1)
+        self.assertEqual(b.load_training(self.config).status.tolist(), ['success'])
+        self.assertTrue((case/'attempts/interrupted_0001/candidate.json').exists())
+
     def test_legacy_geometry_running_receipt_still_recomputes_same_design(self):
         case, x = self.failed_queue_point()
         atomic_json(case/'geometry_state.json', {'status': 'running'})
@@ -477,6 +503,10 @@ class GuiStopReceiptTests(unittest.TestCase):
                 while runner.running and time.monotonic()<deadline:
                     app.processEvents();time.sleep(.02)
                 self.assertFalse(runner.running)
+                receipt=json.loads(Path(runner._stop_owner['stop_file']).read_text())
+                self.assertTrue(receipt['processes'], 'the stop scope must name the processes it terminates')
+                self.assertTrue(all(record['started_at'] for record in receipt['processes'].values()),
+                                'GUI-known start times distinguish these processes from later PID reuse')
                 self.assertTrue(interruption.retry_requested(case))
                 interruption.begin_case(case,'case_000000','same',[1.])
                 self.assertTrue((case/'attempts/interrupted_0001/run_attempt.json').exists())

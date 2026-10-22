@@ -20,6 +20,7 @@ import blade_shape_interrupt as interruption
 import blade_shape_pending as pending
 import blade_shape_refinement as refinement
 import blade_shape_review as reviews
+import blade_shape_signature as signatures
 from blade_shape_runtime import atomic_json, case_reservations, file_identity, reserve_case
 from tests.cfx_output_samples import output
 from tests.synthetic_pipeline import fake_geometry
@@ -403,6 +404,87 @@ class ResumeStateMachineTests(unittest.TestCase):
         self.assertEqual(b.load_training(self.config).run_id.tolist(), ['case_000000'])
         self.assertEqual(b.load_training(self.config).status.tolist(), ['success'])
         self.assertTrue((case / 'attempts/interrupted_0001/run_attempt.json').exists())
+
+
+    def stop_at_post(self, status='success'):
+        """The operator stop is observed when CFX-Post starts, after a verified Solve."""
+        tools = self.external(status)
+        def invoke(command, case, log):
+            if Path(command[0]).name == 'cfx5post.exe':
+                interruption.request_stop(interruption.current_owner(case))
+                interruption.check_stop(case)
+            return tools(command, case, log)
+        return invoke
+
+    def stopped_in_post(self, status='success'):
+        self.enqueue([self.center])
+        with patch.object(b, 'run_geometry', side_effect=fake_geometry), \
+                patch.object(cfx, '_run_logged', side_effect=self.stop_at_post(status)):
+            with self.assertRaises(KeyboardInterrupt):
+                pending.run(self.config, self.baseline, 1)
+        case = self.root / 'cases/case_000000'
+        self.assertEqual(b.load_training(self.config).status.tolist(), ['interrupted'])
+        self.assertTrue(interruption.retry_requested(case))
+        self.tool_calls.clear()
+        return case, json.loads((case / 'cfx_state.json').read_text())['stages']['solve']
+
+    def test_stop_during_post_reruns_only_post_on_the_verified_solve(self):
+        for status in ('success', 'review'):
+            with self.subTest(status=status):
+                self.study(f'post_stop_{status}')
+                case, solve = self.stopped_in_post(status)
+                kept = {name: file_identity(case / name) for name in
+                        (solve['result_file'], solve['out_file'], 'Impeller.def', 'Impeller_Mesh.gtm', 'candidate.json')}
+                with patch.object(b, 'run_geometry', side_effect=AssertionError('verified geometry was recomputed')), \
+                        patch.object(cfx, '_run_logged', side_effect=self.external(status)):
+                    result = pending.run(self.config, self.baseline, 1)
+                self.assertEqual(result['new_attempts'], 1)
+                self.assertEqual([name for _, name in self.tool_calls], ['cfx5post.exe'])
+                self.assertEqual(kept, {name: file_identity(case / name) for name in kept})
+                frame = b.load_training(self.config)
+                self.assertEqual(frame.run_id.tolist(), ['case_000000'])
+                self.assertEqual(frame.status.tolist(), [status])
+                journal = json.loads((case / interruption.RETRY).read_text())
+                self.assertEqual([attempt['scope'] for attempt in journal['attempts']], ['post'])
+                self.assertTrue((case / 'attempts/interrupted_0001' / interruption.ATTEMPT).exists())
+                self.assertFalse(list((case / 'attempts').rglob('*.res')), 'the verified Solve must stay in place')
+
+    def test_stop_during_post_with_changed_solve_evidence_recomputes_from_geometry(self):
+        self.study('post_stop_changed')
+        case, solve = self.stopped_in_post()
+        (case / solve['out_file']).write_text('edited after the stop')
+        with patch.object(b, 'run_geometry', side_effect=fake_geometry), \
+                patch.object(cfx, '_run_logged', side_effect=self.external()):
+            pending.run(self.config, self.baseline, 1)
+        self.assertEqual([name for _, name in self.tool_calls], ['cfx5pre.exe', 'cfx5solve.exe', 'cfx5post.exe'])
+        self.assertEqual((case / 'attempts/interrupted_0001' / solve['out_file']).read_text(), 'edited after the stop')
+        self.assertEqual(json.loads((case / interruption.RETRY).read_text())['attempts'][0]['scope'], 'all')
+        self.assertEqual(b.load_training(self.config).status.tolist(), ['success'])
+
+    def test_accepted_input_change_recomputes_a_stopped_point(self):
+        self.study('accepted_change')
+        self.enqueue([self.center])
+        with patch.object(b, 'run_geometry', side_effect=fake_geometry), \
+                patch.object(b, 'run_cfx_pipeline', side_effect=KeyboardInterrupt('operator stop')):
+            with self.assertRaises(KeyboardInterrupt):
+                pending.run(self.config, self.baseline, 1)
+        case = self.root / 'cases/case_000000'
+        old = json.loads((case / interruption.ATTEMPT).read_text())['signature']
+        Path(self.config['paths']['template_cfx']).write_text('revised CFX project')
+        records = signatures.merge(pending.records(self.config),
+                                   signatures.training_records(self.config, b.load_training(self.config)))
+        with self.assertRaises(signatures.InputsChanged):
+            signatures.check(self.config, records, None)
+        signatures.check(self.config, records, 'template revision does not affect the stopped point')
+        self.assertNotEqual(old, signatures.physical_signature(self.config))
+        with patch.object(b, 'run_geometry', side_effect=fake_geometry), \
+                patch.object(cfx, '_run_logged', side_effect=self.external()):
+            result = pending.run(self.config, self.baseline, 1)
+        self.assertEqual(result['new_attempts'], 1)
+        frame = b.load_training(self.config)
+        self.assertEqual(frame.status.tolist(), ['success'])
+        self.assertEqual(frame[signatures.COLUMN].tolist(), [signatures.physical_signature(self.config)])
+        self.assertEqual(json.loads((case / 'attempts/interrupted_0001' / interruption.ATTEMPT).read_text())['signature'], old)
 
 
 if __name__ == '__main__':

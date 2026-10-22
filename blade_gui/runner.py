@@ -144,7 +144,7 @@ class CommandRunner(QObject):
         targets = sorted(self._known.values(), key=lambda proc: proc.pid == root)  # the CLI last
         if self._stop_owner:
             try:
-                request_stop(self._stop_owner, process_ids=[proc.pid for proc in targets])
+                request_stop(self._stop_owner, **self._stop_scope())
             except OSError as exc:
                 self.failed.emit(f'无法记录进程停止范围，尚未终止进程：{exc}')
                 return
@@ -162,6 +162,11 @@ class CommandRunner(QObject):
             process.waitForFinished(500)
         self._terminate_owned(process, root, targets, owner, wait=wait)
 
+    def _stop_scope(self) -> dict:
+        # Start times let a resume tell these processes from later PID reuse.
+        return {'process_ids': [pid for pid, _ in self._known],
+                'process_started': {pid: start for pid, start in self._known}}
+
     def _terminate_owned(self, process: QProcess, root: int, targets: list[psutil.Process],
                          owner: dict, *, wait: bool) -> None:
         if self._process is process:
@@ -169,7 +174,7 @@ class CommandRunner(QObject):
             targets = sorted(self._known.values(), key=lambda proc: proc.pid == root)
             if owner:
                 try:
-                    request_stop(owner, process_ids=[proc.pid for proc in targets])
+                    request_stop(owner, **self._stop_scope())
                 except OSError as exc:
                     self.failed.emit(f'无法更新停止范围：{exc}')
                     return

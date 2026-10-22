@@ -106,7 +106,9 @@ def retry_interrupted(config: dict, run_id: str, reason: str) -> dict:
                        x=[float(row[name]) for name in b.variable_names(config)], status='interrupted',
                        owner={'token': owner_env[interruption.TOKEN_ENV], 'stop_file': owner_env[interruption.STOP_ENV]},
                        reason=reason.strip(), original_row=pending.safe_json(dict(row)),
-                       original_receipt_identity=file_identity(state_path))
+                       original_receipt_identity=file_identity(state_path),
+                       registered_evidence={name: file_identity(case / name)
+                                            for name in interruption.REGISTERED_EVIDENCE})
         atomic_json(case / interruption.ATTEMPT, attempt)
         update = {'status': 'interrupted', 'failure_stage': 'interrupted', 'message': reason.strip()}
         if len(rows):

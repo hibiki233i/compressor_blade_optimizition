@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -164,6 +165,92 @@ class InterruptedAttemptStateTests(unittest.TestCase):
                     interruption.begin_case(case, case.name, 'same-inputs', [1.])
                 after = {path.relative_to(case): file_identity(path) for path in case.rglob('*') if path.is_file()}
                 self.assertEqual(before, after, 'journal identity conflict must not move or rewrite evidence')
+
+
+    def test_reused_pids_do_not_block_retry_but_the_recorded_process_does(self):
+        if interruption.process_started_at(os.getpid()) is None:
+            self.skipTest('process start times are unavailable on this platform')
+        child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
+        self.addCleanup(stop_child, child)
+        started = interruption.process_started_at(child.pid)
+        self.assertIsNotNone(started)
+        before = started - 60  # evidence written a minute before this process existed
+
+        def owned_case(name):
+            case = self.root/name
+            attempt = interruption.begin_case(case, 'case_000000', 'same-inputs', [1.])
+            return case, attempt['owner']
+
+        def stop_receipt(owner, processes=None, mtime=None):
+            receipt = {'token': owner['token'], 'process_ids': [child.pid]}
+            if processes is not None:
+                receipt['processes'] = {str(child.pid): processes}
+            atomic_json(Path(owner['stop_file']), receipt)
+            if mtime is not None:
+                os.utime(owner['stop_file'], (mtime, mtime))
+
+        def active(case, **record):
+            atomic_json(case/'active_process.json', {'status': 'running', 'pid': child.pid, **record})
+
+        def pids_file(case, mtime=None):
+            path = case/'Impeller_001.dir/pids'
+            path.parent.mkdir()
+            path.write_text(f'| host | 0 | {child.pid} |\n')
+            if mtime is not None:
+                os.utime(path, (mtime, mtime))
+
+        def legacy_active(case, owner, live):
+            active(case)
+            if not live:
+                os.utime(case/'active_process.json', (before, before))
+
+        sources = {
+            'stop receipt start time': lambda case, owner, live: stop_receipt(
+                owner, {'started_at': started if live else started - 60}),
+            'legacy stop receipt': lambda case, owner, live: stop_receipt(owner, mtime=None if live else before),
+            'active process start time': lambda case, owner, live: active(
+                case, started_at=started if live else started - 60),
+            'legacy active process': legacy_active,
+            'CFX pids file': lambda case, owner, live: pids_file(case, mtime=None if live else before),
+        }
+        for index, (source, record) in enumerate(sources.items()):
+            with self.subTest(source=source):
+                case, owner = owned_case(f'reused_{index}')
+                record(case, owner, False)
+                interruption.assert_idle(case)  # an unrelated process now holds the PID
+                case, owner = owned_case(f'live_{index}')
+                record(case, owner, True)
+                with self.assertRaisesRegex(RuntimeError, str(child.pid)):
+                    interruption.assert_idle(case)
+
+    def test_finished_process_keeps_its_exit_and_the_next_stage_honours_a_late_stop(self):
+        case = self.root/'case_000000'
+        attempt = interruption.begin_case(case, case.name, 'same-inputs', [1.])
+        original_write = interruption.atomic_json
+
+        def finish_then_stop(path, value):
+            original_write(path, value)
+            if Path(path).name == 'active_process.json' and value.get('status') == 'finished':
+                interruption.request_stop(attempt['owner'])
+
+        with patch.object(interruption, 'atomic_json', side_effect=finish_then_stop):
+            code = interruption.run_logged([sys.executable, '-c', 'pass'], case, case/'cfx_solve.log')
+        self.assertEqual(code, 0, 'a finished Solve must reach its stage receipt before the stop applies')
+        with patch.object(interruption.subprocess, 'Popen', side_effect=AssertionError('next stage started after stop')):
+            with self.assertRaises(interruption.RunInterrupted):
+                interruption.run_logged([sys.executable, '-c', 'pass'], case, case/'cfx_post.log')
+
+    def test_only_an_accepted_input_change_retries_a_stopped_attempt(self):
+        case = self.root/'case_000000'
+        attempt = interruption.begin_case(case, case.name, 'old-inputs', [1.])
+        (case/'partial.txt').write_text('stopped work', encoding='utf-8')
+        interruption.request_stop(attempt['owner'])
+        with self.assertRaisesRegex(ValueError, 'inputs changed'):
+            interruption.begin_case(case, case.name, 'new-inputs', [1.], accepted={'new-inputs'})
+        self.assertFalse((case/'attempts').exists())
+        interruption.begin_case(case, case.name, 'new-inputs', [1.], accepted={'old-inputs', 'new-inputs'})
+        self.assertEqual((case/'attempts/interrupted_0001/partial.txt').read_text(encoding='utf-8'), 'stopped work')
+        self.assertEqual(json.loads((case/interruption.ATTEMPT).read_text())['signature'], 'new-inputs')
 
 
 class CommittedOutcomeCancellationTests(unittest.TestCase):
