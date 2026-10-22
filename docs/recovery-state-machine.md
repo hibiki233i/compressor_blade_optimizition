@@ -19,7 +19,7 @@
 
 ## 进程与重评的生命周期
 
-子进程从启动、活动凭据登记到等待退出都由同一清理路径保护；活动凭据写入被中断或失败时，也会结束已启动的子树。自然非零退出先传回对应阶段，真正取消产生的退出另行标记。GUI/CLI 并发停止使用序列化合并，JSON 写入使用独立临时文件，保留停止范围。
+子进程从启动、活动凭据登记到等待退出都由同一清理路径保护；活动凭据写入被中断或失败时，也会结束已启动的子树。自然非零退出先传回对应阶段，真正取消产生的退出另行标记。GUI/CLI 并发停止使用序列化合并，JSON 写入使用独立临时文件，保留停止范围。GUI 写入停止凭据后最多等 CLI 8 秒完成自身清理再强制结束进程树；运行级停止在下一个算例开始前生效，不为未开始的点创建 attempt 或 interrupted 行。重评 Post 抛出异常时操作凭据记为 failed。
 
 CFD attempt 和重评 Post 有独立的 owner。重放 Post 时创建新的操作 owner，旧停止请求不会阻止重放，也不会触发整例归档。最终求解证据必须对应最后一次实际启动的求解：发生 continuation 时必须是 attempt 1，正常退出且证据一致；初始 attempt 0 不能替代失败或缺少输出的 continuation。这也适用于没有新 reason_code 的历史凭据。
 
@@ -30,6 +30,6 @@ CFD attempt 和重评 Post 有独立的 owner。重放 Post 时创建新的操�
 | tests/test_interrupt_state_machine.py | 失败与停止竞态；CSV 提交后中断；自然非零退出；正常退出后迟到的停止；PID 复用；已接受输入变更；子进程已启动而活动凭据写入失败；并发停止范围合并；无标记崩溃；归档身份冲突 |
 | tests/test_resume_state_machine.py | 普通/边界预算 0 恢复 success/review；恢复不占下个点预算；队列后续扫描；前序阶段门控；连续两次停止；CSV/诊断/checkpoint/Pareto 一致；人工决定保留；输入或证据变化拒绝；Post 中停止只重跑 Post 及证据变化时整例重算；接受输入变更后重算 |
 | tests/test_reassessment_state_machine.py | restart 非零退出、结果歧义、缺失/无法解析 out；历史无 reason_code 凭据；Post 中断重放；prepared 及 CSV/queue 分步提交的重放；人工否决保护 |
-| tests/test_recovery.py、tests/test_reliability.py | 同 run_id 重算与历史归档；旧中断登记及 continuation 中断；登记后凭据变化拒绝；CFX 完整链路恢复；锁、签名和异常处理 |
+| tests/test_recovery.py、tests/test_reliability.py | 同 run_id 重算与历史归档；旧中断登记及 continuation 中断；登记后凭据变化（含归档中途两侧）拒绝；GUI 等待 CLI 清理；CFX 完整链路恢复；锁、签名和异常处理 |
 
 测试使用临时目录、合成 CFD 文件和外部工具替身，进程清理及并发停止测试使用可回收的真实 Python 子进程。真实工程求解器的长时间停止/重启仍需在明确配置和预算下单独验证。

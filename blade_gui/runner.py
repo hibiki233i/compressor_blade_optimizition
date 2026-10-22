@@ -26,6 +26,10 @@ CFX_PROCESS_NAMES = frozenset({"solver-mpi.exe", "solver.exe", "cfx5solve.exe", 
                                "solver-mpi", "solver", "cfx5solve", "cfx5control"})
 #: Grace period before survivors of a stop are killed outright.
 STOP_GRACE_MS = 2500
+#: Time a CLI that received its stop token gets to end its own children and
+#: record the interruption before the GUI terminates the tree. The CLI waits up
+#: to 5 s for a child after killing it, so this must exceed that.
+CLI_CLEANUP_MS = 8000
 #: How often the processes a run has started are recorded while it runs.
 TRACK_INTERVAL_MS = 5000
 #: Tolerance between psutil start times and the GUI clock (Linux derives start
@@ -156,11 +160,22 @@ class CommandRunner(QObject):
         # spawned while the first stop snapshot was being collected.
         owner = dict(self._stop_owner)
         if owner and not wait:
-            QTimer.singleShot(500, lambda: self._terminate_owned(process, root, targets, owner, wait=False))
+            self._await_cli_cleanup(process, root, targets, owner, time.monotonic() + CLI_CLEANUP_MS / 1000)
             return
         if owner:
-            process.waitForFinished(500)
+            process.waitForFinished(CLI_CLEANUP_MS)
         self._terminate_owned(process, root, targets, owner, wait=wait)
+
+    def _await_cli_cleanup(self, process: QProcess, root: int, targets: list[psutil.Process],
+                           owner: dict, deadline: float) -> None:
+        """Poll without blocking the event loop; terminate early once the CLI has exited."""
+        try:
+            if process.state() != QProcess.NotRunning and time.monotonic() < deadline:
+                QTimer.singleShot(200, lambda: self._await_cli_cleanup(process, root, targets, owner, deadline))
+                return
+        except RuntimeError:  # the runner or QProcess was already deleted
+            return
+        self._terminate_owned(process, root, targets, owner, wait=False)
 
     def _stop_scope(self) -> dict:
         # Start times let a resume tell these processes from later PID reuse.

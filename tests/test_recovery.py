@@ -346,6 +346,40 @@ class LegacyInterruptionTests(unittest.TestCase):
         self.assertEqual(b.load_training(self.config).status.tolist(), ['success'])
         self.assertTrue((case/'attempts/interrupted_0001/candidate.json').exists())
 
+    def test_registered_evidence_is_checked_on_both_sides_of_a_partial_archive(self):
+        case, x = self.failed_queue_point()
+        atomic_json(case/'geometry_state.json', {'status': 'running'})
+        atomic_json(case/'candidate.json', {'run_id': 'case_000000',
+                                            'variables': dict(zip(b.variable_names(self.config), x.tolist()))})
+        recovery.retry_interrupted(self.config, 'case_000000', 'confirmed old geometry stop')
+        dest = case/'attempts/interrupted_0001'
+        original_move = interruption.shutil.move
+
+        def move_candidate_then_fail(source, target):
+            if (case/'candidate.json').exists():
+                original_move(str(case/'candidate.json'), str(dest/'candidate.json'))
+            raise OSError('archive interrupted after moving candidate.json')
+
+        with patch.object(interruption.shutil, 'move', side_effect=move_candidate_then_fail):
+            with self.assertRaises(OSError):
+                pending.run(self.config, self.baseline, 1)
+        self.assertEqual(json.loads((case/interruption.RETRY).read_text())['attempts'][0]['status'], 'archiving')
+        for path in (dest/'candidate.json', case/'geometry_state.json'):  # moved and not yet moved
+            with self.subTest(changed=str(path.relative_to(case))):
+                original = path.read_bytes()
+                path.write_text(json.dumps({**json.loads(original), 'note': 'edited during the partial archive'}))
+                before = {p.relative_to(case): file_identity(p) for p in case.rglob('*') if p.is_file()}
+                with patch.object(b, 'run_geometry', side_effect=AssertionError('changed evidence was recomputed')):
+                    with self.assertRaisesRegex(ValueError, f'retry-interrupted changed.*{path.name}'):
+                        pending.run(self.config, self.baseline, 1)
+                self.assertEqual(before, {p.relative_to(case): file_identity(p) for p in case.rglob('*') if p.is_file()})
+                path.write_bytes(original)
+        with patch.object(b, 'run_geometry', side_effect=fake_geometry), \
+                patch.object(b, 'run_cfx_pipeline', return_value=cfx.CfxResult(True, METRICS, 'ok')):
+            self.assertEqual(pending.run(self.config, self.baseline, 1)['new_attempts'], 1)
+        self.assertEqual(b.load_training(self.config).status.tolist(), ['success'])
+        self.assertEqual(json.loads((dest/'geometry_state.json').read_text()), {'status': 'running'})
+
     def test_legacy_geometry_running_receipt_still_recomputes_same_design(self):
         case, x = self.failed_queue_point()
         atomic_json(case/'geometry_state.json', {'status': 'running'})
@@ -479,6 +513,47 @@ class ReviewModeTests(unittest.TestCase):
 @unittest.skipUnless(importlib.util.find_spec('PySide6') and importlib.util.find_spec('psutil'),
                      'GUI cancellation requires optional PySide6 and psutil')
 class GuiStopReceiptTests(unittest.TestCase):
+    def test_cli_finishes_its_own_cleanup_before_the_gui_terminates_it(self):
+        from PySide6.QtWidgets import QApplication
+        from blade_gui.runner import CommandRunner
+        import time
+        app=QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as directory:
+            case=Path(directory)/'cases/case_000000'
+            marker=Path(directory)/'cleanup_recorded'
+            runner=CommandRunner(Path.cwd())
+            lines=[]
+            runner.line.connect(lambda channel,line:lines.append(line))
+            # Like evaluate_true_cfd: the stop ends the child, then the interruption is recorded.
+            script=('import sys, time; from pathlib import Path; import blade_shape_interrupt as i; '
+                    f'case=Path({str(case)!r}); i.begin_case(case, "case_000000", "same", [1.]); '
+                    'print("ready",flush=True)\n'
+                    'try:\n'
+                    ' i.run_logged([sys.executable, "-c", "import time; time.sleep(30)"], case, case/"child.log")\n'
+                    'except KeyboardInterrupt:\n'
+                    f' time.sleep(1.5); Path({str(marker)!r}).write_text("ok"); i.finish_case(case, "interrupted"); raise\n')
+            runner.start([sys.executable,'-c',script],scope=[directory])
+            try:
+                deadline=time.monotonic()+10
+                while 'ready' not in lines and time.monotonic()<deadline:
+                    app.processEvents();time.sleep(.02)
+                self.assertIn('ready',lines)
+                runner.stop()
+                deadline=time.monotonic()+15
+                while runner.running and time.monotonic()<deadline:
+                    app.processEvents();time.sleep(.02)
+                self.assertFalse(runner.running)
+                self.assertTrue(marker.exists(), 'the GUI killed the CLI before it recorded the interruption')
+                self.assertEqual(json.loads((case/interruption.ATTEMPT).read_text())['status'], 'interrupted')
+                child=json.loads((case/'active_process.json').read_text())
+                self.assertTrue(child['cancelled'])
+                self.assertFalse(interruption.pid_alive(child['pid'], started_at=child['started_at']))
+            finally:
+                if runner.running:
+                    runner.stop(wait=True)
+                runner.deleteLater()
+                app.processEvents()
+
     def test_stop_records_token_before_terminating_cli_and_resume_can_detect_it(self):
         from PySide6.QtWidgets import QApplication
         from blade_gui.runner import CommandRunner
@@ -498,7 +573,9 @@ class GuiStopReceiptTests(unittest.TestCase):
                 while 'ready' not in lines and time.monotonic()<deadline:
                     app.processEvents();time.sleep(.02)
                 self.assertIn('ready',lines)
-                runner.stop()
+                # This CLI never polls its token, so only the forced termination ends it.
+                with patch('blade_gui.runner.CLI_CLEANUP_MS', 300):
+                    runner.stop()
                 deadline=time.monotonic()+10
                 while runner.running and time.monotonic()<deadline:
                     app.processEvents();time.sleep(.02)

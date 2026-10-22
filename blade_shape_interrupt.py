@@ -126,6 +126,9 @@ def operation(case: Path, name: str):
     except KeyboardInterrupt:
         record['status'] = 'interrupted'
         raise
+    except Exception:
+        record['status'] = 'failed'
+        raise
     finally:
         if record['status'] == 'running':
             record['status'] = 'complete'
@@ -371,8 +374,12 @@ def begin_case(case: Path, run_id: str, signature: str, x: list[float],
         registered = (prior or {}).get('registered_evidence')
         if registered is None and prior and 'original_receipt_identity' in prior:
             registered = {'cfx_state.json': prior['original_receipt_identity']}
-        if registered is not None and not archiving:
-            changed = sorted(name for name, identity in registered.items() if file_identity(case / name) != identity)
+        if registered is not None:
+            # A journaled archive may have moved part of it; check whichever side holds each file.
+            moved = case / archiving['directory'] if archiving else None
+            changed = sorted(name for name, identity in registered.items()
+                             if file_identity(moved / name if moved and not (case / name).exists()
+                                              and (moved / name).exists() else case / name) != identity)
             if changed:
                 raise ValueError(f'Evidence confirmed by retry-interrupted changed ({", ".join(changed)}); '
                                  'inspect the case before retrying.')
@@ -410,6 +417,13 @@ def finish_case(case: Path, status: str) -> None:
     data = json.loads((case / ATTEMPT).read_text())
     data['status'] = status
     atomic_json(case / ATTEMPT, data)
+
+
+def check_run_stop() -> None:
+    """A launcher's stop for the whole run (GUI token) ends it before another case starts."""
+    token, stop_file = os.environ.get(TOKEN_ENV), os.environ.get(STOP_ENV)
+    if token and stop_file and stopped({'token': token, 'stop_file': stop_file}):
+        raise RunInterrupted('Operator stopped this run before the next case started.')
 
 
 def check_stop(case: Path) -> None:

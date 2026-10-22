@@ -1124,6 +1124,7 @@ def evaluate_true_cfd(config: dict[str, Any], baseline: BaselineShape, x: np.nda
         recovered = recover_recorded_case(config, baseline, x, case_index, **metadata)
         if recovered is not None:
             return recovered
+        interruption.check_run_stop()
         interruption.begin_case(case, run_id, signatures.remember(config), x.tolist(),
                                 accepted=signatures.compatible(config))
         try:

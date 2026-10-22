@@ -16,6 +16,7 @@ import blade_shape_active_learning as b
 import blade_shape_interrupt as interruption
 import blade_shape_pending as pending
 import blade_shape_signature as signatures
+from blade_shape_cfx_runner import CfxResult
 from blade_shape_runtime import atomic_json, file_identity
 from tests import test_refinement
 from tests.synthetic_pipeline import fake_geometry
@@ -253,6 +254,14 @@ class InterruptedAttemptStateTests(unittest.TestCase):
         self.assertEqual(json.loads((case/interruption.ATTEMPT).read_text())['signature'], 'new-inputs')
 
 
+    def test_failed_reassessment_operation_is_not_recorded_as_complete(self):
+        case = self.root/'case_000000'
+        case.mkdir()
+        with self.assertRaises(RuntimeError):
+            with interruption.operation(case, 'reassess'):
+                raise RuntimeError('CFX-Post could not start')
+        self.assertEqual(json.loads((case/interruption.OPERATION).read_text())['status'], 'failed')
+
 class CommittedOutcomeCancellationTests(unittest.TestCase):
     setUp = test_refinement.RefinementTests.setUp
 
@@ -354,6 +363,41 @@ class CommittedOutcomeCancellationTests(unittest.TestCase):
         self.assertEqual(geometry, file_identity(case/'geometry_state.json'))
         self.assertEqual(b.load_training(self.config).status.tolist(), ['interrupted'])
         self.assertTrue(interruption.retry_requested(case))
+
+    def test_run_stop_before_the_next_case_leaves_it_untouched_for_resume(self):
+        env = interruption.stop_environment(self.root)
+        interruption.request_stop({'token': env[interruption.TOKEN_ENV], 'stop_file': env[interruption.STOP_ENV]})
+        pending.enqueue(self.config, [b.SelectedCandidate(self.center, 1, 'doe')], [{'sample_phase': 'doe'}])
+        with patch.dict('os.environ', env), \
+                patch.object(b, 'run_geometry', side_effect=AssertionError('a stopped run started geometry')):
+            with self.assertRaises(interruption.RunInterrupted):
+                pending.run(self.config, self.baseline, 1)
+        case = self.root/'cases/case_000000'
+        self.assertFalse((case/interruption.ATTEMPT).exists(), 'no attempt may be opened after the run stopped')
+        self.assertTrue(b.load_training(self.config).empty, 'an untouched case is not an interrupted CFD point')
+        with patch.object(b, 'run_geometry', side_effect=fake_geometry), \
+                patch.object(b, 'run_cfx_pipeline', return_value=CfxResult(True, METRICS, 'ok')):
+            self.assertEqual(pending.run(self.config, self.baseline, 1)['new_attempts'], 1)
+        self.assertEqual(b.load_training(self.config).status.tolist(), ['success'])
+        self.assertFalse((case/'attempts').exists())
+
+    def test_reopened_finalized_interrupted_entry_keeps_its_improvement_baseline(self):
+        pending.enqueue(self.config, [b.SelectedCandidate(self.center, 1, 'doe')], [{'sample_phase': 'doe'}])
+        with patch.object(b, 'run_geometry', side_effect=fake_geometry), \
+                patch.object(b, 'run_cfx_pipeline', side_effect=KeyboardInterrupt('operator stop')):
+            with self.assertRaises(KeyboardInterrupt):
+                pending.run(self.config, self.baseline, 1)
+        queue = pending.load(self.config)
+        baseline_ids = queue['entries'][0]['before_run_ids']
+        # A crash between the CSV and queue writes can leave the entry finalized.
+        queue['entries'][0].update(status='failed', finalized=True)
+        atomic_json(pending.path_for(self.config), queue)
+        with patch.object(b, 'run_geometry', side_effect=fake_geometry), \
+                patch.object(b, 'run_cfx_pipeline', return_value=CfxResult(True, METRICS, 'ok')):
+            pending.run(self.config, self.baseline, 1)
+        entry = pending.load(self.config)['entries'][0]
+        self.assertEqual(entry['before_run_ids'], baseline_ids)
+        self.assertEqual(b.load_training(self.config).status.tolist(), ['success'])
 
     def test_natural_nonzero_exit_is_recorded_as_failure_even_when_stop_arrives_before_return(self):
         original_write = interruption.atomic_json

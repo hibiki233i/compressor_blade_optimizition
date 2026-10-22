@@ -78,7 +78,7 @@ def run(config: dict[str,Any], baseline: Any, budget: int) -> dict[str,Any]:
             if not recorded.empty and recorded.iloc[0]['status'] != 'interrupted':
                 continue
             if not recorded.empty:
-                entry.update(status='pending', finalized=False)
+                entry.update(status='interrupted', finalized=False)
                 atomic_json(path_for(config), queue)
         if entry['signature'] not in allowed:
             raise signatures.InputsChanged(f"Inputs changed for pending {entry['run_id']}; inspect before resuming.")

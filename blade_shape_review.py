@@ -49,11 +49,11 @@ def awaiting(config: dict[str, Any]) -> list[dict[str, Any]]:
         # Enrich old receipts without changing their recorded classification.
         if solve.get('out_file') and (case / solve['out_file']).is_file():
             from blade_shape_convergence import assess_out, ConvergencePolicy, ReviewPolicy
+            policy, window = ConvergencePolicy.from_config(config), ReviewPolicy.from_config(config).history_window
             try:
-                report = assess_out((case / solve['out_file']).read_text(errors='replace'),
-                                    ConvergencePolicy.from_config(config),
-                                    history_window=ReviewPolicy.from_config(config).history_window)
-            except ValueError as exc:
+                report = assess_out((case / solve['out_file']).read_text(errors='replace'), policy,
+                                    history_window=window)
+            except (ValueError, OSError) as exc:  # the recorded report stays available
                 report = {**report, 'evidence_error': str(exc)}
         out.append({'run_id': run_id, **{o: float(row[o]) for o in b.OBJECTIVE_COLUMNS},
                     'equations_above_target': solve.get('review', {}).get('equations_above_target'),

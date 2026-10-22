@@ -321,6 +321,18 @@ class TestSuccessfulRows(unittest.TestCase):
                 self.assertEqual(selected.columns.tolist(), frame.columns.tolist())
 
 
+class TestInterruptedSummary(ProjectFixture):
+    def test_interrupted_points_are_not_counted_as_failures(self) -> None:
+        interrupted = list(TRAINING_ROWS[3])
+        index = TRAINING_HEADER.index
+        interrupted[index("status")], interrupted[index("failure_stage")] = "interrupted", "interrupted"
+        interrupted[index("run_id")] = interrupted[index("case_dir")] = "case_000004"
+        write_csv(self.out / "training_data.csv", TRAINING_HEADER, [*TRAINING_ROWS, interrupted])
+        summary = Project(self.config_path).summary()
+        self.assertEqual((summary.attempts, summary.failures, summary.interrupted), (5, 1, 1))
+        self.assertNotIn("interrupted", summary.failure_stages)
+
+
 class TestProjectLayer(ProjectFixture):
     def setUp(self) -> None:
         super().setUp()

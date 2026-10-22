@@ -30,7 +30,7 @@ from ..widgets import Badge, Card, EmptyState, MessageBar, tool_button
 from .base import Page
 
 STATUS_FILTERS = [("全部状态", "all"), ("仅成功", "success"), ("待审核", "review"), ("仅失败", "failed"),
-                  ("未登记", "unknown")]
+                  ("已中断", "interrupted"), ("未登记", "unknown")]
 STATUS_LABELS = {"success": "成功", "failed": "失败", "failure": "失败", "review": "待审核", "interrupted": "已中断，待重算"}
 LOG_SUFFIXES = {".log", ".txt", ".out", ".err", ".lst", ".trn"}
 
@@ -259,9 +259,9 @@ class CasesPage(Page):
         for record in self._records:
             if status_key == "success" and record.status != "success":
                 continue
-            if status_key == "failed" and record.status in ("success", "review"):
+            if status_key == "failed" and record.status in ("success", "review", "interrupted"):
                 continue
-            if status_key == "review" and record.status != "review":
+            if status_key in ("review", "interrupted") and record.status != status_key:
                 continue
             if status_key == "unknown" and record.registered:
                 continue
