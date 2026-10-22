@@ -121,6 +121,8 @@ python blade_shape_active_learning.py run --config blade_shape_config.json --res
 
 GUI「停止」或关闭窗口确认停止时，先写入带本次运行 token 的停止凭据；终端 Ctrl+C 也记录明确中断。未完成的点保留原 run_id、坐标及阶段信息，不计作数值失败。下次 `--resume` 在新增 CFD 预算内先重算该点：确认已记录进程退出后，把旧产物归档到算例内 `attempts/interrupted_XXXX/`，再从几何开始重新计算；归档有日志，写到一半中断也可恢复，不删除锁文件。已经完成并通过身份核验的 Solve/Post 只补写 CSV，不重复计算。无停止凭据的崩溃或真正未收敛不自动重试。
 
+恢复顺序以已提交结果和实际阶段证据为准：已写入的 success/failed/review 行不会被稍后到达的停止请求改成 interrupted；阶段已明确失败也不会因停止 token 自动重算。完整 Solve/Post 或失败终态的补记在预算检查之前进行，新增 CFD 计数为零；`run` 和 `run-boundary` 都可用 `--max-new-cfd 0` 整理已完成记录、诊断、阶段状态和 Pareto。边界实验先恢复全部已预留点，再检查前序阶段是否完成或待审核。状态规则及测试矩阵见 [恢复状态机](recovery-state-machine.md)。
+
 旧版本没有停止凭据，无法仅凭 running/failed 区分操作停止与故障。人工确认旧点确实由停止命令中断后，可先登记，再正常续跑（第一条不启动 CFD）：
 
 ```powershell
@@ -129,6 +131,8 @@ python blade_shape_active_learning.py run --config blade_shape_config.json --res
 ```
 
 登记会核对队列/边界预留、物理签名、设计坐标及未完成证据，并保留旧行；几何或 CFX 任一阶段已明确记为失败、已正常求解结束的数值失败或人工否决不能走这个入口。未入表但仍在旧队列 running 的点，以及仅有边界预留记录的旧中断点也可登记；边界点保留原方案、点位和 run_id，再用原方案执行 `run-boundary --resume`。重算结束替换 interrupted 行，保留额外列，不生成重复 run_id。
+
+若初始 Solve 正常结束、后续 continuation 被操作员中断，初始结果作为历史保留，登记时不会把它误认成最终结果。`reassess` 另行核对最后一次实际求解的编号、退出状态及输出证据；restart 执行或输出失败不能用前一次结果替代。重评 Post 使用独立停止 token，中断后可重放原计划，仅重做尚未完成的 Post。
 
 **换了工况或模板之后**：每条训练记录、每个待续跑点和每份边界方案都带着生成时的**物理签名**（CSV 的 `physical_signature` 列）。签名只覆盖会改变同一个设计点计算结果的输入：
 

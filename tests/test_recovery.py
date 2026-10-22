@@ -68,7 +68,8 @@ class InterruptedCaseTests(unittest.TestCase):
         data = interruption.begin_case(case, 'case_000000', 'signature', [1.])
         (case/'partial.res').write_text('partial')
         self.assertFalse(interruption.retry_requested(case))
-        interruption.begin_case(case, 'case_000000', 'signature', [1.])
+        with self.assertRaisesRegex(ValueError, 'Unmarked running'):
+            interruption.begin_case(case, 'case_000000', 'signature', [1.])
         self.assertTrue((case/'partial.res').exists())
         interruption.request_stop(data['owner'])
         with self.assertRaisesRegex(ValueError, 'inputs changed'):
@@ -245,6 +246,28 @@ class ReassessmentTests(unittest.TestCase):
         recovery.retry_interrupted(self.config,'case_000000','operator confirmed old stop')
         self.assertEqual(b.load_training(self.config).iloc[0].status,'interrupted')
         self.assertFalse(pending.load(self.config)['entries'][0]['finalized'])
+
+
+    def test_legacy_stop_during_continuation_keeps_the_initial_result_as_history(self):
+        receipt=self.case/'cfx_state.json'
+        state=json.loads(receipt.read_text())
+        initial=state['solve_attempts'][0]
+        state['stages']['solve']={**initial,'status':'needs_restart','exit_code':0}
+        state['stages']['solve_restart']={'status':'running'}
+        state['solve_attempts']=[initial]
+        atomic_json(receipt,state)
+        for path in self.case.glob('*.out'):
+            if path.name != initial['out_file']:
+                path.write_text('OUTER LOOP ITERATION = 5\nunfinished continuation')
+        atomic_json(pending.path_for(self.config), {'version':1,'entries':[{
+            'run_id':'case_000000','status':'failed','finalized':True,
+            'signature':b.load_training(self.config).iloc[0].physical_signature,'x':self.x.tolist(),
+            'arguments':{'sample_phase':'doe','doe_index':0}}]})
+        before=file_identity(self.case/initial['result_file'])
+        recovery.retry_interrupted(self.config,'case_000000','operator stopped the continuation')
+        self.assertEqual(b.load_training(self.config).iloc[0].status,'interrupted')
+        self.assertEqual(before,file_identity(self.case/initial['result_file']))
+        self.assertFalse((self.case/'attempts').exists(), 'registration must not start or archive CFD')
 
 
 class LegacyInterruptionTests(unittest.TestCase):

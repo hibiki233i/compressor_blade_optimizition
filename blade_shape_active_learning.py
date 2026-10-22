@@ -1069,6 +1069,51 @@ def run_geometry(config: dict[str, Any], candidate_path: Path, dry_run: bool = F
     return True, "geometry success"
 
 
+def recover_recorded_case(config: dict[str, Any], baseline: BaselineShape, x: np.ndarray,
+                          case_index: int, **metadata: Any) -> CaseResult | None:
+    """Commit a recorded terminal result without beginning or charging a CFD attempt."""
+    run_id = f'case_{case_index:06d}'
+    rows = load_training(config).loc[lambda frame: frame.run_id.eq(run_id)]
+    if len(rows) > 1:
+        raise ValueError('Duplicate recorded run_id; resolve before recovery.')
+    if len(rows) and rows.iloc[0]['status'] in {'success', 'failed', 'review'}:
+        row = rows.iloc[0]
+        if (not np.allclose(row[variable_names(config)].to_numpy(float), x, rtol=0, atol=1e-10)
+                or str(row.get(signatures.COLUMN)) not in signatures.compatible(config)
+                or any(row.get(key) != metadata[key] for key in ('sample_phase', 'experiment_id', 'design_role') if key in metadata)):
+            raise ValueError('Committed row differs from the requested design or experiment.')
+        return CaseResult(rows.iloc[0].to_dict(), rows.iloc[0]['status'] == 'success')
+    case = output_dir(config) / 'cases' / run_id
+    if not case.exists():
+        return None
+    with output_lock(case):
+        state_path = case / 'cfx_state.json'
+        state = json.loads(state_path.read_text()) if state_path.exists() else {}
+        stages = state.get('stages', {})
+        failure = interruption.recorded_failure(case)
+        if not failure and not (stages.get('solve', {}).get('status') in {'complete', 'review'}
+                                and stages.get('post', {}).get('status') == 'complete'):
+            return None
+        interruption.assert_idle(case)
+        attempt_path = case / interruption.ATTEMPT
+        if attempt_path.exists():
+            attempt = json.loads(attempt_path.read_text())
+            if (attempt.get('run_id') != run_id or attempt.get('signature') != signatures.physical_signature(config)
+                    or not np.allclose(attempt.get('x', []), x, rtol=0, atol=1e-10)):
+                raise ValueError('Recorded attempt inputs changed; inspect before recovery.')
+        candidate = case / 'candidate.json'
+        if candidate.exists():
+            stored = json.loads(candidate.read_text())
+            if (stored.get('run_id') != run_id or not np.allclose(
+                    [stored['variables'][n] for n in variable_names(config)], x, rtol=0, atol=1e-10)
+                    or stored.get('geometry') != candidate_geometry(config, baseline, x)):
+                raise ValueError('Recorded candidate differs from the tracked design.')
+        result = _evaluate_true_cfd(config, baseline, x, case_index, recover_only=True, **metadata)
+        if result is not None and attempt_path.exists():
+            interruption.finish_case(case, 'complete')
+        return result
+
+
 def evaluate_true_cfd(config: dict[str, Any], baseline: BaselineShape, x: np.ndarray,
                       case_index: int, **metadata: Any) -> CaseResult:
     """Only explicit operator cancellation makes the same case retryable."""
@@ -1076,6 +1121,9 @@ def evaluate_true_cfd(config: dict[str, Any], baseline: BaselineShape, x: np.nda
     run_id = f'case_{case_index:06d}'
     case = output_dir(config) / 'cases' / run_id
     with output_lock(case):
+        recovered = recover_recorded_case(config, baseline, x, case_index, **metadata)
+        if recovered is not None:
+            return recovered
         interruption.begin_case(case, run_id, signatures.remember(config), x.tolist())
         try:
             interruption.check_stop(case)
@@ -1083,8 +1131,12 @@ def evaluate_true_cfd(config: dict[str, Any], baseline: BaselineShape, x: np.nda
             interruption.finish_case(case, 'complete')
             return result
         except KeyboardInterrupt:
-            if interruption.completed_result_available(case):
-                # Finished CFD needs only CSV/queue recovery, not a new solve.
+            if interruption.completed_result_available(case) or interruption.recorded_failure(case):
+                # Persist terminal precedence even if another interrupt prevents CSV repair.
+                interruption.finish_case(case, 'complete')
+            recovered = recover_recorded_case(config, baseline, x, case_index, **metadata)
+            if recovered is not None:
+                # A committed terminal row or verified result outranks a late stop.
                 interruption.finish_case(case, 'complete')
                 raise
             attempt = json.loads((case / interruption.ATTEMPT).read_text())
@@ -1111,7 +1163,8 @@ def _evaluate_true_cfd(
     selection_source: str = "",
     experiment_id: str = "",
     design_role: str = "",
-) -> CaseResult:
+    recover_only: bool = False,
+) -> CaseResult | None:
     signatures.ensure_pinned(config)
     run_id = f"case_{case_index:06d}"
     sample = vector_to_sample(config, x)
@@ -1136,8 +1189,17 @@ def _evaluate_true_cfd(
         }
     )
 
+    if recover_only:
+        failure = interruption.recorded_failure(output_dir(config) / 'cases' / run_id)
+        if failure:
+            row.update(failure_stage=failure[0], message=failure[1], case_dir=str(output_dir(config) / 'cases' / run_id))
+            append_row(config, row)
+            return CaseResult(row, False)
+
     violations = constraint_violations(config, baseline, x)
     if violations:
+        if recover_only:
+            raise ValueError('Recorded design no longer passes the current geometry rules.')
         row["failure_stage"] = "geometry_rules"
         row["message"] = ";".join(violations)
         append_row(config, row)
@@ -1152,6 +1214,8 @@ def _evaluate_true_cfd(
         if previous.get('run_id') != run_id or previous.get('geometry') != candidate_geometry(config,baseline,x):
             raise ValueError('Existing candidate geometry does not match its parameter vector and baseline.')
     else:
+        if recover_only:
+            raise ValueError('Recorded candidate is missing; completed evidence cannot be recovered.')
         candidate_path = write_candidate_files(config, baseline, x, run_id)
     row['case_dir'] = str(case_dir)
     receipt_path = case_dir / 'geometry_state.json'
@@ -1165,10 +1229,14 @@ def _evaluate_true_cfd(
         legacy = refinement.digest({'physical':signatures.legacy_physical_signature(config), 'x':x.tolist(),
                                     'candidate':file_identity(candidate_path)})
         if receipt.get('signature') not in {signature, legacy} or receipt.get('status') != 'complete' or receipt.get('mesh') != file_identity(case_dir/'Impeller_Mesh.gtm'):
+            if recover_only:
+                raise ValueError('Geometry completion evidence changed or is incomplete.')
             row.update(failure_stage='geometry',message='Geometry receipt is incomplete or inputs/mesh changed. Inspect this case.')
             append_row(config,row)
             return CaseResult(row,False)
     else:
+        if recover_only:
+            raise ValueError('Geometry completion receipt is missing.')
         if (case_dir/'cfx_state.json').exists() or (case_dir/'CFX_Results.txt').exists() or list(case_dir.glob('*.res')):
             row.update(failure_stage='geometry',message='Unverified legacy geometry/CFX artifacts; no geometry completion receipt.')
             append_row(config,row)
@@ -1198,7 +1266,9 @@ def _evaluate_true_cfd(
     runtime = config["runtime"]
     paths = config["paths"]
     try:
-        cfx = run_cfx_pipeline(
+        if recover_only:
+            from blade_shape_cfx_runner import recover_cfx_result
+        cfx = (recover_cfx_result if recover_only else run_cfx_pipeline)(
             candidate_path.parent,
             run_id,
             p_out_pa=float(runtime["p_out_pa"]),
@@ -1211,13 +1281,19 @@ def _evaluate_true_cfd(
             review=ReviewPolicy.from_config(config),
         )
     except OSError as exc:
+        if recover_only:
+            raise ValueError(f'Cannot verify completed CFX evidence: {exc}') from exc
         row['failure_stage'] = 'environment'
         row['message'] = str(exc)
         (candidate_path.parent / 'environment.log').write_text(str(exc), encoding='utf-8')
         append_row(config, row)
         return CaseResult(row, False)
+    if cfx is None:
+        return None
     review = getattr(cfx, 'review', False)  # stand-ins for CfxResult may omit it
     if not cfx.success and not review:
+        if recover_only:
+            raise ValueError(f'Completed CFX evidence could not be verified: {cfx.message}')
         row["failure_stage"] = cfx.failure_stage or "cfx"
         row["message"] = cfx.message
         append_row(config, row)

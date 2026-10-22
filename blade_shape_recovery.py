@@ -81,13 +81,12 @@ def retry_interrupted(config: dict, run_id: str, reason: str) -> dict:
         state_path = case / 'cfx_state.json'
         state = json.loads(state_path.read_text()) if state_path.exists() else {}
         solve = state.get('stages', {}).get('solve', {})
-        if solve.get('convergence') or solve.get('status') in {'complete', 'review'}:
+        restart = state.get('stages', {}).get('solve_restart', {})
+        continuing = (solve.get('status') == 'needs_restart' and solve.get('convergence', {}).get('iteration_limit_reached')
+                      and restart.get('status') in {None, 'running'} and restart.get('exit_code') is None)
+        if (solve.get('convergence') and not continuing) or solve.get('status') in {'complete', 'review'}:
             raise ValueError('A completed/unconverged solve is not an interrupted case.')
-        geometry_path = case / 'geometry_state.json'
-        geometry = json.loads(geometry_path.read_text()) if geometry_path.exists() else {}
-        receipts = {'geometry': geometry, **state.get('stages', {})}
-        if any(stage.get('status') == 'failed' or stage.get('exit_code') not in (None, 0)
-               for stage in receipts.values()):
+        if interruption.recorded_failure(case):
             raise ValueError('A recorded failed stage is not an interrupted case; inspect the failure instead.')
         candidate_path = case / 'candidate.json'
         if candidate_path.exists():
@@ -98,6 +97,8 @@ def retry_interrupted(config: dict, run_id: str, reason: str) -> dict:
         for path in case.glob('*.out'):
             text = path.read_text(errors='replace')
             if re.search(r'(?:CFD Solver finished|CFX[- ]Solver (?:has )?finished)', text, re.I):
+                if continuing and path.name == solve.get('out_file') and file_identity(path) == solve.get('out_identity'):
+                    continue  # This is the initial result, before the interrupted continuation.
                 raise ValueError('A solver-finished marker exists; inspect instead of retrying as interrupted.')
         interruption.assert_idle(case)
         owner_env = interruption.stop_environment(case)
@@ -133,6 +134,9 @@ def validate_completed(config: dict, run_id: str) -> tuple[Path, dict, dict]:
     cp, rp = ConvergencePolicy.from_config(config), ReviewPolicy.from_config(config)
     if state.get('version') != 2 or solve.get('exit_code') != 0:
         raise ValueError('A normal, recorded solver exit is required.')
+    from blade_shape_cfx_runner import final_solve_recorded
+    if (solve.get('reason_code') in {'solver_execution', 'solver_output'} or not final_solve_recorded(state)):
+        raise ValueError('The final solver invocation failed or its evidence is incomplete; it cannot be reassessed.')
     expected = {'run_id': run_id, 'mesh': file_identity(case / 'Impeller_Mesh.gtm'),
                 'candidate': file_identity(case / 'candidate.json'),
                 'template_cfx': file_identity(config['paths']['template_cfx']),
@@ -230,11 +234,12 @@ def apply_plan(config: dict, plan: dict, reason: str) -> dict:
         runtime, paths = config['runtime'], config['paths']
         # A verified review receipt can only invoke Post; never a new solver.
         from blade_shape_cfx_runner import run_cfx_pipeline
-        result = run_cfx_pipeline(case, plan['run_id'], p_out_pa=float(runtime['p_out_pa']),
-                                 cfx_bin_dir=paths['cfx_bin_dir'], template_cfx=paths['template_cfx'],
-                                 template_cse=paths['template_cse'], cores=int(runtime['cfx_cores']),
-                                 n_blades=int(runtime['n_blades']), convergence=ConvergencePolicy.from_config(config),
-                                 review=ReviewPolicy.from_config(config))
+        with interruption.operation(case, 'reassess'):
+            result = run_cfx_pipeline(case, plan['run_id'], p_out_pa=float(runtime['p_out_pa']),
+                                     cfx_bin_dir=paths['cfx_bin_dir'], template_cfx=paths['template_cfx'],
+                                     template_cse=paths['template_cse'], cores=int(runtime['cfx_cores']),
+                                     n_blades=int(runtime['n_blades']), convergence=ConvergencePolicy.from_config(config),
+                                     review=ReviewPolicy.from_config(config))
         if not result.review or not all(np.isfinite(result.metrics.get(k, np.nan)) for k in b.RESULT_COLUMNS):
             raise ValueError(f'Reassessment Post did not complete: {result.message}; the plan can be retried.')
         if (signatures.physical_signature(config) != plan['physical_signature']

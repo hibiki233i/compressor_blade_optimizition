@@ -151,6 +151,28 @@ class CommandRunner(QObject):
         names = Counter(_name(proc) for proc in targets)
         self.line.emit("out", "[GUI] 停止：结束本次运行启动的 {} 个进程（{}）".format(
             len(targets), "，".join(f"{name}×{count}" for name, count in sorted(names.items()))))
+        # Let the CLI observe its token and finish its owned-child cleanup first.
+        # A fresh tree snapshot before forced termination also covers a child
+        # spawned while the first stop snapshot was being collected.
+        owner = dict(self._stop_owner)
+        if owner and not wait:
+            QTimer.singleShot(500, lambda: self._terminate_owned(process, root, targets, owner, wait=False))
+            return
+        if owner:
+            process.waitForFinished(500)
+        self._terminate_owned(process, root, targets, owner, wait=wait)
+
+    def _terminate_owned(self, process: QProcess, root: int, targets: list[psutil.Process],
+                         owner: dict, *, wait: bool) -> None:
+        if self._process is process:
+            self._track()
+            targets = sorted(self._known.values(), key=lambda proc: proc.pid == root)
+            if owner:
+                try:
+                    request_stop(owner, process_ids=[proc.pid for proc in targets])
+                except OSError as exc:
+                    self.failed.emit(f'无法更新停止范围：{exc}')
+                    return
         # terminate() is TerminateProcess on Windows; console programs ignore
         # QProcess.terminate() there, which only posts WM_CLOSE.
         self._signal(targets, kill=False)
