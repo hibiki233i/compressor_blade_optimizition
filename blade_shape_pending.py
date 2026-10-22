@@ -93,7 +93,8 @@ def run(config: dict[str,Any], baseline: Any, budget: int) -> dict[str,Any]:
         if not recorded.empty and recorded.iloc[0]['status'] != 'interrupted':
             result=b.CaseResult(recorded.iloc[0].to_dict(),recorded.iloc[0]['status']=='success')
         else:
-            result=b.recover_recorded_case(config,baseline,x,b.parse_case_number(entry['run_id']),**entry['arguments'])
+            result=b.recover_recorded_case(config,baseline,x,b.parse_case_number(entry['run_id']),
+                                           producing_signature=entry['signature'],**entry['arguments'])
             if result is None:
                 if entry['finalized']:
                     raise ValueError(f"Completed queue row missing from CSV/evidence: {entry['run_id']}")

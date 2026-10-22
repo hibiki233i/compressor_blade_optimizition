@@ -149,6 +149,111 @@ class ResumeStateMachineTests(unittest.TestCase):
                 self.assertTrue(pending.load(self.config)['entries'][0]['finalized'])
                 self.assertEqual(file_identity(case / 'cfx_state.json'), receipt)
 
+    def test_pending_zero_budget_recovers_an_accepted_producing_signature(self):
+        for status in ('success', 'review'):
+            for legacy in (False, True):
+                with self.subTest(status=status, legacy=legacy):
+                    self.study(f'accepted_completed_{status}_{legacy}')
+                    entry = self.enqueue([self.center])[0]
+                    case = self.complete_before_csv(0, self.center, status, **entry['arguments'])
+                    producing_signature = entry['signature']
+                    if legacy:
+                        (case / interruption.ATTEMPT).unlink()
+                    receipt = file_identity(case / 'cfx_state.json')
+                    self.config['runtime']['rpm'] += 1
+                    with self.assertRaises(signatures.InputsChanged):
+                        signatures.check(self.config, pending.records(self.config), None)
+                    signatures.check(self.config, pending.records(self.config),
+                                     'corrected the declared RPM; the completed evidence remains applicable')
+                    signatures.pin(self.config)
+                    with self.no_external_work(), patch.object(b, 'run_geometry', side_effect=AssertionError('geometry')):
+                        result = pending.run(self.config, self.baseline, 0)
+                        repeated = pending.run(self.config, self.baseline, 0)
+                    self.assertEqual(result['new_attempts'] + repeated['new_attempts'], 0)
+                    frame = b.load_training(self.config)
+                    self.assertEqual(frame.run_id.tolist(), ['case_000000'])
+                    self.assertEqual(frame.status.tolist(), [status])
+                    self.assertEqual(frame[signatures.COLUMN].tolist(), [producing_signature])
+                    self.assertEqual(pending.load(self.config)['entries'][0]['signature'], producing_signature)
+                    if not legacy:
+                        self.assertEqual(json.loads((case / interruption.ATTEMPT).read_text())['signature'],
+                                         producing_signature)
+                    self.assertEqual(file_identity(case / 'cfx_state.json'), receipt)
+                    self.assertFalse((case / 'attempts').exists())
+
+    def test_boundary_zero_budget_preserves_the_accepted_producing_signature(self):
+        for status in ('success', 'review'):
+            with self.subTest(status=status):
+                self.study('boundary_accepted_completed_' + status)
+                path, plan = self.boundary_plan()
+                case = self.reserve_boundary(path, plan, plan['points'][0], 1, status)
+                (case / interruption.ATTEMPT).unlink()  # Historical completion predates attempt tokens.
+                self.config['runtime']['rpm'] += 1
+                with self.no_external_work(), patch.object(b, 'run_geometry', side_effect=AssertionError('geometry')), \
+                        patch.object(b, 'extract_baseline', return_value=self.baseline):
+                    result = refinement.run_boundary(self.config, path, 'singles', 0, True,
+                                                     'corrected the declared RPM; completed evidence remains applicable')
+                self.assertEqual(result['new_cfd_attempts'], 0)
+                row = b.load_training(self.config).loc[lambda f: f.run_id.eq('case_000001')].iloc[0]
+                self.assertEqual(row.status, status)
+                self.assertEqual(row[signatures.COLUMN], plan['signature'])
+                self.assertEqual(result['points']['center']['status'], status)
+
+    def test_accepted_signature_does_not_bypass_completed_cfx_input_checks(self):
+        self.study('accepted_changed_solver_input')
+        entry = self.enqueue([self.center])[0]
+        case = self.complete_before_csv(0, self.center, **entry['arguments'])
+        receipt = file_identity(case / 'cfx_state.json')
+        self.config['runtime']['p_out_pa'] += 1
+        signatures.check(self.config, pending.records(self.config), 'confirmed historical records')
+        signatures.pin(self.config)
+        with self.no_external_work(), patch.object(b, 'run_geometry', side_effect=AssertionError('geometry')):
+            with self.assertRaisesRegex(ValueError, 'inputs|evidence'):
+                pending.run(self.config, self.baseline, 0)
+        self.assertTrue(b.load_training(self.config).empty)
+        self.assertEqual(file_identity(case / 'cfx_state.json'), receipt)
+
+    def test_retried_completion_uses_its_new_attempt_signature(self):
+        self.study('retried_producing_signature')
+        entry = self.enqueue([self.center])[0]
+        with patch.object(b, 'run_geometry', side_effect=fake_geometry), \
+                patch.object(b, 'run_cfx_pipeline', side_effect=KeyboardInterrupt('operator stop')):
+            with self.assertRaises(KeyboardInterrupt):
+                pending.run(self.config, self.baseline, 1)
+        self.config['runtime']['rpm'] += 1
+        signatures.check(self.config, pending.records(self.config), 'corrected declared RPM')
+        signatures.pin(self.config)
+        case = self.complete_before_csv(0, self.center, **entry['arguments'])
+        producing_signature = signatures.physical_signature(self.config)
+        self.assertNotEqual(producing_signature, entry['signature'])
+        with self.no_external_work():
+            result = pending.run(self.config, self.baseline, 0)
+        self.assertEqual(result['new_attempts'], 0)
+        self.assertEqual(b.load_training(self.config)[signatures.COLUMN].tolist(), [producing_signature])
+        self.assertEqual(json.loads((case / interruption.ATTEMPT).read_text())['signature'], producing_signature)
+
+    def test_accepted_producer_still_checks_input_changes_during_recovery(self):
+        self.study('recovery_input_race')
+        entry = self.enqueue([self.center])[0]
+        self.complete_before_csv(0, self.center, **entry['arguments'])
+        self.config['runtime']['rpm'] += 1
+        signatures.check(self.config, pending.records(self.config), 'corrected declared RPM')
+        signatures.pin(self.config)
+        original = cfx.recover_cfx_result
+
+        def change_after_verification(*args, **kwargs):
+            result = original(*args, **kwargs)
+            self.config['runtime']['rpm'] += 1
+            return result
+
+        with self.no_external_work(), patch.object(cfx, 'recover_cfx_result', side_effect=change_after_verification):
+            result = pending.run(self.config, self.baseline, 0)
+        self.assertEqual(result['new_attempts'], 0)
+        row = b.load_training(self.config).iloc[0]
+        self.assertEqual((row.status, row.failure_stage), ('failed', 'environment'))
+        self.assertEqual(row[signatures.COLUMN], entry['signature'])
+        self.assertTrue(b.write_pareto(self.config, b.load_training(self.config)).empty)
+
     def test_recovery_does_not_consume_budget_for_the_next_new_case(self):
         self.study('budget')
         other = self.center.copy(); other[0] = .2

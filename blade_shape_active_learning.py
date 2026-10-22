@@ -1070,7 +1070,8 @@ def run_geometry(config: dict[str, Any], candidate_path: Path, dry_run: bool = F
 
 
 def recover_recorded_case(config: dict[str, Any], baseline: BaselineShape, x: np.ndarray,
-                          case_index: int, **metadata: Any) -> CaseResult | None:
+                          case_index: int, *, producing_signature: str | None = None,
+                          **metadata: Any) -> CaseResult | None:
     """Commit a recorded terminal result without beginning or charging a CFD attempt."""
     run_id = f'case_{case_index:06d}'
     rows = load_training(config).loc[lambda frame: frame.run_id.eq(run_id)]
@@ -1098,9 +1099,14 @@ def recover_recorded_case(config: dict[str, Any], baseline: BaselineShape, x: np
         attempt_path = case / interruption.ATTEMPT
         if attempt_path.exists():
             attempt = json.loads(attempt_path.read_text())
-            if (attempt.get('run_id') != run_id or attempt.get('signature') != signatures.physical_signature(config)
+            if (attempt.get('run_id') != run_id or attempt.get('signature') not in signatures.compatible(config)
                     or not np.allclose(attempt.get('x', []), x, rtol=0, atol=1e-10)):
                 raise ValueError('Recorded attempt inputs changed; inspect before recovery.')
+            producing_signature = attempt['signature']
+        elif len(rows):
+            producing_signature = str(rows.iloc[0].get(signatures.COLUMN))
+        if producing_signature is not None and producing_signature not in signatures.compatible(config):
+            raise ValueError('Recorded producing signature is incompatible; inspect before recovery.')
         candidate = case / 'candidate.json'
         if candidate.exists():
             stored = json.loads(candidate.read_text())
@@ -1108,7 +1114,8 @@ def recover_recorded_case(config: dict[str, Any], baseline: BaselineShape, x: np
                     [stored['variables'][n] for n in variable_names(config)], x, rtol=0, atol=1e-10)
                     or stored.get('geometry') != candidate_geometry(config, baseline, x)):
                 raise ValueError('Recorded candidate differs from the tracked design.')
-        result = _evaluate_true_cfd(config, baseline, x, case_index, recover_only=True, **metadata)
+        result = _evaluate_true_cfd(config, baseline, x, case_index, recover_only=True,
+                                    producing_signature=producing_signature, **metadata)
         if result is not None and attempt_path.exists():
             interruption.finish_case(case, 'complete')
         return result
@@ -1166,8 +1173,10 @@ def _evaluate_true_cfd(
     experiment_id: str = "",
     design_role: str = "",
     recover_only: bool = False,
+    producing_signature: str | None = None,
 ) -> CaseResult | None:
     signatures.ensure_pinned(config)
+    input_signature = signatures.remember(config)
     run_id = f"case_{case_index:06d}"
     sample = vector_to_sample(config, x)
     row: dict[str, Any] = {**sample, **{col: np.nan for col in RESULT_COLUMNS}}
@@ -1186,8 +1195,8 @@ def _evaluate_true_cfd(
             "message": "",
             "case_dir": "",
             "run_id": run_id,
-            # the inputs this evaluation starts under; checked again before success is recorded
-            signatures.COLUMN: signatures.remember(config),
+            # Recovery retains the producing inputs; current inputs are checked separately below.
+            signatures.COLUMN: producing_signature or input_signature,
         }
     )
 
@@ -1308,7 +1317,7 @@ def _evaluate_true_cfd(
         row['message'] = 'Non-finite objective returned by CFX-Post.'
         append_row(config, row)
         return CaseResult(row, False)
-    if signatures.physical_signature(config) != row[signatures.COLUMN]:
+    if signatures.physical_signature(config) != input_signature:
         row['failure_stage'] = 'environment'
         row['message'] = ('Physical inputs changed on disk during this evaluation (template, geometry script or '
                           'CFX installation); the result is not recorded as a label. Inspect this case.')

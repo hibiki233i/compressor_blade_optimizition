@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 
 import numpy as np
+import pandas as pd
 
 import blade_shape_active_learning as b
 import blade_shape_interrupt as interruption
@@ -248,6 +249,27 @@ def apply_plan(config: dict, plan: dict, reason: str) -> dict:
                 or file_identity(case/solve['out_file']) != plan['out_identity']
                 or file_identity(case/solve['result_file']) != plan['result_identity']):
             raise ValueError('Inputs or result evidence changed during Post; no training row was promoted.')
+        for path in (b.diagnostics_csv_path(config), b.output_dir(config)/'boundary_diagnostics.csv'):
+            if not path.exists():
+                continue
+            frame = pd.read_csv(path)
+            if 'run_id' not in frame or 'status' not in frame:
+                continue
+            mask = frame.run_id.astype(str).eq(plan['run_id'])
+            if not mask.any():
+                continue
+            values = {'status': 'review', 'failure_stage': '', 'message': result.message}
+            for objective in b.OBJECTIVE_COLUMNS:
+                true = float(result.metrics[objective])
+                column = f'pred_{objective}'
+                pred = (pd.to_numeric(frame.loc[mask, column], errors='coerce') if column in frame
+                        else pd.Series(np.nan, index=frame.index[mask]))
+                values[f'true_{objective}'] = true
+                values[f'prediction_error_{objective}'] = (true - pred).where(np.isfinite(pred))
+            review._set(path, plan['run_id'], values, only_existing=True)
+        # Publish an actionable review only after its diagnostic data is complete.
+        # An interruption before this point can replay without a human decision
+        # making the remaining diagnostic updates impossible.
         review._set(b.training_csv_path(config), plan['run_id'], {**result.metrics, 'status': 'review',
                     'failure_stage': '', 'message': result.message})
         queue = pending.load(config)
@@ -255,8 +277,6 @@ def apply_plan(config: dict, plan: dict, reason: str) -> dict:
             if entry['run_id'] == plan['run_id']:
                 entry.update(status='review', finalized=True)
         atomic_json(pending.path_for(config), queue)
-        for path in (b.diagnostics_csv_path(config), b.output_dir(config)/'boundary_diagnostics.csv'):
-            review._set(path, plan['run_id'], {'status': 'review'}, only_existing=True)
         b.write_pareto(config, b.load_training(config))
         record['status'] = 'applied'
         atomic_json(registry_path, registry)

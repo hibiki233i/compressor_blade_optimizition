@@ -227,7 +227,7 @@ python blade_shape_active_learning.py reassess --config blade_shape_config.json 
 python blade_shape_active_learning.py review --config blade_shape_config.json
 ```
 
-先在配置中明确选择 residual_limit；否则仍按旧模式判定。计划文件必须是新文件，不能覆盖工程文件或放进 cases/。应用把原始凭据、原始失败结论和理由记入 `reassessment_requests.json` / 求解凭据的历史，再把有完整性能值的行转为 review，不直接转 success。文件或输入改变、缺失结果、异常退出、人工否决均不能绕过；后处理失败可重复应用同一计划，仅重做 Post。更新受输出锁保护，并支持中断恢复。最终仍需 `review --accept "工程审核理由"`。
+先在配置中明确选择 residual_limit；否则仍按旧模式判定。计划文件必须是新文件，不能覆盖工程文件或放进 cases/。应用把原始凭据、原始失败结论和理由记入 `reassessment_requests.json` / 求解凭据的历史，再把有完整性能值的行转为 review，不直接转 success。已有的主动学习和边界诊断行同步补入真实目标值、按原预测值计算的误差及新的结果信息，保留当时的预测、不确定度、改进量和其他列。文件或输入改变、缺失结果、异常退出、人工否决均不能绕过；后处理失败可重复应用同一计划，仅重做 Post。更新受输出锁保护，并支持中断恢复。最终仍需 `review --accept "工程审核理由"`。
 
 **续跑时的核对**：每个算例目录下有 `geometry_state.json` 和 `cfx_state.json`，记录了这个算例用的输入文件指纹和各阶段的完成情况。续跑时如果发现输入变了、或者某阶段没有完成记录，程序不会把残留文件当成成功，而是要求人工检查。CFX 的核数和安装目录不参与这项核对，只追加记录在 `cfx_state.json` 的 `environments` 中，换核数或把同一版本挪到别处后，已完成的阶段照常复用。换了 CFX 版本（版本号文件夹或 `cfx5solve.exe` 内容不同）则不复用，并且按物理输入变化处理。2026-10 之前写下的 `cfx_state.json` 没有记录版本，只在安装路径完全相同时复用。
 

@@ -442,7 +442,7 @@ def _run_boundary(config: dict[str,Any], path: Path, stage: str, max_new: int, r
         if len(rows)>1:raise ValueError('Duplicate recorded run_id; resolve before resuming.')
         if rows.empty or rows.iloc[0]['status']=='interrupted':
             b.recover_recorded_case(point_config(config,p),baseline,np.array(p['x']),
-                                   b.parse_case_number(saved['run_id']),sample_phase='boundary',
+                                   b.parse_case_number(saved['run_id']),producing_signature=plan['signature'],sample_phase='boundary',
                                    experiment_id=plan['plan_id'],design_role=p['point_id'],selection_source='predefined_boundary')
             frame=b.load_training(config)
             rows=frame.loc[frame.run_id.eq(saved['run_id'])]

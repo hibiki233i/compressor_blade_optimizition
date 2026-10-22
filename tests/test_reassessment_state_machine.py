@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import patch
 
 import numpy as np
+import pandas as pd
 
 import blade_shape_active_learning as b
 import blade_shape_cfx_runner as cfx
@@ -118,6 +119,93 @@ class ReassessmentStateMachineTests(unittest.TestCase):
                 recovery.apply_plan(self.config, plan, 'reconsider numerical policy')
         self.assertEqual(b.load_training(self.config).status.tolist(), ['review'])
         self.assertEqual(pending.load(self.config)['entries'][0]['status'], 'failed')
+
+    def seed_diagnostics(self):
+        paths = (b.diagnostics_csv_path(self.config), b.output_dir(self.config) / 'boundary_diagnostics.csv')
+        for path in paths:
+            pd.DataFrame([
+                {'run_id': 'case_000000', 'status': 'failed', 'failure_stage': 'solve',
+                 'message': 'original policy failure', 'candidate_role': 'ehvi',
+                 'pred_Efficiency': .7, 'pred_MassFlow': 4.8,
+                 'std_Efficiency': .1, 'std_MassFlow': .3,
+                 'true_Efficiency': np.nan, 'true_MassFlow': np.nan,
+                 'prediction_error_Efficiency': np.nan, 'prediction_error_MassFlow': np.nan,
+                 'hv_gain': 0., 'delta_best_Efficiency': 0., 'custom_metadata': 'keep prediction'},
+                {'run_id': 'case_000000', 'status': 'failed', 'failure_stage': 'solve',
+                 'message': 'original policy failure', 'candidate_role': 'ehvi',
+                 'pred_Efficiency': .75, 'pred_MassFlow': np.nan,
+                 'std_Efficiency': .1, 'std_MassFlow': np.nan,
+                 'custom_metadata': 'keep older prediction'},
+                {'run_id': 'case_000001', 'status': 'success', 'true_Efficiency': .9,
+                 'custom_metadata': 'unrelated result'},
+            ]).to_csv(path, index=False)
+        return paths
+
+    def assert_reassessed_diagnostics(self, paths, status='review'):
+        for path in paths:
+            frame = pd.read_csv(path)
+            rows = frame.loc[frame.run_id.eq('case_000000')]
+            self.assertEqual(rows.status.tolist(), [status, status])
+            np.testing.assert_allclose(rows.true_Efficiency, [.8, .8])
+            np.testing.assert_allclose(rows.true_MassFlow, [4.5, 4.5])  # .5 per passage, nine blades.
+            np.testing.assert_allclose(rows.prediction_error_Efficiency, [.1, .05])
+            self.assertAlmostEqual(rows.iloc[0].prediction_error_MassFlow, -.3)
+            self.assertTrue(pd.isna(rows.iloc[1].prediction_error_MassFlow))
+            np.testing.assert_allclose(rows.pred_Efficiency, [.7, .75])
+            np.testing.assert_allclose(rows.std_Efficiency, [.1, .1])
+            self.assertEqual(rows.custom_metadata.tolist(), ['keep prediction', 'keep older prediction'])
+            self.assertEqual(rows.iloc[0].hv_gain, 0.)
+            self.assertEqual(rows.iloc[0].delta_best_Efficiency, 0.)
+            self.assertTrue(rows.failure_stage.isna().all())
+            self.assertFalse(rows.message.eq('original policy failure').any())
+            other = frame.loc[frame.run_id.eq('case_000001')].iloc[0]
+            self.assertEqual((other.status, other.true_Efficiency, other.custom_metadata),
+                             ('success', .9, 'unrelated result'))
+
+    def test_reassessment_synchronizes_diagnostics_before_the_human_decision(self):
+        for decision, status in (('accepted', 'success'), ('rejected', 'failed')):
+            with self.subTest(decision=decision):
+                self.failed_case('diagnostics_' + decision)
+                paths = self.seed_diagnostics()
+                plan = recovery.make_plan(self.config, 'case_000000')
+                with patch.object(cfx, '_run_logged', side_effect=self.post):
+                    recovery.apply_plan(self.config, plan, 'reconsider numerical policy')
+                self.assert_reassessed_diagnostics(paths)
+                self.assertTrue(b.write_pareto(self.config, b.load_training(self.config)).empty)
+                review.decide(self.config, 'case_000000', decision, 'engineering decision')
+                self.assert_reassessed_diagnostics(paths, status)
+                roles = refinement.role_diagnostics(pd.read_csv(paths[0]))
+                self.assertEqual(roles.empty, decision == 'rejected')
+                front = b.write_pareto(self.config, b.load_training(self.config))
+                self.assertEqual('case_000000' in front.run_id.values, decision == 'accepted')
+
+    def test_reassessment_replays_a_partial_diagnostic_commit_without_another_post(self):
+        for stopped_index in (0, 1):
+            with self.subTest(stopped_index=stopped_index):
+                self.failed_case(f'diagnostic_replay_{stopped_index}')
+                paths = self.seed_diagnostics()
+                plan = recovery.make_plan(self.config, 'case_000000')
+                original = review._set
+
+                def stop_before_diagnostics(path, *args, **kwargs):
+                    if path == paths[stopped_index]:
+                        raise KeyboardInterrupt('stopped before diagnostics commit')
+                    return original(path, *args, **kwargs)
+
+                with patch.object(review, '_set', side_effect=stop_before_diagnostics), \
+                        patch.object(cfx, '_run_logged', side_effect=self.post):
+                    with self.assertRaises(KeyboardInterrupt):
+                        recovery.apply_plan(self.config, plan, 'reconsider numerical policy')
+                self.assert_reassessed_diagnostics(paths[:stopped_index])
+                self.assertEqual(b.load_training(self.config).status.tolist(), ['failed'])
+                with self.assertRaisesRegex(ValueError, 'not awaiting review'):
+                    review.decide(self.config, 'case_000000', 'accepted', 'decision before diagnostics complete')
+                with patch.object(cfx, '_run_logged', side_effect=AssertionError('completed Post must be reused')):
+                    recovery.apply_plan(self.config, plan, 'finish partial diagnostics commit')
+                    recovery.apply_plan(self.config, plan, 'idempotent repetition')
+                self.assert_reassessed_diagnostics(paths)
+                review.decide(self.config, 'case_000000', 'accepted', 'engineering decision')
+                self.assert_reassessed_diagnostics(paths, 'success')
 
     def test_nonzero_restart_cannot_reassess_the_initial_result(self):
         result = self.failed_case('nonzero')
