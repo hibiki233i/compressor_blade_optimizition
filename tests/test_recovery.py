@@ -1,5 +1,6 @@
 """Recovery tests use synthetic files and substitutes, never engineering programs."""
 import json
+import importlib.util
 import os
 from pathlib import Path
 import sys
@@ -279,6 +280,8 @@ class ReviewModeTests(unittest.TestCase):
         self.assertFalse(report['history']['performance_monitors_verified'])
 
 
+@unittest.skipUnless(importlib.util.find_spec('PySide6') and importlib.util.find_spec('psutil'),
+                     'GUI cancellation requires optional PySide6 and psutil')
 class GuiStopReceiptTests(unittest.TestCase):
     def test_stop_records_token_before_terminating_cli_and_resume_can_detect_it(self):
         from PySide6.QtWidgets import QApplication
