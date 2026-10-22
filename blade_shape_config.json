@@ -19,6 +19,8 @@
     "flow_analysis": "Flow Analysis 1"
   },
   "cfx_review": {
+    "mode": "residual_limit",
+    "history_window": 200,
     "rms_limit": 0.0001,
     "max_equations_above_target": 3
   },

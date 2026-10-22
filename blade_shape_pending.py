@@ -7,6 +7,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import blade_shape_signature as signatures
+import blade_shape_interrupt as interruption
 from blade_shape_runtime import atomic_json, case_reservations
 
 
@@ -75,7 +76,10 @@ def run(config: dict[str,Any], baseline: Any, budget: int) -> dict[str,Any]:
         if len(recorded)>1:raise ValueError(f"Duplicate pending run_id: {entry['run_id']}")
         if entry['finalized']:
             if recorded.empty:raise ValueError(f"Completed queue row missing from CSV: {entry['run_id']}")
-            continue
+            if recorded.iloc[0]['status'] != 'interrupted':
+                continue
+            entry.update(status='pending', finalized=False)
+            atomic_json(path_for(config), queue)
         if entry['signature'] not in allowed:
             raise signatures.InputsChanged(f"Inputs changed for pending {entry['run_id']}; inspect before resuming.")
         x=np.array(entry['x'],float)
@@ -85,8 +89,9 @@ def run(config: dict[str,Any], baseline: Any, budget: int) -> dict[str,Any]:
                 raise ValueError('Pending input and recorded CFD row do not match.')
             if row['sample_phase']!=entry['arguments']['sample_phase']:
                 raise ValueError('Pending sample phase mismatch.')
-            if row['status'] not in ['success','failed','review']:raise ValueError('Unrecognized recorded CFD outcome.')
-            result=b.CaseResult(row.to_dict(),row['status']=='success')
+            if row['status'] not in ['success','failed','review','interrupted']:raise ValueError('Unrecognized recorded CFD outcome.')
+        if not recorded.empty and recorded.iloc[0]['status'] != 'interrupted':
+            result=b.CaseResult(recorded.iloc[0].to_dict(),recorded.iloc[0]['status']=='success')
         else:
             if used>=budget:break
             signatures.ensure_pinned(config)

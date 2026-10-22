@@ -58,16 +58,22 @@ HELP: dict[str, Help] = {
         (CFX, PHYSICAL)),
     "cfx_review.rms_limit": Help(
         f"推荐 {REVIEW_RMS_MAX:g}；上限 {REVIEW_RMS_MAX:g}",
-        "续算用完追加步数仍未达到 RMS 门槛时，如果最终残差表中超标的方程都不超过此值（且个数不超过下一项），"
+        "续算用完追加步数仍未达到 RMS 门槛时，如果最终残差表中超标的方程都不超过此值（legacy_count 模式还检查个数），"
         "该点照常做 CFX-Post，记为 status=review（待审核），而不是直接丢弃。待审核的点不进训练集和 Pareto，"
         "要在「运行控制 → 审核送审点」或命令行 review 中人工接受后才成为训练标签；否决则记为失败。\n"
         f"代码只接受 (0, {REVIEW_RMS_MAX:g}]（blade_shape_convergence.REVIEW_RMS_MAX）：{REVIEW_RMS_MAX:g} 是常说的宽松收敛水平。\n"
         "不进入物理签名：它只决定结果是否交给人判断，不改变计算结果；修改后已有记录照常使用，已分类的点不会重新分类。"),
     "cfx_review.max_equations_above_target": Help(
-        "推荐 3；0 关闭送审",
-        "最终残差表中（湍流、Wallscale 等方程也算在内）最多允许几个方程高于 RMS 门槛仍可送审；超过这个数直接记为失败。"
+        "legacy_count 推荐 3；0 关闭送审",
+        "legacy_count 模式限制超标方程数；residual_limit 模式下正数不限制数量。"
         "设为 0 关闭人工审核，恢复严格判据。攻角验证始终使用严格判据。\n"
         "不进入物理签名。"),
+    "cfx_review.mode": Help(
+        "新配置 residual_limit；旧配置 legacy_count",
+        "residual_limit 按残差上限送审，不以超标方程数量拒绝。legacy_count 保留旧规则。"
+        "两种模式均需人工接受，方程数设为 0 均关闭送审；不改变求解停机目标。"),
+    "cfx_review.history_window": Help(
+        "200 步", "用于审核证据的末段残差统计窗口：范围、中位数及超限次数。只作警示，不自动证明性能稳定。"),
     "cfx_convergence.flow_analysis": Help(
         "与模板一致",
         "CFX 模板中求解分析对象 FLOW 的名称（默认 “Flow Analysis 1”），用于指定收敛控制 CCL 作用于哪一个分析。"

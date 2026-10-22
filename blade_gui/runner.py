@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Callable
 
 import psutil
+from blade_shape_interrupt import stop_environment, request_stop, TOKEN_ENV, STOP_ENV
 from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QTimer, Signal
 
 #: CFX processes that can run outside the CLI's process tree (MPI workers may
@@ -51,6 +52,7 @@ class CommandRunner(QObject):
         self._started_at = 0.0
         self._root_pid = 0
         self._stopping = False
+        self._stop_owner: dict = {}
         # (pid, start time) -> process: identities outlive the parent links
         self._known: dict[tuple[int, float], psutil.Process] = {}
         self._tracker = QTimer(self)
@@ -93,6 +95,12 @@ class CommandRunner(QObject):
         process.setArguments(argv[1:])
 
         environment = QProcessEnvironment.systemEnvironment()
+        self._stop_owner = {}
+        if self._scope:
+            stop_env = stop_environment(self._scope[0])
+            self._stop_owner = {'token': stop_env[TOKEN_ENV], 'stop_file': stop_env[STOP_ENV]}
+            for key, value in stop_env.items():
+                environment.insert(key, value)
         environment.insert("PYTHONIOENCODING", "utf-8")
         environment.insert("PYTHONUNBUFFERED", "1")
         environment.insert("PYTHONUTF8", "1")
@@ -124,10 +132,22 @@ class CommandRunner(QObject):
         process = self._process
         if process is None or process.state() == QProcess.NotRunning:
             return
+        if self._stop_owner:
+            try:
+                request_stop(self._stop_owner)
+            except OSError as exc:
+                self.failed.emit(f'无法记录停止请求，尚未终止进程：{exc}')
+                return
         self._stopping = True
         self._track()
         root = self._root_pid
         targets = sorted(self._known.values(), key=lambda proc: proc.pid == root)  # the CLI last
+        if self._stop_owner:
+            try:
+                request_stop(self._stop_owner, process_ids=[proc.pid for proc in targets])
+            except OSError as exc:
+                self.failed.emit(f'无法记录进程停止范围，尚未终止进程：{exc}')
+                return
         names = Counter(_name(proc) for proc in targets)
         self.line.emit("out", "[GUI] 停止：结束本次运行启动的 {} 个进程（{}）".format(
             len(targets), "，".join(f"{name}×{count}" for name, count in sorted(names.items()))))

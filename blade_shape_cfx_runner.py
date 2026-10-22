@@ -14,6 +14,7 @@ from pathlib import Path
 from blade_shape_runtime import atomic_json, digest, file_identity, output_lock
 from blade_shape_signature import solver_identity
 from blade_shape_convergence import ConvergencePolicy, ReviewPolicy, assess_out, convergence_ccl, review_evidence
+from blade_shape_interrupt import run_logged
 
 
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
@@ -62,20 +63,7 @@ def _cfx_path(path: str | Path) -> str:
 
 
 def _run_logged(cmd: list[str], cwd: Path, log_path: Path) -> int:
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    with log_path.open("w", encoding="utf-8", errors="ignore") as log:
-        log.write("COMMAND: " + " ".join(cmd) + "\n\n")
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(cwd),
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            text=True,
-            creationflags=CREATE_NO_WINDOW,
-        )
-        while proc.poll() is None:
-            time.sleep(2)
-        return int(proc.returncode or 0)
+    return run_logged(cmd, cwd, log_path)
 
 
 def _parse_results(output_txt: Path, n_blades: int) -> dict[str, float]:
@@ -342,7 +330,8 @@ def _run_cfx_pipeline(
             try:
                 if not out_file.is_file() or file_identity(out_file) == old_outputs.get(out_file.name):
                     raise ValueError('Matching .out is missing or was not updated by this Solve')
-                report = assess_out(out_file.read_text(encoding='utf-8', errors='replace'), convergence)
+                report = assess_out(out_file.read_text(encoding='utf-8', errors='replace'), convergence,
+                                    history_window=review.history_window)
                 if attempt and report['run_iteration'] > convergence.restart_iterations:
                     raise ValueError('Restart exceeded the configured iteration budget')
             except (ValueError, OSError) as exc:
@@ -384,7 +373,12 @@ def _run_cfx_pipeline(
                 reason = (f"continued run stopped after {report['run_iteration']} of its "
                           f"{convergence.restart_iterations} iterations without a normal iteration-limit stop")
             message = f"RMS {report['max_rms']:.6g} exceeds {convergence.rms_target:.6g}; {reason}; point discarded"
-            stages['solve'].update(status='failed', message=message, **evidence)
+            reason_code = ('non_iteration_stop' if not report['iteration_limit_reached'] else
+                           'review_disabled' if not review.max_equations_above_target else
+                           'rms_limit' if any(v > review.rms_limit for v in report['rms'].values()) else
+                           'review_equation_count')
+            stages['solve'].update(status='failed', message=message, reason_code=reason_code,
+                                   review_policy=review.to_dict(), **evidence)
             atomic_json(receipt, state)
             return CfxResult(False, {}, message, 'solve')
     if output.exists():

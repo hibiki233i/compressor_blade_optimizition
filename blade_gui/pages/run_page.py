@@ -705,7 +705,7 @@ class RunPage(Page):
         if not self.runner.running:
             return
         self._append("warn", "正在停止命令及其启动的 CFturbo / TurboGrid / CFX 求解进程…"
-                             "中断在几何或求解阶段的算例，下次续跑时记为失败（不会重算），需要人工检查。")
+                             "本次停止的算例会保留设计点；确认进程退出后，下次 --resume 将归档旧产物并重新计算。")
         self.runner.stop()
 
     # ------------------------------------------------------------ signals

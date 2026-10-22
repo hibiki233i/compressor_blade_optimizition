@@ -31,7 +31,7 @@ from .base import Page
 
 STATUS_FILTERS = [("全部状态", "all"), ("仅成功", "success"), ("待审核", "review"), ("仅失败", "failed"),
                   ("未登记", "unknown")]
-STATUS_LABELS = {"success": "成功", "failed": "失败", "failure": "失败", "review": "待审核"}
+STATUS_LABELS = {"success": "成功", "failed": "失败", "failure": "失败", "review": "待审核", "interrupted": "已中断，待重算"}
 LOG_SUFFIXES = {".log", ".txt", ".out", ".err", ".lst", ".trn"}
 
 
@@ -367,6 +367,21 @@ class CasesPage(Page):
                                       "请先切回配置的输出目录。")
         self.detail_path.setText(str(record.path))
         message = record.message or "（无失败信息）"
+        receipt = record.path / 'cfx_state.json'
+        if record.status == 'review' and receipt.is_file():
+            try:
+                solve = json.loads(receipt.read_text())['stages']['solve']
+                report = solve.get('convergence', {})
+                history = report.get('history', {})
+                parts = [message, '性能迭代历史尚未验证；最终性能值不等同于性能稳定。']
+                if history:
+                    parts.append(f"末 {history.get('count')} 步 RMS 范围：{history.get('max_rms')}；"
+                                 f"超过 1e-4：{history.get('above_1e4_count')} 步。")
+                parts.append(f"归一化不平衡 (%)：{report.get('normalised_imbalance_percent', '未记录')}")
+                parts.append(f"回流封壁：{report.get('wall_notices', [])}")
+                message = '\n'.join(parts)
+            except (KeyError, ValueError, OSError):
+                message += '\n无法读取审核证据，请检查求解凭据。'
         self.detail_message.setText(message)
 
         if record.path.is_dir():

@@ -22,6 +22,7 @@ import blade_shape_refinement as refinement
 import blade_shape_signature as signatures
 from blade_shape_acquisition import expected_hvi
 import blade_shape_pending as pending
+import blade_shape_interrupt as interruption
 from blade_shape_runtime import output_lock, file_identity, atomic_json, case_reservations, stream_seed
 
 try:
@@ -425,6 +426,11 @@ def append_compatible_csv(path: Path, row: dict[str, Any], columns: list[str],
     if normalizer is not None and not existing.empty:
         existing = normalizer(existing)
     order = list(dict.fromkeys(list(existing.columns) + columns + list(row)))
+    if 'run_id' in existing and 'status' in existing and row.get('run_id'):
+        retry = existing.run_id.eq(row['run_id']) & existing.status.eq('interrupted')
+        if int(retry.sum()) == 1:
+            row = {**existing.loc[retry].iloc[0].to_dict(), **row}
+            existing = existing.loc[~retry]
     frame = pd.concat([existing.reindex(columns=order), pd.DataFrame([row]).reindex(columns=order)], ignore_index=True)
     temp = path.with_suffix(path.suffix + '.tmp')
     frame.to_csv(temp, index=False)
@@ -434,6 +440,21 @@ def append_compatible_csv(path: Path, row: dict[str, Any], columns: list[str],
 def append_row(config: dict[str, Any], row: dict[str, Any]) -> None:
     # The label belongs to the inputs it was computed under; see blade_shape_signature.
     row = {**row, signatures.COLUMN: row.get(signatures.COLUMN) or signatures.remember(config)}
+    path = training_csv_path(config)
+    if path.exists():
+        frame = pd.read_csv(path)
+        match = frame.index[frame.run_id.eq(row.get('run_id'))]
+        if len(match) == 1 and frame.at[match[0], 'status'] == 'interrupted':
+            index = match[0]
+            for key, value in row.items():
+                if key not in frame:
+                    frame[key] = pd.Series(dtype=object)
+                frame[key] = frame[key].astype(object)
+                frame.at[index, key] = value
+            temporary = path.with_suffix('.csv.tmp')
+            frame.to_csv(temporary, index=False)
+            temporary.replace(path)
+            return
     append_compatible_csv(training_csv_path(config), row, all_columns(config),
                           lambda df: normalize_training_frame(config, df))
 
@@ -1042,22 +1063,41 @@ def run_geometry(config: dict[str, Any], candidate_path: Path, dry_run: bool = F
     if dry_run:
         cmd.append("-DryRun")
     log_path = candidate_path.parent / ("geometry_dry_run.log" if dry_run else "geometry.log")
-    with log_path.open("w", encoding="utf-8", errors="ignore") as log:
-        log.write("COMMAND: " + " ".join(cmd) + "\n\n")
-        proc = subprocess.run(
-            cmd,
-            cwd=str(candidate_path.parent),
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            text=True,
-            creationflags=CREATE_NO_WINDOW,
-        )
-    if proc.returncode != 0:
-        return False, f"geometry failed with exit code {proc.returncode}; see {log_path}"
+    code = interruption.run_logged(cmd, candidate_path.parent, log_path)
+    if code != 0:
+        return False, f"geometry failed with exit code {code}; see {log_path}"
     return True, "geometry success"
 
 
-def evaluate_true_cfd(
+def evaluate_true_cfd(config: dict[str, Any], baseline: BaselineShape, x: np.ndarray,
+                      case_index: int, **metadata: Any) -> CaseResult:
+    """Only explicit operator cancellation makes the same case retryable."""
+    signatures.ensure_pinned(config)
+    run_id = f'case_{case_index:06d}'
+    case = output_dir(config) / 'cases' / run_id
+    with output_lock(case):
+        interruption.begin_case(case, run_id, signatures.remember(config), x.tolist())
+        try:
+            interruption.check_stop(case)
+            result = _evaluate_true_cfd(config, baseline, x, case_index, **metadata)
+            interruption.finish_case(case, 'complete')
+            return result
+        except KeyboardInterrupt:
+            if interruption.completed_result_available(case):
+                # Finished CFD needs only CSV/queue recovery, not a new solve.
+                interruption.finish_case(case, 'complete')
+                raise
+            attempt = json.loads((case / interruption.ATTEMPT).read_text())
+            interruption.request_stop(attempt['owner'], 'operator interrupt')
+            interruption.finish_case(case, 'interrupted')
+            row = {**vector_to_sample(config, x), **{k: np.nan for k in RESULT_COLUMNS}, **metadata,
+                   'run_id': run_id, 'case_dir': str(case), 'status': 'interrupted',
+                   'failure_stage': 'interrupted', 'message': 'Operator stopped this attempt; --resume will recompute it.'}
+            append_row(config, row)
+            raise
+
+
+def _evaluate_true_cfd(
     config: dict[str, Any],
     baseline: BaselineShape,
     x: np.ndarray,
@@ -1370,6 +1410,26 @@ def review_command(args: argparse.Namespace) -> None:
     print(json.dumps(record, indent=2, ensure_ascii=False))
 
 
+def recovery_command(args: argparse.Namespace) -> None:
+    import blade_shape_recovery as recovery
+    config = load_config(args.config)
+    if args.command == 'retry-interrupted':
+        result = recovery.retry_interrupted(config, args.run_id, args.reason)
+    elif args.apply_plan:
+        if args.run_id or args.plan or not args.reason:
+            raise SystemExit('Use reassess --apply-plan FILE --reason REASON.')
+        result = recovery.apply_plan(config, json.loads(Path(args.apply_plan).read_text()), args.reason)
+    else:
+        if not args.run_id or not args.plan or args.reason:
+            raise SystemExit('Use reassess --run-id CASE --plan FILE (read-only source inspection).')
+        result = recovery.make_plan(config, args.run_id)
+        destination = Path(args.plan)
+        if destination.exists() or destination.resolve().is_relative_to((output_dir(config)/'cases').resolve()):
+            raise ValueError('Choose a new plan file outside cases/; existing files are never overwritten.')
+        atomic_json(destination, result)
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+
+
 #: Exit status of a boundary stage paused for manual review (1 is a failed stage).
 REVIEW_EXIT = 3
 
@@ -1433,6 +1493,18 @@ def build_parser() -> argparse.ArgumentParser:
                           help="Accept it as a training label; the reason is recorded in review_decisions.json.")
     decision.add_argument("--reject", type=_reason, metavar="REASON", help="Reject it; it is recorded as failed.")
     review.set_defaults(func=review_command)
+    retry = sub.add_parser('retry-interrupted', help='Confirm an old stopped case for recomputation on --resume.')
+    retry.add_argument('--config', default=config_default)
+    retry.add_argument('--run-id', required=True)
+    retry.add_argument('--reason', required=True, type=_reason)
+    retry.set_defaults(func=recovery_command)
+    reassess = sub.add_parser('reassess', help='Plan/apply a verified policy reassessment; never runs a solver.')
+    reassess.add_argument('--config', default=config_default)
+    reassess.add_argument('--run-id')
+    reassess.add_argument('--plan')
+    reassess.add_argument('--apply-plan')
+    reassess.add_argument('--reason', type=_reason)
+    reassess.set_defaults(func=recovery_command)
     return parser
 
 

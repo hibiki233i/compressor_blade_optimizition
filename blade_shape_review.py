@@ -46,10 +46,23 @@ def awaiting(config: dict[str, Any]) -> list[dict[str, Any]]:
         run_id = str(row.run_id)
         case, solve = _solve_state(config, run_id)
         report = solve.get('convergence', {})
+        # Enrich old receipts without changing their recorded classification.
+        if solve.get('out_file') and (case / solve['out_file']).is_file():
+            from blade_shape_convergence import assess_out, ConvergencePolicy, ReviewPolicy
+            try:
+                report = assess_out((case / solve['out_file']).read_text(errors='replace'),
+                                    ConvergencePolicy.from_config(config),
+                                    history_window=ReviewPolicy.from_config(config).history_window)
+            except ValueError as exc:
+                report = {**report, 'evidence_error': str(exc)}
         out.append({'run_id': run_id, **{o: float(row[o]) for o in b.OBJECTIVE_COLUMNS},
                     'equations_above_target': solve.get('review', {}).get('equations_above_target'),
                     'rms': report.get('rms'), 'wall_notices': report.get('wall_notices'),
                     'iteration': report.get('iteration'), 'run_iteration': report.get('run_iteration'),
+                    'history': report.get('history'),
+                    'normalised_imbalance_percent': report.get('normalised_imbalance_percent'),
+                    'warnings': solve.get('review', {}).get('warnings', []),
+                    'evidence_error': report.get('evidence_error'),
                     'out_file': str(case / solve['out_file']) if solve.get('out_file') else None,
                     'message': row.message})
     return out
