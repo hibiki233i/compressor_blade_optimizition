@@ -509,6 +509,19 @@ class ReviewModeTests(unittest.TestCase):
         self.assertTrue(any('history window' in warning for warning in evidence['warnings']))
         self.assertFalse(report['history']['performance_monitors_verified'])
 
+    def test_tail_history_includes_non_required_equations(self):
+        # TurbKE spikes in the window but settles in the final table; only it exceeds the limit.
+        text=(output('2E-6',1999,False,{'TurbKE':'3E-4'})+output('2E-6',2000,True,{'W - Mom':'3E-5'}))
+        report=convergence.assess_out(text,convergence.ConvergencePolicy(),history_window=2)
+        self.assertEqual(report['history']['max_rms']['max'],3e-4)
+        self.assertEqual(report['history']['above_1e4_count'],1)
+        self.assertEqual(report['history']['equations']['turbke']['max'],3e-4)
+        self.assertIn('turbfreq',report['history']['equations'])
+        self.assertEqual(report['max_rms'],3e-5,'strict convergence still uses the required equations')
+        evidence=convergence.review_evidence(report,convergence.ConvergencePolicy(),
+                                             convergence.ReviewPolicy(mode='residual_limit'))
+        self.assertTrue(any('history window' in warning for warning in evidence['warnings']))
+
 
 @unittest.skipUnless(importlib.util.find_spec('PySide6') and importlib.util.find_spec('psutil'),
                      'GUI cancellation requires optional PySide6 and psutil')

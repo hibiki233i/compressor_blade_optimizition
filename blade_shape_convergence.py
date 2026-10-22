@@ -194,10 +194,14 @@ def assess_out(text: str, policy: ConvergencePolicy, *, history_window: int = 20
             history.append(table)
     def stats(numbers: list[float]) -> dict:
         return {'min': min(numbers), 'median': statistics.median(numbers), 'max': max(numbers)}
-    maxima = [max(table[name] for name in REQUIRED) for table in history]
+    # Review eligibility looks at every reported equation (turbulence, wall scale
+    # included), so the tail summary must too; strict convergence stays on REQUIRED.
+    maxima = [max(table.values()) for table in history]
+    reported = sorted(set().union(*history))
     history_summary = {'requested_window': history_window, 'count': len(history),
                        'max_rms': stats(maxima),
-                       'equations': {name: stats([table[name] for table in history]) for name in sorted(REQUIRED)},
+                       'equations': {name: stats([table[name] for table in history if name in table])
+                                     for name in reported},
                        'above_1e4_count': sum(value > 1e-4 for value in maxima),
                        'above_target_count': sum(value > policy.rms_target for value in maxima),
                        'performance_monitors_verified': False}
