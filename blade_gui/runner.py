@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Callable
 
 import psutil
+from blade_shape_interrupt import stop_environment, request_stop, TOKEN_ENV, STOP_ENV
 from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QTimer, Signal
 
 #: CFX processes that can run outside the CLI's process tree (MPI workers may
@@ -25,6 +26,10 @@ CFX_PROCESS_NAMES = frozenset({"solver-mpi.exe", "solver.exe", "cfx5solve.exe", 
                                "solver-mpi", "solver", "cfx5solve", "cfx5control"})
 #: Grace period before survivors of a stop are killed outright.
 STOP_GRACE_MS = 2500
+#: Time a CLI that received its stop token gets to end its own children and
+#: record the interruption before the GUI terminates the tree. The CLI waits up
+#: to 5 s for a child after killing it, so this must exceed that.
+CLI_CLEANUP_MS = 8000
 #: How often the processes a run has started are recorded while it runs.
 TRACK_INTERVAL_MS = 5000
 #: Tolerance between psutil start times and the GUI clock (Linux derives start
@@ -51,6 +56,7 @@ class CommandRunner(QObject):
         self._started_at = 0.0
         self._root_pid = 0
         self._stopping = False
+        self._stop_owner: dict = {}
         # (pid, start time) -> process: identities outlive the parent links
         self._known: dict[tuple[int, float], psutil.Process] = {}
         self._tracker = QTimer(self)
@@ -93,6 +99,12 @@ class CommandRunner(QObject):
         process.setArguments(argv[1:])
 
         environment = QProcessEnvironment.systemEnvironment()
+        self._stop_owner = {}
+        if self._scope:
+            stop_env = stop_environment(self._scope[0])
+            self._stop_owner = {'token': stop_env[TOKEN_ENV], 'stop_file': stop_env[STOP_ENV]}
+            for key, value in stop_env.items():
+                environment.insert(key, value)
         environment.insert("PYTHONIOENCODING", "utf-8")
         environment.insert("PYTHONUNBUFFERED", "1")
         environment.insert("PYTHONUTF8", "1")
@@ -124,13 +136,63 @@ class CommandRunner(QObject):
         process = self._process
         if process is None or process.state() == QProcess.NotRunning:
             return
+        if self._stop_owner:
+            try:
+                request_stop(self._stop_owner)
+            except OSError as exc:
+                self.failed.emit(f'无法记录停止请求，尚未终止进程：{exc}')
+                return
         self._stopping = True
         self._track()
         root = self._root_pid
         targets = sorted(self._known.values(), key=lambda proc: proc.pid == root)  # the CLI last
+        if self._stop_owner:
+            try:
+                request_stop(self._stop_owner, **self._stop_scope())
+            except OSError as exc:
+                self.failed.emit(f'无法记录进程停止范围，尚未终止进程：{exc}')
+                return
         names = Counter(_name(proc) for proc in targets)
         self.line.emit("out", "[GUI] 停止：结束本次运行启动的 {} 个进程（{}）".format(
             len(targets), "，".join(f"{name}×{count}" for name, count in sorted(names.items()))))
+        # Let the CLI observe its token and finish its owned-child cleanup first.
+        # A fresh tree snapshot before forced termination also covers a child
+        # spawned while the first stop snapshot was being collected.
+        owner = dict(self._stop_owner)
+        if owner and not wait:
+            self._await_cli_cleanup(process, root, targets, owner, time.monotonic() + CLI_CLEANUP_MS / 1000)
+            return
+        if owner:
+            process.waitForFinished(CLI_CLEANUP_MS)
+        self._terminate_owned(process, root, targets, owner, wait=wait)
+
+    def _await_cli_cleanup(self, process: QProcess, root: int, targets: list[psutil.Process],
+                           owner: dict, deadline: float) -> None:
+        """Poll without blocking the event loop; terminate early once the CLI has exited."""
+        try:
+            if process.state() != QProcess.NotRunning and time.monotonic() < deadline:
+                QTimer.singleShot(200, lambda: self._await_cli_cleanup(process, root, targets, owner, deadline))
+                return
+        except RuntimeError:  # the runner or QProcess was already deleted
+            return
+        self._terminate_owned(process, root, targets, owner, wait=False)
+
+    def _stop_scope(self) -> dict:
+        # Start times let a resume tell these processes from later PID reuse.
+        return {'process_ids': [pid for pid, _ in self._known],
+                'process_started': {pid: start for pid, start in self._known}}
+
+    def _terminate_owned(self, process: QProcess, root: int, targets: list[psutil.Process],
+                         owner: dict, *, wait: bool) -> None:
+        if self._process is process:
+            self._track()
+            targets = sorted(self._known.values(), key=lambda proc: proc.pid == root)
+            if owner:
+                try:
+                    request_stop(owner, **self._stop_scope())
+                except OSError as exc:
+                    self.failed.emit(f'无法更新停止范围：{exc}')
+                    return
         # terminate() is TerminateProcess on Windows; console programs ignore
         # QProcess.terminate() there, which only posts WM_CLOSE.
         self._signal(targets, kill=False)

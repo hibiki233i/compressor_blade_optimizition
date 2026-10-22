@@ -256,12 +256,12 @@ class GeometryScriptTests(unittest.TestCase):
         candidate = self.root/'case'/'candidate.json'
         candidate.parent.mkdir()
         candidate.write_text('{}')
-        with patch.object(b.subprocess, 'run') as run:
+        with patch.object(b.interruption, 'run_logged') as run:
             with self.assertRaisesRegex(b.GeometryScriptOutdated, 'older than the repository'):
                 b.run_geometry(self.config, candidate)
             run.assert_not_called()
         self.config['paths']['geometry_script_path'] = str(Path('Run-BladeShapeGeometryMeshing.ps1').resolve())
-        with patch.object(b.subprocess, 'run', return_value=__import__('subprocess').CompletedProcess([], 0)) as run:
+        with patch.object(b.interruption, 'run_logged', return_value=0) as run:
             b.run_geometry(self.config, candidate)
         argv = run.call_args.args[0]
         self.assertEqual(argv[argv.index('-BladeCount')+1], str(self.config['runtime']['n_blades']))

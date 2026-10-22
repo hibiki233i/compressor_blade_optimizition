@@ -71,13 +71,13 @@ class ParetoAndGeometryTests(unittest.TestCase):
         candidate = self.out / 'case' / 'candidate.json'
         candidate.parent.mkdir()
         candidate.write_text('{}', encoding='utf-8')
-        with patch.object(al.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)) as run:
+        with patch.object(al.interruption, 'run_logged', return_value=0) as run:
             self.assertEqual(al.run_geometry(self.config, candidate)[0], True)
         argv = run.call_args.args[0]
         self.assertEqual(argv[argv.index('-BladeCount') + 1], '12')
         # passed even when it equals the script's own default
         self.config['runtime']['n_blades'] = 10
-        with patch.object(al.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)) as run:
+        with patch.object(al.interruption, 'run_logged', return_value=0) as run:
             al.run_geometry(self.config, candidate)
         argv = run.call_args.args[0]
         self.assertEqual(argv[argv.index('-BladeCount') + 1], '10')
@@ -335,6 +335,7 @@ class GuiRegressionTests(ProjectFixture):
 
         runner = CommandRunner(Path.cwd())
         grandchild = self._start_with_grandchild(runner)
+        self.addCleanup(lambda: runner.stop(wait=True) if runner.running else None)
         self.assertTrue(self._alive(grandchild))
         runner.stop()
         self.assertTrue(self._wait_until(lambda: not runner.running))

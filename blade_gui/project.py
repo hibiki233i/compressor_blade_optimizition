@@ -292,6 +292,8 @@ class Summary:
     failures: int = 0
     # real CFD results close to the RMS target, not labels until a person accepts them
     reviews: int = 0
+    # operator-stopped points that --resume recomputes; neither results nor failures
+    interrupted: int = 0
     pareto_count: int = 0
     strict_count: int = 0
     best_efficiency: float = float("nan")
@@ -553,7 +555,8 @@ class Project:
         status = status.astype(str).str.strip().str.lower()
         out.successes = int((status == "success").sum())
         out.reviews = int((status == "review").sum())
-        out.failures = int(out.attempts - out.successes - out.reviews)
+        out.interrupted = int((status == "interrupted").sum())
+        out.failures = int(out.attempts - out.successes - out.reviews - out.interrupted)
 
         classes = self.input_classes()
         evidence = classes != "other"
@@ -582,7 +585,7 @@ class Project:
                 for k, v in df["sample_phase"].fillna("unknown").astype(str).value_counts().items()
             }
         if "failure_stage" in df.columns:
-            failed = df.loc[~status.isin(["success", "review"]), "failure_stage"].fillna("unspecified").astype(str)
+            failed = df.loc[~status.isin(["success", "review", "interrupted"]), "failure_stage"].fillna("unspecified").astype(str)
             failed = failed.replace({"": "unspecified", "nan": "unspecified"})
             out.failure_stages = {str(k): int(v) for k, v in failed.value_counts().items()}
         if "selection_source" in df.columns:

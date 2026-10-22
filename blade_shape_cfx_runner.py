@@ -14,6 +14,7 @@ from pathlib import Path
 from blade_shape_runtime import atomic_json, digest, file_identity, output_lock
 from blade_shape_signature import solver_identity
 from blade_shape_convergence import ConvergencePolicy, ReviewPolicy, assess_out, convergence_ccl, review_evidence
+from blade_shape_interrupt import run_logged
 
 
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
@@ -62,20 +63,7 @@ def _cfx_path(path: str | Path) -> str:
 
 
 def _run_logged(cmd: list[str], cwd: Path, log_path: Path) -> int:
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    with log_path.open("w", encoding="utf-8", errors="ignore") as log:
-        log.write("COMMAND: " + " ".join(cmd) + "\n\n")
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(cwd),
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            text=True,
-            creationflags=CREATE_NO_WINDOW,
-        )
-        while proc.poll() is None:
-            time.sleep(2)
-        return int(proc.returncode or 0)
+    return run_logged(cmd, cwd, log_path)
 
 
 def _parse_results(output_txt: Path, n_blades: int) -> dict[str, float]:
@@ -177,11 +165,39 @@ def _outcome(solve: dict, metrics: dict[str, float], message: str) -> CfxResult:
     return CfxResult(True, metrics, message)
 
 
+def final_solve_recorded(state: dict) -> bool:
+    """The selected evidence must belong to the last actual solver invocation."""
+    stages = state.get('stages', {})
+    solve = stages.get('solve', {})
+    if any(not isinstance(solve.get(key), str) or not solve[key] or Path(solve[key]).name != solve[key]
+           for key in ('result_file', 'out_file')):
+        return False
+    restart = stages.get('solve_restart')
+    if state.get('restart') or restart is not None:
+        if not restart or restart.get('status') not in {'returned', 'complete', 'review'} or restart.get('exit_code') != 0:
+            return False
+    attempts = state.get('solve_attempts', [])
+    if attempts:
+        final_attempt = 1 if state.get('restart') or restart is not None else 0
+        return attempts[-1].get('attempt') == final_attempt and all(solve.get(key) and solve.get(key) == attempts[-1].get(key)
+                   for key in ('result_file', 'result_identity', 'out_file', 'out_identity'))
+    return not state.get('restart') and restart is None
+
+
+def recover_cfx_result(working_dir: str | Path, run_id: str, **kwargs) -> CfxResult | None:
+    """Verify recorded results without starting tools or changing stage receipts."""
+    if not (Path(working_dir) / 'cfx_state.json').exists():
+        return None
+    with output_lock(working_dir):
+        return _run_cfx_pipeline(working_dir, run_id, **kwargs, recover_only=True)
+
+
 def _run_cfx_pipeline(
     working_dir: str | Path, run_id: str, *, p_out_pa: float,
     cfx_bin_dir: str | Path, template_cfx: str | Path, template_cse: str | Path,
     cores: int, n_blades: int, convergence: ConvergencePolicy, review: ReviewPolicy,
-) -> CfxResult:
+    recover_only: bool = False,
+) -> CfxResult | None:
     """Accept only results linked to a recorded, successful Solve and matching inputs.
 
     Final RMS acceptance is mandatory; conservation and mesh checks remain separate.
@@ -219,19 +235,25 @@ def _run_cfx_pipeline(
             return CfxResult(False, {}, 'Unverified legacy CFX artifacts: no completion receipt. Inspect/archive or use a fresh case.', 'solve')
         state = {'version': 2, 'signature': digest(inputs), 'inputs': inputs, 'stages': {}}
     environments = state.setdefault('environments', [])
-    if environment not in environments:
+    if not recover_only and environment not in environments:
         environments.append(environment)
         atomic_json(receipt, state)
     stages = state['stages']
     solve = stages.get('solve', {})
     if solve.get('status') in {'running', 'failed', 'needs_restart'}:
+        if recover_only:
+            return None
         return CfxResult(False, {}, 'Previous Solve is incomplete or failed; its .res is not an accepted final result. Inspect the case before a new attempt.', 'solve')
     if solve.get('status') in {'complete', 'review'}:
+        if not final_solve_recorded(state):
+            return CfxResult(False, {}, 'The final solver invocation does not match the recorded result.', 'solve')
         res_file = work / solve['result_file']
         if solve.get('exit_code') != 0 or file_identity(res_file) != solve.get('result_identity'):
             return CfxResult(False, {}, 'Completed Solve result is missing or changed.', 'solve')
         pre = stages.get('pre', {})
-        controls_valid = (file_identity(definition) == pre.get('definition_identity')
+        controls_valid = (pre.get('status') == 'complete' and bool(pre.get('definition_identity'))
+                          and bool(pre.get('ccl_identity')) and bool(state.get('convergence_control_identity'))
+                          and file_identity(definition) == pre.get('definition_identity')
                           and file_identity(work/'update_bc.ccl') == pre.get('ccl_identity')
                           and file_identity(work/'convergence.ccl') == state.get('convergence_control_identity'))
         if state.get('restart'):
@@ -253,6 +275,8 @@ def _run_cfx_pipeline(
             except ValueError as exc:
                 return CfxResult(False, {}, str(exc), 'solve')
         post = stages.get('post', {})
+        if recover_only and post.get('status') == 'complete' and file_identity(output) != post.get('result_identity'):
+            return CfxResult(False, {}, 'Recorded Post output changed or is missing.', 'post')
         if post.get('status') == 'complete' and file_identity(output) == post.get('result_identity'):
             try:
                 return _outcome(solve, _parse_results(output, n_blades), 'Recovered verified completed CFD result')
@@ -261,6 +285,8 @@ def _run_cfx_pipeline(
     else:
         res_file = None
 
+    if recover_only:
+        return None
     binary = Path(cfx_bin_dir)
     executables = {name: binary / f'cfx5{name}.exe' for name in ['pre', 'solve', 'post']}
     needed = ['post'] if res_file is not None else ['pre', 'solve', 'post']
@@ -334,7 +360,8 @@ def _run_cfx_pipeline(
             ret = invoke(stage, command)
             files = [p for p in work.glob('*.res') if p not in before and p.stat().st_size > 0]
             if ret != 0 or len(files) != 1:
-                stages['solve'].update(status='failed', message='Solver failed or did not create one unambiguous new result')
+                stages['solve'].update(status='failed', exit_code=ret, reason_code='solver_execution',
+                                       message='Solver failed or did not create one unambiguous new result')
                 atomic_json(receipt, state)
                 return CfxResult(False, {}, f'CFX-Solve failed or ambiguous new result, exit={ret}', 'solve')
             res_file = files[0]
@@ -342,11 +369,12 @@ def _run_cfx_pipeline(
             try:
                 if not out_file.is_file() or file_identity(out_file) == old_outputs.get(out_file.name):
                     raise ValueError('Matching .out is missing or was not updated by this Solve')
-                report = assess_out(out_file.read_text(encoding='utf-8', errors='replace'), convergence)
+                report = assess_out(out_file.read_text(encoding='utf-8', errors='replace'), convergence,
+                                    history_window=review.history_window)
                 if attempt and report['run_iteration'] > convergence.restart_iterations:
                     raise ValueError('Restart exceeded the configured iteration budget')
             except (ValueError, OSError) as exc:
-                stages['solve'].update(status='failed', message=str(exc))
+                stages['solve'].update(status='failed', reason_code='solver_output', message=str(exc))
                 atomic_json(receipt, state)
                 return CfxResult(False, {}, f'CFX RMS check failed: {exc}', 'solve')
             evidence = dict(result_file=res_file.name, result_identity=file_identity(res_file),
@@ -384,7 +412,12 @@ def _run_cfx_pipeline(
                 reason = (f"continued run stopped after {report['run_iteration']} of its "
                           f"{convergence.restart_iterations} iterations without a normal iteration-limit stop")
             message = f"RMS {report['max_rms']:.6g} exceeds {convergence.rms_target:.6g}; {reason}; point discarded"
-            stages['solve'].update(status='failed', message=message, **evidence)
+            reason_code = ('non_iteration_stop' if not report['iteration_limit_reached'] else
+                           'review_disabled' if not review.max_equations_above_target else
+                           'rms_limit' if any(v > review.rms_limit for v in report['rms'].values()) else
+                           'review_equation_count')
+            stages['solve'].update(status='failed', message=message, reason_code=reason_code,
+                                   review_policy=review.to_dict(), **evidence)
             atomic_json(receipt, state)
             return CfxResult(False, {}, message, 'solve')
     if output.exists():

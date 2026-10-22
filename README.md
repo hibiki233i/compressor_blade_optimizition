@@ -95,6 +95,8 @@ python benchmarks/run_offline_baseline.py
 
 ## 输出文件
 
+明确由 GUI「停止」或 Ctrl+C 中断的未完成点，下次 `run --resume` 会在预算内按原设计点重算，旧产物保留在 `attempts/`。旧版本的停止记录用 `retry-interrupted` 显式登记；按旧收敛政策失败的完整结果用 `reassess` 计划/应用入口补提数据并转人工审核。操作、兼容限制及示例见 [恢复与审核](docs/optimization.md#5-运行续跑与中断处理)。待审核点会提取性能数值，但人工接受前不进入训练或 Pareto。
+
 输出目录由配置中的 `paths.output_dir` 决定，通常写在 `blade_shape_local.ini` 里。
 
 | 文件 | 内容 |

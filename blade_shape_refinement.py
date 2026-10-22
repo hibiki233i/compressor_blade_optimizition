@@ -390,8 +390,8 @@ def _run_boundary(config: dict[str,Any], path: Path, stage: str, max_new: int, r
     import blade_shape_active_learning as b
     b.check_geometry_script(config)
     path=Path(path)
-    if stage not in ['singles','pairs','extension'] or max_new<=0:
-        raise ValueError('Choose singles/pairs/extension and a positive CFD budget.')
+    if stage not in ['singles','pairs','extension'] or max_new<0:
+        raise ValueError('Choose singles/pairs/extension and a nonnegative CFD budget.')
     plan=json.loads(path.read_text());content={k:v for k,v in plan.items() if k!='plan_id'}
     if plan.get('version') != 2:
         raise ValueError('Create a version-2 plan; old plans are not silently migrated.')
@@ -420,15 +420,32 @@ def _run_boundary(config: dict[str,Any], path: Path, stage: str, max_new: int, r
         b.write_pareto(config,frame)
         raise
     signatures.pin(config)
+    baseline=b.extract_baseline(config)
     reservations=case_reservations(config['paths']['output_dir'])
+    owners={}
     for run_id,owner in reservations.items():
-        if owner.get('plan_id')==plan['plan_id'] and owner['point_id'] not in state['points']:
-            state['points'][owner['point_id']]={'run_id':run_id,'status':'running'}
+        if owner.get('plan_id')==plan['plan_id']:
+            point=next((p for p in plan['points'] if p['point_id']==owner.get('point_id')),None)
+            if (point is None or owner.get('signature')!=plan['signature'] or not np.allclose(
+                    owner.get('x',[]),point['x'],rtol=0,atol=1e-10) or owner['point_id'] in owners):
+                raise ValueError('Boundary reservation conflicts with the frozen experiment.')
+            owners[owner['point_id']]=run_id
+            saved=state['points'].get(owner['point_id'],{})
+            if saved.get('run_id') and saved['run_id']!=run_id:
+                raise ValueError('Boundary checkpoint and reservation disagree about run_id.')
+            if not saved:
+                state['points'][owner['point_id']]={'run_id':run_id,'status':'running'}
     for p in plan['points']:
         saved=state['points'].get(p['point_id'],{})
         if not saved.get('run_id'):continue
         rows=frame.loc[frame.run_id.eq(saved['run_id'])]
         if len(rows)>1:raise ValueError('Duplicate recorded run_id; resolve before resuming.')
+        if rows.empty or rows.iloc[0]['status']=='interrupted':
+            b.recover_recorded_case(point_config(config,p),baseline,np.array(p['x']),
+                                   b.parse_case_number(saved['run_id']),producing_signature=plan['signature'],sample_phase='boundary',
+                                   experiment_id=plan['plan_id'],design_role=p['point_id'],selection_source='predefined_boundary')
+            frame=b.load_training(config)
+            rows=frame.loc[frame.run_id.eq(saved['run_id'])]
         if len(rows):
             row=rows.iloc[0]
             if not np.allclose(row[plan['variables']].to_numpy(float),p['x'],rtol=0,atol=1e-10) or row.get('experiment_id')!=plan['plan_id']:
@@ -436,24 +453,29 @@ def _run_boundary(config: dict[str,Any], path: Path, stage: str, max_new: int, r
             saved['status']=str(row.status)
             preceding=frame.loc[frame.run_id.map(b.parse_case_number).fillna(-1)<b.parse_case_number(saved['run_id'])]
             saved.update(improvement_metrics(config,preceding,row.to_dict()))
+            if not saved.get('prediction'):
+                saved['prediction']={'run_id':saved['run_id'],'candidate_role':'boundary_'+p['stage'],
+                                     'experiment_id':plan['plan_id'],'point_id':p['point_id'],'slice_id':plan['slice_id'],
+                                     'prediction_status':'unavailable','prediction_message':'Original prediction checkpoint unavailable.'}
             if saved.get('prediction'):
                 diagnostic={**saved['prediction'], **saved.get('metrics',{}),
                             **improvement_metrics(config,preceding,row.to_dict()),'status':str(row.status)}
                 diagnostic.update({f'true_{o}':float(row[o]) if pd.notna(row[o]) else None for o in OBJECTIVES})
                 existing=pd.read_csv(boundary_csv) if boundary_csv.exists() else pd.DataFrame()
-                if existing.empty or saved['run_id'] not in existing.run_id.values:
+                if (existing.empty or saved['run_id'] not in existing.run_id.values
+                        or ('status' in existing and (existing.run_id.eq(saved['run_id']) & existing.status.eq('interrupted')).any())):
                     b.append_compatible_csv(boundary_csv,diagnostic,list(diagnostic))
         elif saved.get('status') in ['success','failed','review']:
             raise ValueError('Checkpoint outcome is missing from training_data.csv.')
+    if exists or state['points']:
+        atomic_json(state_path,state)
+    b.write_pareto(config,frame)
     required=['singles'] if stage=='pairs' else ['singles','pairs'] if stage=='extension' else []
     earlier=[state['points'].get(p['point_id'],{}) for p in plan['points'] if p['stage'] in required]
     if any(s.get('status')!='success' for s in earlier):
         waiting=[s['run_id'] for s in earlier if s.get('status')=='review']
         raise ValueError('Earlier stages must finish successfully before starting this stage.'
                          +(f" Awaiting manual review: {', '.join(waiting)}." if waiting else ''))
-    if exists:
-        atomic_json(state_path,state)
-    baseline=b.extract_baseline(config)
     used=0
     for p in plan['points']:
         if p['stage']!=stage:continue

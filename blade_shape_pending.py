@@ -7,6 +7,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import blade_shape_signature as signatures
+import blade_shape_interrupt as interruption
 from blade_shape_runtime import atomic_json, case_reservations
 
 
@@ -74,8 +75,11 @@ def run(config: dict[str,Any], baseline: Any, budget: int) -> dict[str,Any]:
         recorded=frame.loc[frame.run_id.eq(entry['run_id'])]
         if len(recorded)>1:raise ValueError(f"Duplicate pending run_id: {entry['run_id']}")
         if entry['finalized']:
-            if recorded.empty:raise ValueError(f"Completed queue row missing from CSV: {entry['run_id']}")
-            continue
+            if not recorded.empty and recorded.iloc[0]['status'] != 'interrupted':
+                continue
+            if not recorded.empty:
+                entry.update(status='interrupted', finalized=False)
+                atomic_json(path_for(config), queue)
         if entry['signature'] not in allowed:
             raise signatures.InputsChanged(f"Inputs changed for pending {entry['run_id']}; inspect before resuming.")
         x=np.array(entry['x'],float)
@@ -85,23 +89,29 @@ def run(config: dict[str,Any], baseline: Any, budget: int) -> dict[str,Any]:
                 raise ValueError('Pending input and recorded CFD row do not match.')
             if row['sample_phase']!=entry['arguments']['sample_phase']:
                 raise ValueError('Pending sample phase mismatch.')
-            if row['status'] not in ['success','failed','review']:raise ValueError('Unrecognized recorded CFD outcome.')
-            result=b.CaseResult(row.to_dict(),row['status']=='success')
+            if row['status'] not in ['success','failed','review','interrupted']:raise ValueError('Unrecognized recorded CFD outcome.')
+        if not recorded.empty and recorded.iloc[0]['status'] != 'interrupted':
+            result=b.CaseResult(recorded.iloc[0].to_dict(),recorded.iloc[0]['status']=='success')
         else:
-            if used>=budget:break
-            signatures.ensure_pinned(config)
-            if entry['status']=='pending':
-                entry['before_run_ids']=frame.run_id.tolist()
-                entry['status']='running'
-                atomic_json(path_for(config),queue)
-            candidate=Path(config['paths']['output_dir'])/'cases'/entry['run_id']/'candidate.json'
-            if candidate.exists():
-                old=json.loads(candidate.read_text())
-                if not np.allclose([old['variables'][n] for n in b.variable_names(config)],x,rtol=0,atol=1e-10):
-                    raise ValueError('Pending candidate file changed.')
-            print(f"[CFD] {entry['arguments']['sample_phase']} {entry['run_id']}")
-            result=b.evaluate_true_cfd(config,baseline,x,b.parse_case_number(entry['run_id']),**entry['arguments'])
-            used+=1
+            result=b.recover_recorded_case(config,baseline,x,b.parse_case_number(entry['run_id']),
+                                           producing_signature=entry['signature'],**entry['arguments'])
+            if result is None:
+                if entry['finalized']:
+                    raise ValueError(f"Completed queue row missing from CSV/evidence: {entry['run_id']}")
+                if used>=budget:continue
+                signatures.ensure_pinned(config)
+                if entry['status']=='pending':
+                    entry['before_run_ids']=frame.run_id.tolist()
+                    entry['status']='running'
+                    atomic_json(path_for(config),queue)
+                candidate=Path(config['paths']['output_dir'])/'cases'/entry['run_id']/'candidate.json'
+                if candidate.exists():
+                    old=json.loads(candidate.read_text())
+                    if not np.allclose([old['variables'][n] for n in b.variable_names(config)],x,rtol=0,atol=1e-10):
+                        raise ValueError('Pending candidate file changed.')
+                print(f"[CFD] {entry['arguments']['sample_phase']} {entry['run_id']}")
+                result=b.evaluate_true_cfd(config,baseline,x,b.parse_case_number(entry['run_id']),**entry['arguments'])
+                used+=1
         before=frame.loc[frame.run_id.isin(entry.get('before_run_ids',[]))]
         metrics=r.improvement_metrics(config,before,result.row)
         if entry['arguments']['sample_phase']=='active_learning':
@@ -117,7 +127,8 @@ def run(config: dict[str,Any], baseline: Any, budget: int) -> dict[str,Any]:
                          pareto_rows_before=len(b.write_pareto(config,before)),
                          pareto_rows_after=len(b.write_pareto(config,b.load_training(config))))
             existing=b.load_existing_diagnostics(config)
-            if entry['run_id'] not in existing:b.append_diagnostic_row(config,diagnostic)
+            if entry['run_id'] not in existing or existing[entry['run_id']].get('status')=='interrupted':
+                b.append_diagnostic_row(config,diagnostic)
             r.write_diagnostics(config)
             r.update_local_search(config,entry['run_id'],metrics,result.success)
         b.write_pareto(config,b.load_training(config))

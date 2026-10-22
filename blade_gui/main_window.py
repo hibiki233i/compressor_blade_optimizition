@@ -418,7 +418,7 @@ class MainWindow(QMainWindow):
                 self,
                 "任务仍在运行",
                 "关闭窗口会停止正在运行的命令，以及它启动的 CFturbo / TurboGrid / CFX 求解进程。\n"
-                "中断在几何或求解阶段的算例，下次续跑时记为失败（不会重算）。确定关闭？",
+                "本次停止的算例会保留设计点，下次续跑时归档旧产物并重新计算。确定关闭？",
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.No,
             )
@@ -428,6 +428,9 @@ class MainWindow(QMainWindow):
             # Qt's own teardown would kill only the CLI and orphan the solver.
             for runner in running:
                 runner.stop(wait=True)
+            if any(runner.running for runner in running):
+                event.ignore()
+                return
         self.ctx.write_setting("window/geometry", self.saveGeometry())
         self.ctx.sync_settings()
         super().closeEvent(event)

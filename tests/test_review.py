@@ -81,6 +81,21 @@ class ReviewDecisionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'not awaiting review'):
             review.decide(self.c, 'case_000004', 'rejected', 'second thoughts')
 
+    def test_unreadable_out_falls_back_to_the_recorded_report(self):
+        out_file = self.out / 'cases' / 'case_000004' / 'Impeller_002.out'
+        original = Path.read_text
+
+        def denied(path, *args, **kwargs):
+            if Path(path) == out_file:
+                raise PermissionError('access denied by ACL')
+            return original(path, *args, **kwargs)
+
+        with patch.object(Path, 'read_text', denied):
+            listed = review.awaiting(self.c)
+        self.assertEqual([item['run_id'] for item in listed], ['case_000004'])
+        self.assertEqual(listed[0]['rms'], {'p-mass': 1.3e-5})
+        self.assertIn('access denied', listed[0]['evidence_error'])
+
     def test_rejected_result_is_recorded_as_failed(self):
         review.decide(self.c, 'case_000004', 'rejected', 'outlet backflow too large')
         row = b.load_training(self.c).set_index('run_id').loc['case_000004']

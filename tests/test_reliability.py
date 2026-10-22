@@ -335,6 +335,8 @@ class ReliabilityTests(unittest.TestCase):
         with patch.object(b,'run_geometry',side_effect=geometry),patch.object(cfx,'_run_logged',side_effect=external):
             with patch.object(b,'append_row',side_effect=interrupted):
                 with self.assertRaises(KeyboardInterrupt):b.run_loop(args)
+            # Recovery itself uses no new-CFD slot; zero forbids a further AL iteration.
+            args.max_new_cfd=0
             b.run_loop(args)
         self.assertEqual(calls,['geometry','cfx5pre.exe','cfx5solve.exe','cfx5post.exe'])
         self.assertEqual(b.load_training(self.c).tail(1).run_id.iloc[0],'case_000004')

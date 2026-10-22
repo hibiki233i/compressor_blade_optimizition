@@ -128,6 +128,8 @@ RUNTIME_FIELDS = [
     Field("cfx_convergence.flow_analysis", "CFX Flow 名称", "text"),
     Field("cfx_review.rms_limit", "送审残差上限", "float", minimum=0.000000000001, maximum=REVIEW_RMS_MAX,
           decimals=12, step=0.00001),
+    Field("cfx_review.mode", "送审模式", "choice", choices=("legacy_count", "residual_limit")),
+    Field("cfx_review.history_window", "末段残差统计步数", "int", minimum=2, maximum=10000),
     Field("cfx_review.max_equations_above_target", "送审允许超标方程数", "int", minimum=0, maximum=20),
     Field("runtime.n_blades", "叶片数", "int", minimum=1, maximum=200),
     Field("runtime.rpm", "声明转速 (rpm)", "float", decimals=2, step=100.0),

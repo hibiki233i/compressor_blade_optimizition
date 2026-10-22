@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 import re
+import statistics
 from dataclasses import asdict, dataclass
 
 #: Loosest accepted final RMS residual (max over equations in the last .out
@@ -55,10 +56,16 @@ class ReviewPolicy:
     """
     rms_limit: float = REVIEW_RMS_MAX
     max_equations_above_target: int = 3
+    mode: str = 'legacy_count'
+    history_window: int = 200
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.rms_limit) or not 0 < self.rms_limit <= REVIEW_RMS_MAX:
             raise ValueError(f'cfx_review.rms_limit must be positive and <= {REVIEW_RMS_MAX:g}')
+        if self.mode not in {'legacy_count', 'residual_limit'}:
+            raise ValueError('cfx_review.mode must be legacy_count or residual_limit')
+        if type(self.history_window) is not int or not 2 <= self.history_window <= 10000:
+            raise ValueError('cfx_review.history_window must be an integer in [2, 10000]')
         if type(self.max_equations_above_target) is not int or self.max_equations_above_target < 0:
             raise ValueError('cfx_review.max_equations_above_target must be a non-negative integer (0 disables review)')
 
@@ -79,11 +86,17 @@ def review_evidence(report: dict, convergence: ConvergencePolicy, review: Review
     if report['converged']:
         return None
     above = {name: value for name, value in report['rms'].items() if value > convergence.rms_target}
-    if not 0 < len(above) <= review.max_equations_above_target:
+    if not above or review.max_equations_above_target == 0:
+        return None
+    if review.mode == 'legacy_count' and len(above) > review.max_equations_above_target:
         return None
     if any(value > review.rms_limit for value in above.values()):
         return None
-    return {'equations_above_target': above, 'rms_target': convergence.rms_target, **review.to_dict()}
+    warnings = ['Performance monitor history has not been verified; final metrics alone do not prove stability.']
+    if report.get('history', {}).get('max_rms', {}).get('max', 0) > review.rms_limit:
+        warnings.append('Residuals exceeded the review limit within the final history window.')
+    return {'equations_above_target': above, 'rms_target': convergence.rms_target,
+            'policy_version': 2, 'warnings': warnings, **review.to_dict()}
 
 
 ITERATION = re.compile(r'OUTER\s+LOOP\s+ITERATION\s*=\s*(\d+)(?:\s*\(\s*(\d+)\s*\))?', re.I)
@@ -145,7 +158,7 @@ def wall_notices(block: str) -> list[dict]:
     return list(notices.values())
 
 
-def assess_out(text: str, policy: ConvergencePolicy) -> dict:
+def assess_out(text: str, policy: ConvergencePolicy, *, history_window: int = 200) -> dict:
     matches = list(ITERATION.finditer(text))
     if not matches:
         raise ValueError('No steady OUTER LOOP ITERATION in CFX .out')
@@ -173,11 +186,36 @@ def assess_out(text: str, policy: ConvergencePolicy) -> dict:
     exhausted = bool(limit_stop and declared_limit is not None and current_iteration >= declared_limit)
     max_rms = max(values[name] for name in REQUIRED)
     converged = max_rms <= policy.rms_target
+    history = []
+    for index in range(max(0, len(matches)-history_window), len(matches)):
+        end = matches[index+1].start() if index+1 < len(matches) else len(text)
+        table = _residuals(text[matches[index].end():end])
+        if REQUIRED <= table.keys():
+            history.append(table)
+    def stats(numbers: list[float]) -> dict:
+        return {'min': min(numbers), 'median': statistics.median(numbers), 'max': max(numbers)}
+    # Review eligibility looks at every reported equation (turbulence, wall scale
+    # included), so the tail summary must too; strict convergence stays on REQUIRED.
+    maxima = [max(table.values()) for table in history]
+    reported = sorted(set().union(*history))
+    history_summary = {'requested_window': history_window, 'count': len(history),
+                       'max_rms': stats(maxima),
+                       'equations': {name: stats([table[name] for table in history if name in table])
+                                     for name in reported},
+                       'above_1e4_count': sum(value > 1e-4 for value in maxima),
+                       'above_target_count': sum(value > policy.rms_target for value in maxima),
+                       'performance_monitors_verified': False}
+    imbalance = None
+    if 'Normalised Imbalance Summary' in final:
+        section = final.split('Normalised Imbalance Summary', 1)[1].split('\n\n', 1)[0]
+        imbalance = {name.lower(): float(value) for name, value in re.findall(
+            r'^\s*\|\s*([\w-]+)\s*\|\s*[\d.Ee+-]+\s*\|\s*([-+\d.Ee]+)\s*\|', section, re.M)}
     return dict(iteration=int(last.group(1)), run_iteration=int(last.group(2) or last.group(1)),
                 rms=values, wall_notices=wall_notices(final), checked_equations=sorted(REQUIRED), max_rms=max_rms,
                 rms_target=policy.rms_target,
                 converged=converged, iteration_limit_stop=limit_stop, iteration_limit_reached=exhausted,
-                declared_iteration_limit=declared_limit)
+                declared_iteration_limit=declared_limit, history=history_summary,
+                normalised_imbalance_percent=imbalance)
 
 
 def convergence_ccl(policy: ConvergencePolicy, *, restart: bool = False) -> str:

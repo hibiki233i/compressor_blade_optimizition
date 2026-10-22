@@ -119,6 +119,21 @@ python blade_shape_active_learning.py run --config blade_shape_config.json --res
 
 **中断后怎么办**：程序在每个点开始计算前，先把它登记到 `pending_evaluations.json`，包括坐标、预测值和预留的算例编号。下次带 `--resume` 运行时，会先处理这些未完成的点，再挑新点。如果某个点的结果已经写进 CSV、只是收尾工作没做完，程序会直接补齐收尾，不会重算。
 
+GUI「停止」或关闭窗口确认停止时，先写入带本次运行 token 的停止凭据；终端 Ctrl+C 也记录明确中断。未完成的点保留原 run_id、坐标及阶段信息，不计作数值失败。下次 `--resume` 在新增 CFD 预算内先重算该点：确认已记录进程退出后，把旧产物归档到算例内 `attempts/interrupted_XXXX/`，再从几何开始重新计算；归档有日志，写到一半中断也可恢复，不删除锁文件。进程按 PID 及其启动时间核对，PID 已被无关进程复用不会阻塞续跑；无法读取启动时间时仍按存活处理。已经完成并通过身份核验的 Solve/Post 只补写 CSV，不重复计算。Solve 已正常结束且网格、控制文件、`.out/.res` 身份均未变、只有 Post 被停止时，只归档 Post 产物并重跑 Post（日志 `scope=post`）；物理签名变化或任一证据变化时仍整例归档重算。停止后经 `--accept-input-change` 接受输入变更的点，也按新输入重算，旧 attempt 的签名随归档保留。无停止凭据的崩溃或真正未收敛不自动重试。
+
+恢复顺序以已提交结果和实际阶段证据为准：已写入的 success/failed/review 行不会被稍后到达的停止请求改成 interrupted；阶段已明确失败也不会因停止 token 自动重算。完整 Solve/Post 或失败终态的补记在预算检查之前进行，新增 CFD 计数为零；`run` 和 `run-boundary` 都可用 `--max-new-cfd 0` 整理已完成记录、诊断、阶段状态和 Pareto。边界实验先恢复全部已预留点，再检查前序阶段是否完成或待审核。状态规则及测试矩阵见 [恢复状态机](recovery-state-machine.md)。
+
+旧版本没有停止凭据，无法仅凭 running/failed 区分操作停止与故障。人工确认旧点确实由停止命令中断后，可先登记，再正常续跑（第一条不启动 CFD）：
+
+```powershell
+python blade_shape_active_learning.py retry-interrupted --config blade_shape_config.json --run-id case_000000 --reason "确认是操作员停止，求解进程已退出"
+python blade_shape_active_learning.py run --config blade_shape_config.json --resume --iterations 0 --max-new-cfd 1
+```
+
+登记会核对队列/边界预留、物理签名、设计坐标及未完成证据，并保留旧行；几何或 CFX 任一阶段已明确记为失败、已正常求解结束的数值失败或人工否决不能走这个入口。未入表但仍在旧队列 running 的点，以及仅有边界预留记录的旧中断点也可登记；边界点保留原方案、点位和 run_id，再用原方案执行 `run-boundary --resume`。重算结束替换 interrupted 行，保留额外列，不生成重复 run_id。登记时记录 `cfx_state.json`、`geometry_state.json`、`candidate.json` 的身份；续跑前任一文件改变都会拒绝归档，需先检查算例。
+
+若初始 Solve 正常结束、后续 continuation 被操作员中断，初始结果作为历史保留，登记时不会把它误认成最终结果。`reassess` 另行核对最后一次实际求解的编号、退出状态及输出证据；restart 执行或输出失败不能用前一次结果替代。重评 Post 使用独立停止 token，中断后可重放原计划，仅重做尚未完成的 Post。
+
 **换了工况或模板之后**：每条训练记录、每个待续跑点和每份边界方案都带着生成时的**物理签名**（CSV 的 `physical_signature` 列）。签名只覆盖会改变同一个设计点计算结果的输入：
 
 | 进入签名 | 不进入签名 |
@@ -173,7 +188,7 @@ python blade_shape_active_learning.py run --config blade_shape_config.json --res
 
 `1e-5` 的门槛有时过严：例如最终残差表里其他方程都远低于 `1e-5`，只有 P-Mass 卡在 `1.3e-5`、Rate 1.00 走平了。这类结果往往可用，但要人来判断。程序的做法：
 
-- **什么样的结果送审**：只有续算把追加步数正常用完的点才可能送审。最终残差表中（湍流、Wallscale 等方程也算在内）高于 RMS 门槛的方程不超过 3 个，而且每个都不超过 `1e-4`。第一次求解异常停止、续算因为按累计步数到达上限而提前停下、超标方程太多或超过 `1e-4`，都仍然直接记为失败。
+- **什么样的结果送审**：只有续算把追加步数正常用完的点才可能送审。新配置显式使用 `residual_limit`：所有已报告方程的最终残差都不超过 `1e-4` 即可送审，不再因超过 `1e-5` 的方程有 4 个而直接失败。旧配置未指定模式时保持 `legacy_count`（最多 3 个超标方程）。两种模式都保持严格成功目标不变，并对送审点执行 CFX-Post、提取完整性能数值；仅在人工接受后成为标签。异常停止和超过上限的结果不会自动接受。
 - **送审结果**：照常跑 CFX-Post，效率、流量等写进 `training_data.csv`，但 `status=review`，**不进训练集，也不进 Pareto**。`cfx_state.json` 记录了超标的方程、全部方程的残差，以及 `.out` 里进出口被临时加墙（回流）的面积比例。运行结束时会列出所有待审核的算例；送审不算失败，不会让 `run` 以非零状态退出。
 - **审核**：先打开该算例的 `.out` 检查残差曲线是否走平、进出口质量是否守恒、效率与流量监测点是否稳定、进出口回流是否严重，然后：
 
@@ -191,12 +206,28 @@ python blade_shape_active_learning.py run --config blade_shape_config.json --res
 
 ```json
 "cfx_review": {
+  "mode": "residual_limit",
+  "history_window": 200,
   "rms_limit": 0.0001,
   "max_equations_above_target": 3
 }
 ```
 
-`rms_limit` 只能收紧（不超过 `1e-4`）；`max_equations_above_target` 设为 0 即关闭送审，恢复严格判据。配置里没有 `cfx_review` 时按上面的默认值**启用**送审：沿用旧配置的输出目录会开始出现待审核结果，边界阶段也可能因此暂停。
+`rms_limit` 只能收紧（不超过 `1e-4`）；`max_equations_above_target` 设为 0 在两种模式都关闭送审，正数仅在 legacy_count 模式限制数量。未指定模式的旧配置保持 legacy_count；新共享配置显式开启 residual_limit。审核政策及版本记录在凭据中，不属于物理签名；修改政策不会自动改写历史标签。
+
+`review` 的只读列表与算例详情增加末段残差范围、中位数、超限次数、质量/能量归一化不平衡（单位 %）及回流提示。历史凭据可在列表中只读补算统计。窗口统计覆盖残差表报告的全部方程（含湍流、Wallscale），与送审判定一致；严格收敛门槛仍只看动量、质量和能量方程。窗口统计用于审核警示，不自动证明收敛；没有性能监测历史时明确标记尚未验证性能稳定性，不能以最终一次后处理值代替。
+
+### 历史失败结果复核
+
+旧 failed 点不能只改配置就变为 review。对正常结束、证据完整且符合新送审政策的结果，使用独立计划入口；计划阶段不改源数据，应用阶段完整核对 `.out/.res`、输入及控制文件身份，只调用 CFX-Post 补提数据，绝不启动求解器：
+
+```powershell
+python blade_shape_active_learning.py reassess --config blade_shape_config.json --run-id case_000016 --plan reassess_016.json
+python blade_shape_active_learning.py reassess --config blade_shape_config.json --apply-plan reassess_016.json --reason "按残差上限重新送审，保留原始失败证据"
+python blade_shape_active_learning.py review --config blade_shape_config.json
+```
+
+先在配置中明确选择 residual_limit；否则仍按旧模式判定。计划文件必须是新文件，不能覆盖工程文件或放进 cases/。应用把原始凭据、原始失败结论和理由记入 `reassessment_requests.json` / 求解凭据的历史，再把有完整性能值的行转为 review，不直接转 success。已有的主动学习和边界诊断行同步补入真实目标值、按原预测值计算的误差及新的结果信息，保留当时的预测、不确定度、改进量和其他列。文件或输入改变、缺失结果、异常退出、人工否决均不能绕过；后处理失败可重复应用同一计划，仅重做 Post。更新受输出锁保护，并支持中断恢复。最终仍需 `review --accept "工程审核理由"`。
 
 **续跑时的核对**：每个算例目录下有 `geometry_state.json` 和 `cfx_state.json`，记录了这个算例用的输入文件指纹和各阶段的完成情况。续跑时如果发现输入变了、或者某阶段没有完成记录，程序不会把残留文件当成成功，而是要求人工检查。CFX 的核数和安装目录不参与这项核对，只追加记录在 `cfx_state.json` 的 `environments` 中，换核数或把同一版本挪到别处后，已完成的阶段照常复用。换了 CFX 版本（版本号文件夹或 `cfx5solve.exe` 内容不同）则不复用，并且按物理输入变化处理。2026-10 之前写下的 `cfx_state.json` 没有记录版本，只在安装路径完全相同时复用。
 

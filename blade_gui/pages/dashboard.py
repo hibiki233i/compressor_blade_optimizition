@@ -162,8 +162,10 @@ class DashboardPage(Page):
 
         self.tile_attempts.set_value(str(summary.attempts), f"最近更新 {fmt_time(summary.last_modified)}")
         self.tile_success.set_value(str(summary.successes), f"成功率 {summary.success_rate * 100:.1f}%")
-        self.tile_failed.set_value(str(summary.failures),
-                                   f"另有 {summary.reviews} 个待审核" if summary.reviews else "见下方失败阶段分布")
+        others = "，".join(text for count, text in ((summary.reviews, f"{summary.reviews} 个待审核"),
+                                                   (summary.interrupted, f"{summary.interrupted} 个已中断待重算"))
+                           if count)
+        self.tile_failed.set_value(str(summary.failures), f"另有 {others}" if others else "见下方失败阶段分布")
         self.tile_pareto.set_value(
             str(summary.pareto_count), f"严格前沿 {summary.strict_count} 个"
         )

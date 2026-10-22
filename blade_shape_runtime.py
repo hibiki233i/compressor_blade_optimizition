@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import subprocess
 import threading
+import uuid
 from typing import Any, Iterator
 
 _local = threading.local()
@@ -37,12 +38,15 @@ def stream_seed(seed: int, stream: str, index: int = 0) -> int:
 
 def atomic_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + '.tmp')
-    with temporary.open('w', encoding='utf-8') as stream:
-        json.dump(value, stream, indent=2, allow_nan=False)
-        stream.flush()
-        os.fsync(stream.fileno())
-    temporary.replace(path)
+    temporary = path.with_name(f'{path.name}.{uuid.uuid4().hex}.tmp')
+    try:
+        with temporary.open('w', encoding='utf-8') as stream:
+            json.dump(value, stream, indent=2, allow_nan=False)
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def file_identity(path: str | Path) -> dict[str, Any] | None:
