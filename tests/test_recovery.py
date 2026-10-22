@@ -145,7 +145,8 @@ class ReassessmentTests(unittest.TestCase):
         self.case.mkdir(parents=True)
         (self.case/'Impeller_Mesh.gtm').write_text('mesh')
         self.x = refinement.enforce_fixed(self.config, np.zeros(12))
-        (self.case/'candidate.json').write_text(json.dumps({'variables':b.vector_to_sample(self.config,self.x)}))
+        (self.case/'candidate.json').write_text(json.dumps({'run_id':'case_000000',
+                                                         'variables':b.vector_to_sample(self.config,self.x)}))
         self.kw = dict(p_out_pa=float(self.config['runtime']['p_out_pa']),cfx_bin_dir=paths['cfx_bin_dir'],
                        template_cfx=paths['template_cfx'],template_cse=paths['template_cse'],
                        n_blades=int(self.config['runtime']['n_blades']))
@@ -231,19 +232,165 @@ class ReassessmentTests(unittest.TestCase):
                 recovery.apply_plan(self.config,plan,'retry')
 
     def test_legacy_running_receipt_needs_explicit_operator_confirmation(self):
+        atomic_json(pending.path_for(self.config), {'version':1,'entries':[{
+            'run_id':'case_000000','status':'failed','finalized':True,
+            'signature':b.load_training(self.config).iloc[0].physical_signature,'x':self.x.tolist(),
+            'arguments':{'sample_phase':'doe','doe_index':0}}]})
         # Do not treat a numerical failure as an operator stop.
         with self.assertRaisesRegex(ValueError,'completed/unconverged'):
             recovery.retry_interrupted(self.config,'case_000000','operator confirmed')
         (self.case/'cfx_state.json').write_text(json.dumps({'version':2,'stages':{'solve':{'status':'running'}}}))
         for path in self.case.glob('*.out'):
             path.write_text('OUTER LOOP ITERATION = 12\ntruncated')
-        atomic_json(pending.path_for(self.config), {'version':1,'entries':[{
-            'run_id':'case_000000','status':'failed','finalized':True,
-            'signature':b.load_training(self.config).iloc[0].physical_signature,'x':self.x.tolist(),
-            'arguments':{'sample_phase':'doe','doe_index':0}}]})
         recovery.retry_interrupted(self.config,'case_000000','operator confirmed old stop')
         self.assertEqual(b.load_training(self.config).iloc[0].status,'interrupted')
         self.assertFalse(pending.load(self.config)['entries'][0]['finalized'])
+
+
+class LegacyInterruptionTests(unittest.TestCase):
+    setUp = test_refinement.RefinementTests.setUp
+    save_row = test_refinement.RefinementTests.save_row
+
+    def failed_queue_point(self):
+        x = refinement.enforce_fixed(self.config, self.center)
+        pending.enqueue(self.config, [b.SelectedCandidate(x, 1, 'doe')], [{'sample_phase': 'doe', 'doe_index': 0}])
+        self.save_row(x=x, status='failed', sample_phase='doe', failure_stage='geometry')
+        queue = pending.load(self.config)
+        queue['entries'][0].update(status='failed', finalized=True)
+        atomic_json(pending.path_for(self.config), queue)
+        case = self.root/'cases/case_000000'
+        case.mkdir(parents=True)
+        return case, x
+
+    def reserved_boundary_point(self):
+        self.save_row()
+        path = self.root/'plan.json'
+        with patch.object(b, 'extract_baseline', return_value=self.baseline):
+            plan = refinement.write_boundary_plan(self.config, 'case_000000', path)
+            # Simulate an old CLI stopped after reserving the point but before appending any CSV row.
+            with patch.object(b, 'evaluate_true_cfd', side_effect=KeyboardInterrupt('old operator stop')):
+                with self.assertRaises(KeyboardInterrupt):
+                    refinement.run_boundary(self.config, path, 'singles', 1, False)
+        reservations = json.loads((self.root/'case_reservations.json').read_text())
+        run_id, owner = next(iter(reservations.items()))
+        case = self.root/'cases'/run_id
+        case.mkdir(parents=True)
+        atomic_json(case/'geometry_state.json', {'status': 'running'})
+        return path, plan, run_id, owner, case
+
+    def test_explicit_failed_stages_cannot_be_relabelled_as_operator_interruption(self):
+        case, _ = self.failed_queue_point()
+        before = {path: file_identity(path) for path in (b.training_csv_path(self.config), pending.path_for(self.config))}
+        for stage in ('geometry', 'pre', 'solve', 'solve_restart', 'post', 'nonzero_exit'):
+            with self.subTest(stage=stage):
+                geometry = {'status': 'failed'} if stage == 'geometry' else {'status': 'complete'}
+                stages = {} if stage == 'geometry' else {stage: {'status': 'failed'}}
+                if stage == 'nonzero_exit':
+                    stages = {'pre': {'status': 'returned', 'exit_code': 1}}
+                atomic_json(case/'geometry_state.json', geometry)
+                atomic_json(case/'cfx_state.json', {'version': 2, 'stages': stages})
+                receipts = {path: file_identity(path) for path in (case/'geometry_state.json', case/'cfx_state.json')}
+                with self.assertRaisesRegex(ValueError, 'recorded failed stage'):
+                    recovery.retry_interrupted(self.config, 'case_000000', 'operator confirmed')
+                self.assertFalse((case/interruption.ATTEMPT).exists())
+                self.assertFalse((case/'attempts').exists())
+                self.assertEqual(before, {path: file_identity(path) for path in before})
+                self.assertEqual(receipts, {path: file_identity(path) for path in receipts})
+
+    def test_legacy_geometry_running_receipt_still_recomputes_same_design(self):
+        case, x = self.failed_queue_point()
+        atomic_json(case/'geometry_state.json', {'status': 'running'})
+        recovery.retry_interrupted(self.config, 'case_000000', 'confirmed old geometry stop')
+        with patch.object(b, 'run_geometry', side_effect=fake_geometry) as geometry, \
+                patch.object(b, 'run_cfx_pipeline', return_value=cfx.CfxResult(True, METRICS, 'ok')):
+            result = pending.run(self.config, self.baseline, 1)
+        self.assertEqual(result['new_attempts'], 1)
+        geometry.assert_called_once()
+        frame = b.load_training(self.config)
+        self.assertEqual(frame.run_id.tolist(), ['case_000000'])
+        self.assertEqual(frame.status.tolist(), ['success'])
+        np.testing.assert_allclose(frame[b.variable_names(self.config)].iloc[0].to_numpy(float), x, rtol=0, atol=1e-10)
+        self.assertEqual(json.loads((case/'attempts/interrupted_0001/geometry_state.json').read_text())['status'], 'running')
+
+    def test_legacy_pre_running_receipt_can_still_be_registered(self):
+        case, _ = self.failed_queue_point()
+        atomic_json(case/'geometry_state.json', {'status': 'complete'})
+        atomic_json(case/'cfx_state.json', {'version': 2, 'stages': {'pre': {'status': 'running'}}})
+        recovery.retry_interrupted(self.config, 'case_000000', 'confirmed old pre stop')
+        self.assertTrue(interruption.retry_requested(case))
+        self.assertEqual(b.load_training(self.config).status.tolist(), ['interrupted'])
+        self.assertFalse(pending.load(self.config)['entries'][0]['finalized'])
+
+    def test_reserved_boundary_without_csv_or_queue_retries_same_case(self):
+        path, plan, run_id, owner, case = self.reserved_boundary_point()
+        before = file_identity(self.root/'case_reservations.json')
+        self.assertFalse(b.load_training(self.config).run_id.eq(run_id).any())
+        self.assertEqual(pending.load(self.config)['entries'], [])
+        recovery.retry_interrupted(self.config, run_id, 'confirmed old boundary stop')
+        row = b.load_training(self.config).loc[lambda frame: frame.run_id.eq(run_id)].iloc[0]
+        self.assertEqual(row.status, 'interrupted')
+        self.assertEqual(row.sample_phase, 'boundary')
+        self.assertEqual(row.experiment_id, plan['plan_id'])
+        self.assertEqual(row.design_role, owner['point_id'])
+        self.assertEqual(row.selection_source, 'predefined_boundary')
+        self.assertTrue(row[b.RESULT_COLUMNS].isna().all())
+        with patch.object(b, 'extract_baseline', return_value=self.baseline), \
+                patch.object(b, 'run_geometry', side_effect=fake_geometry) as geometry, \
+                patch.object(b, 'run_cfx_pipeline', return_value=cfx.CfxResult(True, METRICS, 'ok')):
+            result = refinement.run_boundary(self.config, path, 'singles', 1, True)
+        self.assertEqual(result['new_cfd_attempts'], 1)
+        geometry.assert_called_once()
+        rows = b.load_training(self.config).loc[lambda frame: frame.run_id.eq(run_id)]
+        self.assertEqual(rows.status.tolist(), ['success'])
+        np.testing.assert_allclose(rows[b.variable_names(self.config)].iloc[0].to_numpy(float), owner['x'], rtol=0, atol=1e-10)
+        self.assertEqual(before, file_identity(self.root/'case_reservations.json'))
+        self.assertTrue((case/'attempts/interrupted_0001/geometry_state.json').exists())
+
+    def test_invalid_boundary_reservations_are_rejected_without_mutation(self):
+        _, _, run_id, owner, case = self.reserved_boundary_point()
+        before = file_identity(b.training_csv_path(self.config))
+        invalid = [dict(signature='incompatible'), dict(x=owner['x'][:-1]), dict(x=[owner['x']]),
+                   dict(x=['NaN'] + owner['x'][1:]), dict(plan_id=''), dict(point_id=None)]
+        for changes in invalid:
+            with self.subTest(changes=changes):
+                atomic_json(self.root/'case_reservations.json', {run_id: {**owner, **changes}})
+                with self.assertRaises(ValueError):
+                    recovery.retry_interrupted(self.config, run_id, 'operator confirmed')
+                self.assertEqual(before, file_identity(b.training_csv_path(self.config)))
+                self.assertFalse((case/interruption.ATTEMPT).exists())
+                self.assertFalse(pending.path_for(self.config).exists())
+
+    def test_conflicting_queue_or_candidate_cannot_change_a_reserved_case(self):
+        _, _, run_id, owner, case = self.reserved_boundary_point()
+        before = file_identity(b.training_csv_path(self.config))
+        atomic_json(pending.path_for(self.config), {'version': 1, 'entries': [{
+            'run_id': run_id, 'signature': owner['signature'], 'x': owner['x'], 'arguments': {'sample_phase': 'doe'}}]})
+        with self.assertRaisesRegex(ValueError, 'uniquely tracked'):
+            recovery.retry_interrupted(self.config, run_id, 'operator confirmed')
+        pending.path_for(self.config).unlink()
+        for wrong_id in (False, True):
+            with self.subTest(wrong_id=wrong_id):
+                x = np.array(owner['x'])
+                if not wrong_id:
+                    x[0] += 1
+                atomic_json(case/'candidate.json', {'run_id': 'case_999999' if wrong_id else run_id,
+                                                   'variables': b.vector_to_sample(self.config, x)})
+                with self.assertRaisesRegex(ValueError, 'Existing candidate'):
+                    recovery.retry_interrupted(self.config, run_id, 'operator confirmed')
+                self.assertEqual(before, file_identity(b.training_csv_path(self.config)))
+                self.assertFalse((case/interruption.ATTEMPT).exists())
+                self.assertFalse((case/'attempts').exists())
+
+    def test_recorded_design_must_match_its_queue_before_registration(self):
+        case, _ = self.failed_queue_point()
+        queue = pending.load(self.config)
+        queue['entries'][0]['x'][0] += 1
+        atomic_json(pending.path_for(self.config), queue)
+        before = file_identity(b.training_csv_path(self.config))
+        with self.assertRaisesRegex(ValueError, 'Recorded row'):
+            recovery.retry_interrupted(self.config, 'case_000000', 'operator confirmed')
+        self.assertEqual(before, file_identity(b.training_csv_path(self.config)))
+        self.assertFalse((case/interruption.ATTEMPT).exists())
 
 
 class ReviewModeTests(unittest.TestCase):

@@ -128,7 +128,7 @@ python blade_shape_active_learning.py retry-interrupted --config blade_shape_con
 python blade_shape_active_learning.py run --config blade_shape_config.json --resume --iterations 0 --max-new-cfd 1
 ```
 
-登记会核对队列/边界预留、物理签名及未完成证据，并保留旧行；已正常求解结束的数值失败或人工否决不能走这个入口。未入表但仍在旧队列 running 的点也可登记。重算结束替换 interrupted 行，保留额外列，不生成重复 run_id。
+登记会核对队列/边界预留、物理签名、设计坐标及未完成证据，并保留旧行；几何或 CFX 任一阶段已明确记为失败、已正常求解结束的数值失败或人工否决不能走这个入口。未入表但仍在旧队列 running 的点，以及仅有边界预留记录的旧中断点也可登记；边界点保留原方案、点位和 run_id，再用原方案执行 `run-boundary --resume`。重算结束替换 interrupted 行，保留额外列，不生成重复 run_id。
 
 **换了工况或模板之后**：每条训练记录、每个待续跑点和每份边界方案都带着生成时的**物理签名**（CSV 的 `physical_signature` 列）。签名只覆盖会改变同一个设计点计算结果的输入：
 

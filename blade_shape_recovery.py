@@ -14,7 +14,7 @@ import blade_shape_pending as pending
 import blade_shape_review as review
 import blade_shape_signature as signatures
 from blade_shape_convergence import ConvergencePolicy, ReviewPolicy, assess_out, review_evidence
-from blade_shape_runtime import atomic_json, digest, file_identity, output_lock
+from blade_shape_runtime import atomic_json, case_reservations, digest, file_identity, output_lock
 
 
 def case_for(config: dict, run_id: str) -> Path:
@@ -32,6 +32,27 @@ def one_row(config: dict, run_id: str):
     return rows.iloc[0]
 
 
+def interrupted_point(config: dict, entries: list[dict], reservation: dict | None) -> tuple[np.ndarray, dict, str]:
+    """Resolve one durable owner before changing or archiving any case evidence."""
+    if len(entries) == 1 and reservation is None:
+        owner = entries[0]
+        arguments = owner['arguments']
+    elif not entries and isinstance(reservation, dict):
+        owner = reservation
+        if any(not isinstance(owner.get(key), str) or not owner[key].strip() for key in ('plan_id', 'point_id')):
+            raise ValueError('Boundary reservation is missing its plan or point identity.')
+        arguments = {'sample_phase': 'boundary', 'experiment_id': owner['plan_id'],
+                     'design_role': owner['point_id'], 'selection_source': 'predefined_boundary'}
+    else:
+        raise ValueError('No uniquely tracked compatible interrupted point was found.')
+    if owner.get('signature') not in signatures.compatible(config):
+        raise ValueError('Interrupted point inputs are incompatible; inspect the physical signature first.')
+    x = np.asarray(owner.get('x'), dtype=float)
+    if x.shape != (len(b.variable_names(config)),) or not np.isfinite(x).all():
+        raise ValueError('Interrupted point requires one finite value per design variable.')
+    return x, arguments, owner['signature']
+
+
 def retry_interrupted(config: dict, run_id: str, reason: str) -> dict:
     """Operator confirmation is required for old receipts with no stop marker."""
     if not reason.strip():
@@ -40,16 +61,19 @@ def retry_interrupted(config: dict, run_id: str, reason: str) -> dict:
     with output_lock(b.output_dir(config)), output_lock(case):
         queue = pending.load(config)
         entries = [entry for entry in queue['entries'] if entry['run_id'] == run_id]
+        reservation = case_reservations(b.output_dir(config)).get(run_id)
+        x, arguments, signature = interrupted_point(config, entries, reservation)
         rows = b.load_training(config).loc[lambda frame: frame.run_id.eq(run_id)]
         if len(rows):
             row = one_row(config, run_id)
-        elif len(entries) == 1 and entries[0]['signature'] in signatures.compatible(config):
-            entry = entries[0]
-            row = {**b.vector_to_sample(config, np.array(entry['x'])), **entry['arguments'],
-                   **{k: np.nan for k in b.RESULT_COLUMNS}, 'run_id': run_id, 'case_dir': str(case),
-                   'status': 'failed', 'failure_stage': '', signatures.COLUMN: entry['signature']}
+            if (not np.allclose(row[b.variable_names(config)].to_numpy(float), x, rtol=0, atol=1e-10)
+                    or row.get('sample_phase') != arguments['sample_phase']
+                    or any(row.get(key) != arguments[key] for key in ('experiment_id', 'design_role') if key in arguments)):
+                raise ValueError('Recorded row does not match the tracked interrupted point.')
         else:
-            raise ValueError('No uniquely tracked compatible interrupted point was found.')
+            row = {**b.vector_to_sample(config, x), **arguments,
+                   **{k: np.nan for k in b.RESULT_COLUMNS}, 'run_id': run_id, 'case_dir': str(case),
+                   'status': 'failed', 'failure_stage': '', signatures.COLUMN: signature}
         if row['status'] == 'interrupted' and interruption.retry_requested(case):
             return {'run_id': run_id, 'status': 'interrupted', 'retry_on_resume': True}
         if row['status'] != 'failed' or row.get('failure_stage') == 'review_rejected':
@@ -59,14 +83,23 @@ def retry_interrupted(config: dict, run_id: str, reason: str) -> dict:
         solve = state.get('stages', {}).get('solve', {})
         if solve.get('convergence') or solve.get('status') in {'complete', 'review'}:
             raise ValueError('A completed/unconverged solve is not an interrupted case.')
+        geometry_path = case / 'geometry_state.json'
+        geometry = json.loads(geometry_path.read_text()) if geometry_path.exists() else {}
+        receipts = {'geometry': geometry, **state.get('stages', {})}
+        if any(stage.get('status') == 'failed' or stage.get('exit_code') not in (None, 0)
+               for stage in receipts.values()):
+            raise ValueError('A recorded failed stage is not an interrupted case; inspect the failure instead.')
+        candidate_path = case / 'candidate.json'
+        if candidate_path.exists():
+            candidate = json.loads(candidate_path.read_text())
+            if (candidate.get('run_id') != run_id or not np.allclose(
+                    [candidate['variables'][name] for name in b.variable_names(config)], x, rtol=0, atol=1e-10)):
+                raise ValueError('Existing candidate does not match the tracked interrupted point.')
         for path in case.glob('*.out'):
             text = path.read_text(errors='replace')
             if re.search(r'(?:CFD Solver finished|CFX[- ]Solver (?:has )?finished)', text, re.I):
                 raise ValueError('A solver-finished marker exists; inspect instead of retrying as interrupted.')
         interruption.assert_idle(case)
-        from blade_shape_runtime import case_reservations
-        if not entries and run_id not in case_reservations(b.output_dir(config)):
-            raise ValueError('Case is not tracked by a pending queue or boundary reservation.')
         owner_env = interruption.stop_environment(case)
         attempt = dict(run_id=run_id, signature=signatures.physical_signature(config),
                        x=[float(row[name]) for name in b.variable_names(config)], status='interrupted',
