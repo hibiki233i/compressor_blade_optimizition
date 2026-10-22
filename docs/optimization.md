@@ -130,7 +130,7 @@ python blade_shape_active_learning.py retry-interrupted --config blade_shape_con
 python blade_shape_active_learning.py run --config blade_shape_config.json --resume --iterations 0 --max-new-cfd 1
 ```
 
-登记会核对队列/边界预留、物理签名、设计坐标及未完成证据，并保留旧行；几何或 CFX 任一阶段已明确记为失败、已正常求解结束的数值失败或人工否决不能走这个入口。未入表但仍在旧队列 running 的点，以及仅有边界预留记录的旧中断点也可登记；边界点保留原方案、点位和 run_id，再用原方案执行 `run-boundary --resume`。重算结束替换 interrupted 行，保留额外列，不生成重复 run_id。登记时记录 `cfx_state.json`、`geometry_state.json`、`candidate.json` 的身份；续跑前任一文件改变都会拒绝归档，需先检查算例。
+登记会核对队列/边界预留、物理签名、设计坐标及未完成证据，并保留旧行。已有 failed 行只允许几何/CFX 阶段类别，且必须存在未完成的阶段凭据；仅有失败 CSV 或完整阶段凭据不足以证明中断。几何规则、环境、网格拒绝、未知失败类别、阶段已明确失败、已正常求解结束的数值失败或人工否决均不能走这个入口。未入表但仍在旧队列 running 的点，以及仅有边界预留记录的旧中断点也可登记；边界点保留原方案、点位和 run_id，再用原方案执行 `run-boundary --resume`。重算结束替换 interrupted 行，保留额外列，不生成重复 run_id。登记时记录 `cfx_state.json`、`geometry_state.json`、`candidate.json` 的身份；续跑前任一文件改变都会拒绝归档，需先检查算例。
 
 若初始 Solve 正常结束、后续 continuation 被操作员中断，初始结果作为历史保留，登记时不会把它误认成最终结果。`reassess` 另行核对最后一次实际求解的编号、退出状态及输出证据；restart 执行或输出失败不能用前一次结果替代。重评 Post 使用独立停止 token，中断后可重放原计划，仅重做尚未完成的 Post。
 

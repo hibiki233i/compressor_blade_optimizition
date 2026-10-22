@@ -77,8 +77,10 @@ def retry_interrupted(config: dict, run_id: str, reason: str) -> dict:
                    'status': 'failed', 'failure_stage': '', signatures.COLUMN: signature}
         if row['status'] == 'interrupted' and interruption.retry_requested(case):
             return {'run_id': run_id, 'status': 'interrupted', 'retry_on_resume': True}
-        if row['status'] != 'failed' or row.get('failure_stage') == 'review_rejected':
+        if row['status'] != 'failed':
             raise ValueError('Only a failed, genuinely incomplete case can be confirmed as interrupted.')
+        if len(rows) and row.get('failure_stage') not in {'geometry', 'pre', 'solve', 'post', 'cfx'}:
+            raise ValueError('A recorded rejection is not an interrupted geometry/CFX stage; inspect the failure instead.')
         state_path = case / 'cfx_state.json'
         state = json.loads(state_path.read_text()) if state_path.exists() else {}
         solve = state.get('stages', {}).get('solve', {})
@@ -89,6 +91,13 @@ def retry_interrupted(config: dict, run_id: str, reason: str) -> dict:
             raise ValueError('A completed/unconverged solve is not an interrupted case.')
         if interruption.recorded_failure(case):
             raise ValueError('A recorded failed stage is not an interrupted case; inspect the failure instead.')
+        if len(rows):
+            geometry_path = case / 'geometry_state.json'
+            geometry = json.loads(geometry_path.read_text()) if geometry_path.exists() else {}
+            unfinished = (geometry.get('status') == 'running' or continuing or any(
+                stage.get('status') in {'running', 'returned'} for stage in state.get('stages', {}).values()))
+            if not unfinished:
+                raise ValueError('A recorded failure needs an unfinished stage receipt to confirm a legacy interruption.')
         candidate_path = case / 'candidate.json'
         if candidate_path.exists():
             candidate = json.loads(candidate_path.read_text())
