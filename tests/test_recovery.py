@@ -274,10 +274,10 @@ class LegacyInterruptionTests(unittest.TestCase):
     setUp = test_refinement.RefinementTests.setUp
     save_row = test_refinement.RefinementTests.save_row
 
-    def failed_queue_point(self):
+    def failed_queue_point(self, failure_stage='geometry'):
         x = refinement.enforce_fixed(self.config, self.center)
         pending.enqueue(self.config, [b.SelectedCandidate(x, 1, 'doe')], [{'sample_phase': 'doe', 'doe_index': 0}])
-        self.save_row(x=x, status='failed', sample_phase='doe', failure_stage='geometry')
+        self.save_row(x=x, status='failed', sample_phase='doe', failure_stage=failure_stage)
         queue = pending.load(self.config)
         queue['entries'][0].update(status='failed', finalized=True)
         atomic_json(pending.path_for(self.config), queue)
@@ -300,6 +300,152 @@ class LegacyInterruptionTests(unittest.TestCase):
         case.mkdir(parents=True)
         atomic_json(case/'geometry_state.json', {'status': 'running'})
         return path, plan, run_id, owner, case
+
+    def registration_snapshot(self):
+        return {str(path.relative_to(self.root)): path.read_bytes() for path in self.root.rglob('*')
+                if path.is_file() and path.name != '.optimizer.lock'}
+
+    def assert_registration_refused_without_changes(self, run_id='case_000000'):
+        before = self.registration_snapshot()
+        with self.assertRaises(ValueError):
+            recovery.retry_interrupted(self.config, run_id, 'operator confirmed')
+        self.assertEqual(self.registration_snapshot(), before)
+
+    def test_geometry_rule_rejection_stays_failed_after_constraints_are_relaxed(self):
+        x = self.center.copy()
+        pending.enqueue(self.config, [b.SelectedCandidate(x, 1, 'doe')],
+                        [{'sample_phase': 'doe', 'doe_index': 0}])
+        original_limit = self.config['constraints']['max_beta_offset_deg']
+        self.config['constraints']['max_beta_offset_deg'] = .5
+        with patch.object(b, 'run_geometry', side_effect=AssertionError('rules rejected this point')):
+            result = pending.run(self.config, self.baseline, 1)
+        self.assertEqual(result['failures'], 1)
+        row = b.load_training(self.config).iloc[0]
+        self.assertEqual((row.status, row.failure_stage), ('failed', 'geometry_rules'))
+        case = self.root / 'cases/case_000000'
+        self.assertFalse((case / 'geometry_state.json').exists())
+        self.config['constraints']['max_beta_offset_deg'] = original_limit
+        self.assertEqual(row.physical_signature, b.signatures.physical_signature(self.config))
+        before = self.registration_snapshot()
+        with patch.object(b, 'run_geometry', side_effect=AssertionError('failed point was retried')):
+            self.assertEqual(pending.run(self.config, self.baseline, 1)['new_attempts'], 0)
+        self.assertEqual(self.registration_snapshot(), before)
+        self.assert_registration_refused_without_changes()
+
+    def test_environment_rejection_without_failed_stage_cannot_be_registered(self):
+        paths = self.config['paths']
+        paths.update(cfx_bin_dir=str(self.root / 'empty_bin'),
+                     template_cfx=str(self.root / 'template.cfx'), template_cse=str(self.root / 'extract.cse'))
+        (self.root / 'empty_bin').mkdir()
+        for key in ('template_cfx', 'template_cse'):
+            Path(paths[key]).write_text('synthetic template')
+        pending.enqueue(self.config, [b.SelectedCandidate(self.center, 1, 'doe')],
+                        [{'sample_phase': 'doe', 'doe_index': 0}])
+        with patch.object(b, 'run_geometry', side_effect=fake_geometry), \
+                patch.object(cfx, '_run_logged', side_effect=AssertionError('no executable is available')):
+            pending.run(self.config, self.baseline, 1)
+        row = b.load_training(self.config).iloc[0]
+        self.assertEqual((row.status, row.failure_stage), ('failed', 'environment'))
+        case = self.root / 'cases/case_000000'
+        self.assertEqual(json.loads((case / 'cfx_state.json').read_text())['stages'], {})
+        self.assertIsNone(interruption.recorded_failure(case))
+        self.assert_registration_refused_without_changes()
+
+    def test_geometry_receipt_conflict_is_not_a_legacy_interruption(self):
+        stale_cases = [('none', {})]
+        for stage in ('pre', 'solve', 'solve_restart', 'post'):
+            for status in ('running', 'returned'):
+                stale_cases.append((f'{stage}_{status}', {stage: {'status': status, 'exit_code': 0}}))
+        stale_cases.append(('continuation', {
+            'solve': {'status': 'needs_restart', 'convergence': {'iteration_limit_reached': True}},
+            'solve_restart': {'status': 'running'}}))
+        root = self.root
+        for name, stages in stale_cases:
+            with self.subTest(stale_case=name):
+                self.root = root / name
+                self.root.mkdir()
+                self.config['paths']['output_dir'] = str(self.root)
+                pending.enqueue(self.config, [b.SelectedCandidate(self.center, 1, 'doe')],
+                                [{'sample_phase': 'doe', 'doe_index': 0}])
+                candidate = b.write_candidate_files(self.config, self.baseline, self.center, 'case_000000')
+                fake_geometry(self.config, candidate)
+                case = candidate.parent
+                atomic_json(case / 'geometry_state.json', {'status': 'complete', 'signature': 'different inputs',
+                                                         'mesh': file_identity(case / 'Impeller_Mesh.gtm')})
+                if stages:
+                    atomic_json(case / 'cfx_state.json', {'version': 2, 'stages': stages})
+                with patch.object(b, 'run_geometry', side_effect=AssertionError('conflicting evidence was overwritten')):
+                    pending.run(self.config, self.baseline, 1)
+                self.assertEqual(b.load_training(self.config).iloc[0].failure_stage, 'geometry')
+                self.assertIsNone(interruption.recorded_failure(case))
+                self.assert_registration_refused_without_changes()
+
+    def test_unrelated_unfinished_stages_cannot_prove_the_recorded_failure_was_interrupted(self):
+        mismatches = [('pre', 'geometry'), ('pre', 'solve'), ('pre', 'post'), ('pre', 'solve_restart'),
+                      ('solve', 'geometry'), ('solve', 'pre'), ('solve', 'post'), ('solve', 'solve_restart'),
+                      ('post', 'geometry'), ('post', 'pre'), ('post', 'solve'),
+                      ('cfx', 'geometry'), ('cfx', 'pre')]
+        root = self.root
+        for failure_stage, unfinished_stage in mismatches:
+            with self.subTest(failure=failure_stage, unfinished=unfinished_stage):
+                self.root = root / f'{failure_stage}_{unfinished_stage}'
+                self.root.mkdir()
+                self.config['paths']['output_dir'] = str(self.root)
+                case, _ = self.failed_queue_point(failure_stage)
+                atomic_json(case / 'geometry_state.json', {
+                    'status': 'running' if unfinished_stage == 'geometry' else 'complete'})
+                stages = {} if unfinished_stage == 'geometry' else {
+                    unfinished_stage: {'status': 'running'}}
+                atomic_json(case / 'cfx_state.json', {'version': 2, 'stages': stages})
+                self.assert_registration_refused_without_changes()
+
+    def test_known_rejections_and_unknown_failures_cannot_use_an_unfinished_receipt(self):
+        case, _ = self.failed_queue_point()
+        atomic_json(case / 'geometry_state.json', {'status': 'running'})
+        frame = b.load_training(self.config)
+        for stage in ('geometry_rules', 'environment', 'mesh', 'review_rejected', '', 'unknown_failure'):
+            with self.subTest(failure_stage=stage):
+                frame['failure_stage'] = stage
+                frame.to_csv(b.training_csv_path(self.config), index=False)
+                self.assert_registration_refused_without_changes()
+
+    def test_legacy_solve_running_receipt_can_still_be_registered(self):
+        root = self.root
+        for status in ('running', 'returned'):
+            with self.subTest(status=status):
+                self.root = root / status
+                self.root.mkdir()
+                self.config['paths']['output_dir'] = str(self.root)
+                case, _ = self.failed_queue_point('solve')
+                atomic_json(case / 'geometry_state.json', {'status': 'complete'})
+                atomic_json(case / 'cfx_state.json', {'version': 2, 'stages': {
+                    'solve': {'status': status, 'exit_code': 0}}})
+                recovery.retry_interrupted(self.config, 'case_000000', 'confirmed old solve stop')
+                self.assertTrue(interruption.retry_requested(case))
+                self.assertEqual(b.load_training(self.config).status.tolist(), ['interrupted'])
+                self.assertFalse(pending.load(self.config)['entries'][0]['finalized'])
+
+    def test_unstarted_queue_point_without_csv_can_still_be_registered(self):
+        pending.enqueue(self.config, [b.SelectedCandidate(self.center, 1, 'doe')],
+                        [{'sample_phase': 'doe', 'doe_index': 0}])
+        self.assertTrue(b.load_training(self.config).empty)
+        recovery.retry_interrupted(self.config, 'case_000000', 'old CLI stopped before the first stage')
+        self.assertEqual(b.load_training(self.config).status.tolist(), ['interrupted'])
+        with patch.object(b, 'run_geometry', side_effect=fake_geometry), \
+                patch.object(b, 'run_cfx_pipeline', return_value=cfx.CfxResult(True, METRICS, 'ok')):
+            result = pending.run(self.config, self.baseline, 1)
+        self.assertEqual(result['new_attempts'], 1)
+        self.assertEqual(b.load_training(self.config).run_id.tolist(), ['case_000000'])
+        self.assertEqual(b.load_training(self.config).status.tolist(), ['success'])
+
+    def test_legacy_returned_pre_without_completion_can_still_be_registered(self):
+        case, _ = self.failed_queue_point('pre')
+        atomic_json(case / 'geometry_state.json', {'status': 'complete'})
+        atomic_json(case / 'cfx_state.json', {'version': 2, 'stages': {
+            'pre': {'status': 'returned', 'exit_code': 0}}})
+        recovery.retry_interrupted(self.config, 'case_000000', 'old CLI stopped before recording Pre completion')
+        self.assertTrue(interruption.retry_requested(case))
+        self.assertEqual(b.load_training(self.config).status.tolist(), ['interrupted'])
 
     def test_explicit_failed_stages_cannot_be_relabelled_as_operator_interruption(self):
         case, _ = self.failed_queue_point()
@@ -396,7 +542,7 @@ class LegacyInterruptionTests(unittest.TestCase):
         self.assertEqual(json.loads((case/'attempts/interrupted_0001/geometry_state.json').read_text())['status'], 'running')
 
     def test_legacy_pre_running_receipt_can_still_be_registered(self):
-        case, _ = self.failed_queue_point()
+        case, _ = self.failed_queue_point('pre')
         atomic_json(case/'geometry_state.json', {'status': 'complete'})
         atomic_json(case/'cfx_state.json', {'version': 2, 'stages': {'pre': {'status': 'running'}}})
         recovery.retry_interrupted(self.config, 'case_000000', 'confirmed old pre stop')

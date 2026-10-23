@@ -286,12 +286,12 @@ def stage_boundary_ready(case: Path) -> bool:
     return stages['solve'].get('status') in {'complete', 'review'} and 'post' not in stages
 
 
-def verified_solve_available(case: Path) -> bool:
-    """Solve finished with accepted, unchanged evidence and only Post is unfinished."""
+def verified_solve_evidence(case: Path) -> dict | None:
+    """Return the files proving an accepted Solve with only Post unfinished."""
     from blade_shape_cfx_runner import final_solve_recorded
     geometry_path, state_path = case / 'geometry_state.json', case / 'cfx_state.json'
     if not geometry_path.exists() or not state_path.exists():
-        return False
+        return None
     geometry, state = json.loads(geometry_path.read_text()), json.loads(state_path.read_text())
     stages, inputs = state.get('stages', {}), state.get('inputs', {})
     pre, solve = stages.get('pre', {}), stages.get('solve', {})
@@ -303,11 +303,12 @@ def verified_solve_available(case: Path) -> bool:
     if state.get('restart'):
         evidence.append(('restart_convergence.ccl', state['restart'].get('ccl_identity')))
     accepted = solve.get('review') if solve.get('status') == 'review' else solve.get('convergence', {}).get('converged')
-    return (geometry.get('status') == 'complete' and pre.get('status') == 'complete'
+    valid = (geometry.get('status') == 'complete' and pre.get('status') == 'complete'
             and solve.get('status') in {'complete', 'review'} and solve.get('exit_code') == 0 and bool(accepted)
             and stages.get('post', {}).get('status') in {None, 'running', 'returned'} and final_solve_recorded(state)
             and all(isinstance(name, str) and name and Path(name).name == name and identity
                     and file_identity(case / name) == identity for name, identity in evidence))
+    return dict(evidence) if valid else None
 
 
 def archive_interrupted(case: Path, files: tuple[str, ...] | None = None) -> None:
@@ -339,6 +340,15 @@ def archive_interrupted(case: Path, files: tuple[str, ...] | None = None) -> Non
         assert_idle(dest)
     if recorded_failure(case) or (dest.exists() and recorded_failure(dest)):
         raise ValueError('A recorded failed stage cannot be archived as an interrupted attempt.')
+    if pending.get('scope') == 'post' and files is None:
+        # Accepted input changes can require full recomputation after a Post
+        # archive already started. Extend the same journal before moving more
+        # files, preserving its attempt identity and already completed moves.
+        pending['files'].extend(p.name for p in case.iterdir()
+                                if p.name not in {'.optimizer.lock', 'attempts', RETRY}
+                                and p.name not in pending['files'])
+        pending['scope'] = 'all'
+        atomic_json(journal_path, journal)
     dest.mkdir(parents=True, exist_ok=True)
     for name in pending['files']:
         source, target = case / name, dest / name
@@ -353,17 +363,25 @@ def archive_interrupted(case: Path, files: tuple[str, ...] | None = None) -> Non
 
 
 def begin_case(case: Path, run_id: str, signature: str, x: list[float],
-               accepted: set[str] | None = None) -> dict:
-    """``accepted`` are signatures still compatible with ``signature`` (--accept-input-change)."""
+               accepted: set[str] | None = None, unchanged_signatures: set[str] | None = None) -> dict:
+    """``accepted`` permits retry; only ``unchanged_signatures`` permits keeping Solve."""
     case.mkdir(parents=True, exist_ok=True)
     path = case / ATTEMPT
     prior = json.loads(path.read_text()) if path.exists() else None
     journal_path = case / RETRY
     journal = json.loads(journal_path.read_text()) if journal_path.exists() else {}
     archiving = next((a for a in journal.get('attempts', []) if a['status'] == 'archiving'), None)
+    handoff = None
     if prior is None and archiving:
         prior = archiving.get('attempt')
-    if retry_requested(case) or any(a['status'] == 'archiving' for a in journal.get('attempts', [])):
+    elif prior is None and journal.get('attempts') and journal['attempts'][-1]['status'] == 'archived':
+        # The archive can commit before the replacement attempt is durable.
+        # Its original inputs and confirmed evidence still govern that handoff.
+        handoff = journal['attempts'][-1]
+        prior = handoff.get('attempt')
+        if not prior:
+            raise ValueError('Archived attempt identity is missing; inspect before resuming.')
+    if retry_requested(case) or archiving or handoff:
         if archiving and prior != archiving.get('attempt'):
             raise ValueError('Interrupted archive attempt identity changed.')
         same_vector = (not prior or (len(prior['x']) == len(x) and all(
@@ -376,7 +394,8 @@ def begin_case(case: Path, run_id: str, signature: str, x: list[float],
             registered = {'cfx_state.json': prior['original_receipt_identity']}
         if registered is not None:
             # A journaled archive may have moved part of it; check whichever side holds each file.
-            moved = case / archiving['directory'] if archiving else None
+            archived = archiving or handoff
+            moved = case / archived['directory'] if archived else None
             changed = sorted(name for name, identity in registered.items()
                              if file_identity(moved / name if moved and not (case / name).exists()
                                               and (moved / name).exists() else case / name) != identity)
@@ -392,8 +411,15 @@ def begin_case(case: Path, run_id: str, signature: str, x: list[float],
             raise ValueError('Completed result evidence changed; refusing to archive it as interrupted.')
         if not completed_result_available(case):
             # Unchanged inputs and a verified Solve: only the stopped Post reruns.
-            post_only = bool(prior) and prior['signature'] == signature and verified_solve_available(case)
-            archive_interrupted(case, POST_ARTIFACTS if post_only else None)
+            post_only = (bool(prior) and prior['signature'] in (unchanged_signatures or {signature})
+                         and bool(verified_solve_evidence(case)))
+            if handoff:
+                if handoff.get('scope') == 'post' and not post_only:
+                    handoff['status'] = 'archiving'
+                    atomic_json(journal_path, journal)
+                    archive_interrupted(case)
+            else:
+                archive_interrupted(case, POST_ARTIFACTS if post_only else None)
         prior = None
     if prior and prior.get('status') == 'running':
         # A partial stage cannot be retried without an explicit operator stop.

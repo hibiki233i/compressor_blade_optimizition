@@ -1133,7 +1133,8 @@ def evaluate_true_cfd(config: dict[str, Any], baseline: BaselineShape, x: np.nda
             return recovered
         interruption.check_run_stop()
         interruption.begin_case(case, run_id, signatures.remember(config), x.tolist(),
-                                accepted=signatures.compatible(config))
+                                accepted=signatures.compatible(config),
+                                unchanged_signatures=signatures.unchanged_signatures(config))
         try:
             interruption.check_stop(case)
             result = _evaluate_true_cfd(config, baseline, x, case_index, **metadata)
@@ -1156,6 +1157,13 @@ def evaluate_true_cfd(config: dict[str, Any], baseline: BaselineShape, x: np.nda
                    'failure_stage': 'interrupted', 'message': 'Operator stopped this attempt; --resume will recompute it.'}
             append_row(config, row)
             raise
+
+
+def geometry_receipt_signature(config: dict[str, Any], x: np.ndarray,
+                               candidate_path: Path, *, legacy: bool = False) -> str:
+    inputs = ({'physical': signatures.legacy_physical_signature(config)} if legacy else
+              {'geometry': signatures.geometry_signature(config)})
+    return refinement.digest({**inputs, 'x': x.tolist(), 'candidate': file_identity(candidate_path)})
 
 
 def _evaluate_true_cfd(
@@ -1232,13 +1240,11 @@ def _evaluate_true_cfd(
     receipt_path = case_dir / 'geometry_state.json'
     # Only inputs that shape the mesh: an accepted change of, e.g., the CFturbo
     # template must not reuse a mesh made from the old one.
-    signature = refinement.digest({'geometry':signatures.geometry_signature(config), 'x':x.tolist(),
-                                   'candidate':file_identity(candidate_path)})
+    signature = geometry_receipt_signature(config, x, candidate_path)
     receipt = json.loads(receipt_path.read_text()) if receipt_path.exists() else None
     if receipt is not None:
         # receipts written before 2026-10 signed the whole old-formula physical signature
-        legacy = refinement.digest({'physical':signatures.legacy_physical_signature(config), 'x':x.tolist(),
-                                    'candidate':file_identity(candidate_path)})
+        legacy = geometry_receipt_signature(config, x, candidate_path, legacy=True)
         if receipt.get('signature') not in {signature, legacy} or receipt.get('status') != 'complete' or receipt.get('mesh') != file_identity(case_dir/'Impeller_Mesh.gtm'):
             if recover_only:
                 raise ValueError('Geometry completion evidence changed or is incomplete.')
