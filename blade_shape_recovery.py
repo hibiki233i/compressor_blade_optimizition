@@ -87,7 +87,11 @@ def retry_interrupted(config: dict, run_id: str, reason: str) -> dict:
         restart = state.get('stages', {}).get('solve_restart', {})
         continuing = (solve.get('status') == 'needs_restart' and solve.get('convergence', {}).get('iteration_limit_reached')
                       and restart.get('status') in {None, 'running'} and restart.get('exit_code') is None)
-        if (solve.get('convergence') and not continuing) or solve.get('status') in {'complete', 'review'}:
+        post = state.get('stages', {}).get('post', {})
+        post_evidence = (interruption.verified_solve_evidence(case)
+                         if (not len(rows) or row.get('failure_stage') == 'post')
+                         and post.get('status') in {'running', 'returned'} else None)
+        if ((solve.get('convergence') and not continuing) or solve.get('status') in {'complete', 'review'}) and not post_evidence:
             raise ValueError('A completed/unconverged solve is not an interrupted case.')
         if interruption.recorded_failure(case):
             raise ValueError('A recorded failed stage is not an interrupted case; inspect the failure instead.')
@@ -109,21 +113,45 @@ def retry_interrupted(config: dict, run_id: str, reason: str) -> dict:
             if (candidate.get('run_id') != run_id or not np.allclose(
                     [candidate['variables'][name] for name in b.variable_names(config)], x, rtol=0, atol=1e-10)):
                 raise ValueError('Existing candidate does not match the tracked interrupted point.')
+        if post_evidence and row[signatures.COLUMN] in signatures.unchanged_signatures(config):
+            # Keeping Solve requires the same input checks as ordinary CFX recovery.
+            geometry = json.loads((case / 'geometry_state.json').read_text())
+            if geometry.get('signature') not in {
+                    b.geometry_receipt_signature(config, x, candidate_path),
+                    b.geometry_receipt_signature(config, x, candidate_path, legacy=True)}:
+                raise ValueError('Geometry completion inputs changed; inspect before registering a Post interruption.')
+            from blade_shape_cfx_runner import recover_cfx_result
+            runtime, paths = config['runtime'], config['paths']
+            checked = recover_cfx_result(case, run_id, p_out_pa=float(runtime['p_out_pa']),
+                                        cfx_bin_dir=paths['cfx_bin_dir'], template_cfx=paths['template_cfx'],
+                                        template_cse=paths['template_cse'], cores=int(runtime['cfx_cores']),
+                                        n_blades=int(runtime['n_blades']),
+                                        convergence=ConvergencePolicy.from_config(config),
+                                        review=ReviewPolicy.from_config(config))
+            if checked is not None:
+                raise ValueError(f'Cannot verify Solve for a Post interruption: {checked.message}')
         for path in case.glob('*.out'):
             text = path.read_text(errors='replace')
             if re.search(r'(?:CFD Solver finished|CFX[- ]Solver (?:has )?finished)', text, re.I):
                 if continuing and path.name == solve.get('out_file') and file_identity(path) == solve.get('out_identity'):
                     continue  # This is the initial result, before the interrupted continuation.
+                if post_evidence and any(path.name == attempt.get('out_file')
+                                         and file_identity(path) == attempt.get('out_identity')
+                                         for attempt in [solve, *state.get('solve_attempts', [])]):
+                    # Finished outputs belong to the verified Solve, not to the stopped Post.
+                    post_evidence[path.name] = file_identity(path)
+                    continue
                 raise ValueError('A solver-finished marker exists; inspect instead of retrying as interrupted.')
         interruption.assert_idle(case)
         owner_env = interruption.stop_environment(case)
-        attempt = dict(run_id=run_id, signature=signatures.physical_signature(config),
+        attempt = dict(run_id=run_id, signature=row[signatures.COLUMN],
                        x=[float(row[name]) for name in b.variable_names(config)], status='interrupted',
                        owner={'token': owner_env[interruption.TOKEN_ENV], 'stop_file': owner_env[interruption.STOP_ENV]},
                        reason=reason.strip(), original_row=pending.safe_json(dict(row)),
                        original_receipt_identity=file_identity(state_path),
-                       registered_evidence={name: file_identity(case / name)
-                                            for name in interruption.REGISTERED_EVIDENCE})
+                       registered_evidence={**{name: file_identity(case / name)
+                                               for name in interruption.REGISTERED_EVIDENCE},
+                                            **(post_evidence or {})})
         atomic_json(case / interruption.ATTEMPT, attempt)
         update = {'status': 'interrupted', 'failure_stage': 'interrupted', 'message': reason.strip()}
         if len(rows):

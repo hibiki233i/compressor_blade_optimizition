@@ -186,6 +186,11 @@ def _matches(recorded: dict[str, Any], current: dict[str, Any], unknown: set[tup
     return True
 
 
+def unchanged_signatures(config: dict[str, Any]) -> set[str]:
+    """Both supported signature formulas for these exact inputs, without acceptance."""
+    return {physical_signature(config), legacy_physical_signature(config)}
+
+
 def compatible(config: dict[str, Any], *, lenient: bool = False) -> set[str]:
     """Current signature, the old formula for unchanged inputs, and accepted predecessors.
 
@@ -194,7 +199,7 @@ def compatible(config: dict[str, Any], *, lenient: bool = False) -> set[str]:
     still recognises results produced where they exist.
     """
     registry = load_registry(config)
-    seeds = {physical_signature(config), legacy_physical_signature(config)}
+    seeds = unchanged_signatures(config)
     if lenient:
         current = physical_inputs(config)
         unknown = _unresolved(current)
