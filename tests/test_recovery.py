@@ -352,18 +352,52 @@ class LegacyInterruptionTests(unittest.TestCase):
         self.assert_registration_refused_without_changes()
 
     def test_geometry_receipt_conflict_is_not_a_legacy_interruption(self):
-        pending.enqueue(self.config, [b.SelectedCandidate(self.center, 1, 'doe')],
-                        [{'sample_phase': 'doe', 'doe_index': 0}])
-        candidate = b.write_candidate_files(self.config, self.baseline, self.center, 'case_000000')
-        fake_geometry(self.config, candidate)
-        case = candidate.parent
-        atomic_json(case / 'geometry_state.json', {'status': 'complete', 'signature': 'different inputs',
-                                                 'mesh': file_identity(case / 'Impeller_Mesh.gtm')})
-        with patch.object(b, 'run_geometry', side_effect=AssertionError('conflicting evidence was overwritten')):
-            pending.run(self.config, self.baseline, 1)
-        self.assertEqual(b.load_training(self.config).iloc[0].failure_stage, 'geometry')
-        self.assertIsNone(interruption.recorded_failure(case))
-        self.assert_registration_refused_without_changes()
+        stale_cases = [('none', {})]
+        for stage in ('pre', 'solve', 'solve_restart', 'post'):
+            for status in ('running', 'returned'):
+                stale_cases.append((f'{stage}_{status}', {stage: {'status': status, 'exit_code': 0}}))
+        stale_cases.append(('continuation', {
+            'solve': {'status': 'needs_restart', 'convergence': {'iteration_limit_reached': True}},
+            'solve_restart': {'status': 'running'}}))
+        root = self.root
+        for name, stages in stale_cases:
+            with self.subTest(stale_case=name):
+                self.root = root / name
+                self.root.mkdir()
+                self.config['paths']['output_dir'] = str(self.root)
+                pending.enqueue(self.config, [b.SelectedCandidate(self.center, 1, 'doe')],
+                                [{'sample_phase': 'doe', 'doe_index': 0}])
+                candidate = b.write_candidate_files(self.config, self.baseline, self.center, 'case_000000')
+                fake_geometry(self.config, candidate)
+                case = candidate.parent
+                atomic_json(case / 'geometry_state.json', {'status': 'complete', 'signature': 'different inputs',
+                                                         'mesh': file_identity(case / 'Impeller_Mesh.gtm')})
+                if stages:
+                    atomic_json(case / 'cfx_state.json', {'version': 2, 'stages': stages})
+                with patch.object(b, 'run_geometry', side_effect=AssertionError('conflicting evidence was overwritten')):
+                    pending.run(self.config, self.baseline, 1)
+                self.assertEqual(b.load_training(self.config).iloc[0].failure_stage, 'geometry')
+                self.assertIsNone(interruption.recorded_failure(case))
+                self.assert_registration_refused_without_changes()
+
+    def test_unrelated_unfinished_stages_cannot_prove_the_recorded_failure_was_interrupted(self):
+        mismatches = [('pre', 'geometry'), ('pre', 'solve'), ('pre', 'post'), ('pre', 'solve_restart'),
+                      ('solve', 'geometry'), ('solve', 'pre'), ('solve', 'post'), ('solve', 'solve_restart'),
+                      ('post', 'geometry'), ('post', 'pre'), ('post', 'solve'),
+                      ('cfx', 'geometry'), ('cfx', 'pre')]
+        root = self.root
+        for failure_stage, unfinished_stage in mismatches:
+            with self.subTest(failure=failure_stage, unfinished=unfinished_stage):
+                self.root = root / f'{failure_stage}_{unfinished_stage}'
+                self.root.mkdir()
+                self.config['paths']['output_dir'] = str(self.root)
+                case, _ = self.failed_queue_point(failure_stage)
+                atomic_json(case / 'geometry_state.json', {
+                    'status': 'running' if unfinished_stage == 'geometry' else 'complete'})
+                stages = {} if unfinished_stage == 'geometry' else {
+                    unfinished_stage: {'status': 'running'}}
+                atomic_json(case / 'cfx_state.json', {'version': 2, 'stages': stages})
+                self.assert_registration_refused_without_changes()
 
     def test_known_rejections_and_unknown_failures_cannot_use_an_unfinished_receipt(self):
         case, _ = self.failed_queue_point()
@@ -376,13 +410,20 @@ class LegacyInterruptionTests(unittest.TestCase):
                 self.assert_registration_refused_without_changes()
 
     def test_legacy_solve_running_receipt_can_still_be_registered(self):
-        case, _ = self.failed_queue_point('solve')
-        atomic_json(case / 'geometry_state.json', {'status': 'complete'})
-        atomic_json(case / 'cfx_state.json', {'version': 2, 'stages': {'solve': {'status': 'running'}}})
-        recovery.retry_interrupted(self.config, 'case_000000', 'confirmed old solve stop')
-        self.assertTrue(interruption.retry_requested(case))
-        self.assertEqual(b.load_training(self.config).status.tolist(), ['interrupted'])
-        self.assertFalse(pending.load(self.config)['entries'][0]['finalized'])
+        root = self.root
+        for status in ('running', 'returned'):
+            with self.subTest(status=status):
+                self.root = root / status
+                self.root.mkdir()
+                self.config['paths']['output_dir'] = str(self.root)
+                case, _ = self.failed_queue_point('solve')
+                atomic_json(case / 'geometry_state.json', {'status': 'complete'})
+                atomic_json(case / 'cfx_state.json', {'version': 2, 'stages': {
+                    'solve': {'status': status, 'exit_code': 0}}})
+                recovery.retry_interrupted(self.config, 'case_000000', 'confirmed old solve stop')
+                self.assertTrue(interruption.retry_requested(case))
+                self.assertEqual(b.load_training(self.config).status.tolist(), ['interrupted'])
+                self.assertFalse(pending.load(self.config)['entries'][0]['finalized'])
 
     def test_unstarted_queue_point_without_csv_can_still_be_registered(self):
         pending.enqueue(self.config, [b.SelectedCandidate(self.center, 1, 'doe')],
@@ -501,7 +542,7 @@ class LegacyInterruptionTests(unittest.TestCase):
         self.assertEqual(json.loads((case/'attempts/interrupted_0001/geometry_state.json').read_text())['status'], 'running')
 
     def test_legacy_pre_running_receipt_can_still_be_registered(self):
-        case, _ = self.failed_queue_point()
+        case, _ = self.failed_queue_point('pre')
         atomic_json(case/'geometry_state.json', {'status': 'complete'})
         atomic_json(case/'cfx_state.json', {'version': 2, 'stages': {'pre': {'status': 'running'}}})
         recovery.retry_interrupted(self.config, 'case_000000', 'confirmed old pre stop')

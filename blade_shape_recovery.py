@@ -94,10 +94,15 @@ def retry_interrupted(config: dict, run_id: str, reason: str) -> dict:
         if len(rows):
             geometry_path = case / 'geometry_state.json'
             geometry = json.loads(geometry_path.read_text()) if geometry_path.exists() else {}
-            unfinished = (geometry.get('status') == 'running' or continuing or any(
-                stage.get('status') in {'running', 'returned'} for stage in state.get('stages', {}).values()))
+            failure_stage = row.get('failure_stage')
+            if failure_stage == 'geometry':
+                unfinished = geometry.get('status') == 'running'
+            else:
+                recorded_stage = state.get('stages', {}).get(failure_stage, {})
+                unfinished = (recorded_stage.get('status') in {'running', 'returned'}
+                              or (failure_stage == 'solve' and continuing))
             if not unfinished:
-                raise ValueError('A recorded failure needs an unfinished stage receipt to confirm a legacy interruption.')
+                raise ValueError('A recorded failure needs a matching unfinished stage receipt to confirm a legacy interruption.')
         candidate_path = case / 'candidate.json'
         if candidate_path.exists():
             candidate = json.loads(candidate_path.read_text())
