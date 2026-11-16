@@ -4,9 +4,13 @@ from __future__ import annotations
 import copy
 import importlib.util
 import json
+import tempfile
 import unittest
 import warnings
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
@@ -86,6 +90,44 @@ class DoeTests(unittest.TestCase):
 
     def names(self):
         return b.variable_names(self.config)
+
+    def run_doe(self, root, count=8):
+        self.config['paths']['output_dir'] = str(root)
+        self.config['runtime'].update(initial_samples=count, iterations=0, max_new_cfd=count)
+        args = b.build_parser().parse_args(['run'])
+
+        def evaluate(config, baseline, x, index, **metadata):
+            row = {**b.vector_to_sample(config, x), **metadata, 'run_id': f'case_{index:06d}',
+                   'status': 'success', 'Efficiency': .76, 'MassFlow': 4.2}
+            b.append_row(config, row)
+            return b.CaseResult(row, True)
+
+        with patch.object(b, 'evaluate_true_cfd', side_effect=evaluate), redirect_stdout(StringIO()):
+            b._run_loop(args, self.config)
+        return b.load_training(self.config)
+
+    def test_run_loop_fallback_obeys_the_doe_cap(self):
+        self.config['doe'].update(include_baseline=False, lhs_designs=1, max_shroud_front_raise_deg=-4.)
+        # An exhausted LHS pool forces the real random sampler to fill the DOE.
+        with tempfile.TemporaryDirectory() as root, patch.object(b, 'lhs_samples', return_value=self.empty):
+            frame = self.run_doe(root)
+        self.assertEqual(len(frame), 8)
+        for x in frame[self.names()].to_numpy(float):
+            self.assertLessEqual(b.shroud_front_raise_deg(self.config, self.baseline, x), -4. + 1e-9)
+
+    def test_run_loop_reports_an_unsatisfiable_doe_cap_without_queueing(self):
+        self.config['doe'].update(include_baseline=False, lhs_designs=1, max_shroud_front_raise_deg=-90.)
+        with tempfile.TemporaryDirectory() as root, patch.object(b, 'lhs_samples', return_value=self.empty):
+            with self.assertRaisesRegex(RuntimeError, 'DOE'):
+                self.run_doe(root, count=2)
+            self.assertTrue(b.load_training(self.config).empty)
+            self.assertEqual(b.pending.load(self.config)['entries'], [])
+
+    def test_non_doe_random_sampling_ignores_the_doe_cap(self):
+        self.config['doe']['max_shroud_front_raise_deg'] = -90.
+        points = b.valid_random_samples(self.config, self.baseline, 2, 42, self.empty)
+        self.assertEqual(len(points), 2)
+        self.assertTrue(all(b.shroud_front_raise_deg(self.config, self.baseline, x) > -90. for x in points))
 
     def test_without_a_doe_section_the_earlier_design_is_kept(self):
         self.config.pop('doe')

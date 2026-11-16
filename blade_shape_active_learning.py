@@ -9,7 +9,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 import xml.etree.ElementTree as ET
 
 import numpy as np
@@ -637,6 +637,8 @@ def valid_random_samples(
     count: int,
     seed: int,
     existing: np.ndarray,
+    *,
+    predicate: Callable[[np.ndarray], bool] | None = None,
 ) -> list[np.ndarray]:
     rng = np.random.default_rng(seed)
     lb = lower_bounds(config)
@@ -647,6 +649,8 @@ def valid_random_samples(
         attempts += 1
         x = refinement.enforce_fixed(config, lb + rng.random(len(lb)) * (ub - lb))
         if constraint_violations(config, baseline, x):
+            continue
+        if predicate is not None and not predicate(x):
             continue
         if not is_far_enough(config, x, existing):
             continue
@@ -1494,7 +1498,13 @@ def _run_loop(args: argparse.Namespace, config: dict[str, Any]) -> None:
         if initial:
             existing = np.vstack([existing, np.array(initial)]) if existing.size else np.array(initial)
         if len(initial) < needed:
-            initial.extend(valid_random_samples(config,baseline,needed-len(initial),stream_seed(seed,'doe_fallback'),existing))
+            cap = doe_settings(config)['max_shroud_front_raise_deg']
+            predicate = None if cap is None else lambda x: shroud_front_raise_deg(config, baseline, x) <= cap + 1e-9
+            initial.extend(valid_random_samples(config, baseline, needed-len(initial),
+                                                stream_seed(seed, 'doe_fallback'), existing, predicate=predicate))
+            if cap is not None and len(initial) < needed:
+                raise RuntimeError(f'Only {len(initial)} of {needed} DOE points satisfy the configured constraints '
+                                   f'and max_shroud_front_raise_deg={cap}; no new DOE points were queued.')
         candidates = fallback_selections(initial, 'doe')
         index = next_case_index(config,df)
         pending.enqueue(config,candidates,[{'sample_phase':'doe','doe_index':index+i} for i in range(len(candidates))])

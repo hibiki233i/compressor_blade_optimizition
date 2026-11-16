@@ -609,8 +609,6 @@ class ConfigPage(Page):
         for key, (spec, widget) in self._bindings.items():
             if spec.kind == "bool":
                 set_path(config, key, bool(widget.isChecked()))
-            elif spec.kind == "float" and spec.none_text and widget.value() == widget.minimum():
-                set_path(config, key, None)
             elif spec.kind in {"int", "float"}:
                 # A spin box rounds to its decimals and clamps to its range; a value the
                 # user has not changed (5/6, a threshold below the widget minimum)
@@ -620,7 +618,10 @@ class ConfigPage(Page):
                         and isinstance(original, (int, float)) and not isinstance(original, bool)
                         and math.isfinite(original)):
                     continue
-                set_path(config, key, (int if spec.kind == "int" else float)(widget.value()))
+                if spec.kind == "float" and spec.none_text and widget.value() == widget.minimum():
+                    set_path(config, key, None)
+                else:
+                    set_path(config, key, (int if spec.kind == "int" else float)(widget.value()))
             elif spec.kind == "choice":
                 set_path(config, key, widget.currentText())
             elif spec.kind == "path":

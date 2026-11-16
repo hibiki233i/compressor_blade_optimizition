@@ -550,6 +550,34 @@ class TestGuiWidgets(ProjectFixture):
         self.assertFalse(page.dirty_badge.isVisible())
         self.assertEqual(read_config_file(self.config_path)["variables"][0]["lower"], -2.5)
 
+    def _load_doe_cap(self, cap):
+        config = read_config_file(self.config_path)
+        config["doe"] = {"include_baseline": False, "lhs_designs": 1, "max_shroud_front_raise_deg": cap}
+        self.config_path.write_text(json.dumps(config), encoding="utf-8")
+        self.ctx.reload()
+        self._settle()
+        return self.window.pages[2]
+
+    def test_config_save_preserves_unchanged_doe_caps(self) -> None:
+        for cap in (-2., -1., -0.9996, -0.5, 2.5, None):
+            with self.subTest(cap=cap):
+                page = self._load_doe_cap(cap)
+                page._bindings["runtime.iterations"][1].setValue(2)
+                page.save()
+                saved = read_config_file(self.config_path)
+                self.assertEqual(saved["doe"]["max_shroud_front_raise_deg"], cap)
+                self.assertEqual(saved["runtime"]["iterations"], 2)
+
+    def test_config_doe_cap_can_be_disabled_and_enabled(self) -> None:
+        page = self._load_doe_cap(2.5)
+        spin = page._bindings["doe.max_shroud_front_raise_deg"][1]
+        spin.setValue(spin.minimum())
+        page.save()
+        self.assertIsNone(read_config_file(self.config_path)["doe"]["max_shroud_front_raise_deg"])
+        spin.setValue(1.25)
+        page.save()
+        self.assertEqual(read_config_file(self.config_path)["doe"]["max_shroud_front_raise_deg"], 1.25)
+
     def test_switch_config_discard_prompt_keeps_files_separate(self) -> None:
         from PySide6.QtWidgets import QMessageBox
 
