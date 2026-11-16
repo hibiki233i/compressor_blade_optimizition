@@ -16,9 +16,10 @@ RMS_TARGET_MAX = 1e-5
 #: restart did so within about 1500–2000 extra iterations; fewer rarely
 #: converged and more rarely helped. Revisit for a different machine or mesh.
 RESTART_ITERATIONS_RANGE = (1500, 2000)
-#: Loosest residual a reviewer may be asked to accept: 1e-4 is the usual
-#: "loosely converged" level for steady turbomachinery. Configs may tighten it.
-REVIEW_RMS_MAX = 1e-4
+#: Loosest residual a reviewer may be asked to accept. Results stuck in the
+#: 1e-4 decade still carry usable metrics on this impeller, so they go to a
+#: person rather than being discarded; above 1e-3 the run is treated as failed.
+REVIEW_RMS_MAX = 1e-3
 
 
 @dataclass(frozen=True)
@@ -51,17 +52,23 @@ class ReviewPolicy:
 
     A result qualifies when at most ``max_equations_above_target`` equations of
     the final residual table miss the RMS target and each of them stays within
-    ``rms_limit``. It never becomes a label by itself: a person accepts or
-    rejects it. Not a physical input (it does not change any computed value).
+    ``rms_limit``. When every reported equation (turbulence included) also
+    stays within ``auto_accept_rms``, the result is accepted by this policy
+    without a person; the evidence records that. 0 disables auto-acceptance.
+    Not a physical input (it does not change any computed value).
     """
     rms_limit: float = REVIEW_RMS_MAX
     max_equations_above_target: int = 3
     mode: str = 'legacy_count'
     history_window: int = 200
+    auto_accept_rms: float = 0.0
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.rms_limit) or not 0 < self.rms_limit <= REVIEW_RMS_MAX:
             raise ValueError(f'cfx_review.rms_limit must be positive and <= {REVIEW_RMS_MAX:g}')
+        if (isinstance(self.auto_accept_rms, bool) or not isinstance(self.auto_accept_rms, (int, float))
+                or not math.isfinite(self.auto_accept_rms) or not 0 <= self.auto_accept_rms <= self.rms_limit):
+            raise ValueError('cfx_review.auto_accept_rms must be in [0, rms_limit] (0 disables auto-acceptance)')
         if self.mode not in {'legacy_count', 'residual_limit'}:
             raise ValueError('cfx_review.mode must be legacy_count or residual_limit')
         if type(self.history_window) is not int or not 2 <= self.history_window <= 10000:
@@ -93,10 +100,16 @@ def review_evidence(report: dict, convergence: ConvergencePolicy, review: Review
     if any(value > review.rms_limit for value in above.values()):
         return None
     warnings = ['Performance monitor history has not been verified; final metrics alone do not prove stability.']
-    if report.get('history', {}).get('max_rms', {}).get('max', 0) > review.rms_limit:
+    spiked = report.get('history', {}).get('max_rms', {}).get('max', 0) > review.rms_limit
+    if spiked:
         warnings.append('Residuals exceeded the review limit within the final history window.')
+    # Every reported equation counts here too: a turbulence residual in the
+    # 1e-4 decade keeps the result with a person, and so does a final window
+    # whose residuals spiked past the review limit.
+    auto = (bool(review.auto_accept_rms) and not spiked
+            and max(report['rms'].values()) <= review.auto_accept_rms)
     return {'equations_above_target': above, 'rms_target': convergence.rms_target,
-            'policy_version': 2, 'warnings': warnings, **review.to_dict()}
+            'policy_version': 3, 'auto_accepted': auto, 'warnings': warnings, **review.to_dict()}
 
 
 ITERATION = re.compile(r'OUTER\s+LOOP\s+ITERATION\s*=\s*(\d+)(?:\s*\(\s*(\d+)\s*\))?', re.I)

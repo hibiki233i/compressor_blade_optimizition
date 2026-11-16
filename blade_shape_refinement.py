@@ -80,10 +80,48 @@ def slice_id(config: dict[str, Any]) -> str:
     return digest({'variables': config['variables'], 'search': config.get('search',{})})[:16]
 
 
-def training_partition(config: dict[str, Any], frame: pd.DataFrame) -> tuple[pd.DataFrame,pd.DataFrame]:
+def review_training(config: dict[str, Any]) -> tuple[bool, float]:
+    """(``surrogate.train_on_review``, ``surrogate.review_noise_tol``), checked."""
+    settings = config.get('surrogate', {})
+    enabled, scale = settings.get('train_on_review', False), settings.get('review_noise_tol', 2.0)
+    if not isinstance(enabled, bool):
+        raise ValueError('surrogate.train_on_review must be true or false')
+    if isinstance(scale, bool) or not isinstance(scale, (int, float)) or not np.isfinite(scale) or scale < 0:
+        raise ValueError('surrogate.review_noise_tol must be a finite number >= 0')
+    return enabled, float(scale)
+
+
+def label_statuses(config: dict[str, Any]) -> tuple[str, ...]:
+    """Row statuses whose real metrics train the surrogate.
+
+    With ``surrogate.train_on_review`` a result awaiting review enters training
+    as a provisional label with extra noise (see ``provisional_noise``). The
+    Pareto fronts are unaffected: they take ``success`` rows only.
+    """
+    return ('success', 'review') if review_training(config)[0] else ('success',)
+
+
+def provisional_noise(config: dict[str, Any], frame: pd.DataFrame) -> np.ndarray | None:
+    """Per-row extra noise SD in objective units, or None when every row is accepted.
+
+    A provisional row's SD is ``review_noise_tol`` engineering tolerances
+    (``pareto.tolerances``) per objective, so the surrogate may miss it by
+    about that much without strain while accepted rows still pin the fit.
+    """
+    provisional = frame['status'].ne('success').to_numpy() if 'status' in frame else np.zeros(len(frame), bool)
+    if not provisional.any():
+        return None
+    tol = config.get('pareto', {}).get('tolerances', {})
+    scale = review_training(config)[1]
+    return provisional[:, None] * np.array([scale * float(tol.get(o, 0.0)) for o in OBJECTIVES])[None, :]
+
+
+def training_partition(config: dict[str, Any], frame: pd.DataFrame, *,
+                       accepted_only: bool = False) -> tuple[pd.DataFrame,pd.DataFrame]:
     names = [v['name'] for v in config['variables']]
+    statuses = ('success',) if accepted_only else label_statuses(config)
     # Labels produced under other physical inputs are kept in the CSV but are not evidence.
-    clean = frame.loc[frame.status.eq('success') & signatures.evidence_mask(config, frame)].copy()
+    clean = frame.loc[frame.status.isin(statuses) & signatures.evidence_mask(config, frame)].copy()
     # Empty startup tables can retain object dtype after to_numeric; nullable
     # numeric columns also need a NumPy-compatible dtype before isfinite.
     numeric = clean[names+OBJECTIVES].apply(pd.to_numeric,errors='coerce').astype(float)
@@ -115,9 +153,10 @@ class ConditionalSurrogate:
         names = [v['name'] for v in config['variables']]
         self.active = active_indices(config)
         history,local = training_partition(config,frame)
-        self.primary = factory(config,history[names].to_numpy(),history[OBJECTIVES].to_numpy(),seed)
+        self.primary = self._fit(factory,config,history,history[names].to_numpy(),seed)
         self.model_name = type(self.primary).__name__ + ':full12'
         self.history_count,self.slice_count = len(history),len(local)
+        self.provisional_count = int(history.status.ne('success').sum())
         self.challenger = None
         self.challenger_message = 'Insufficient same-slice samples.'
         minimum = max(4,int(config.get('refinement',{}).get('challenger_min_samples',12)))
@@ -126,7 +165,7 @@ class ConditionalSurrogate:
             local_config.pop('search',None)
             local_config['variables'] = [config['variables'][i] for i in self.active]
             try:
-                self.challenger = factory(local_config,local[names].to_numpy()[:,self.active],local[OBJECTIVES].to_numpy(),seed)
+                self.challenger = self._fit(factory,local_config,local,local[names].to_numpy()[:,self.active],seed)
                 self.challenger_message = 'Available; trained only on matching fixed coordinates.'
             except (ValueError,RuntimeError,np.linalg.LinAlgError) as exc:
                 self.challenger_message = f'Unavailable: {exc}'
@@ -146,6 +185,14 @@ class ConditionalSurrogate:
                         ratios = (d[f'true_{o}']-d[f'pred_{o}']).abs()/np.maximum(d[f'raw_std_{o}'],1e-12)
                         self.scale[j] = max(1.,float(np.quantile(ratios,CALIBRATION_COVERAGE))/INTERVAL_SIGMAS)
 
+    @staticmethod
+    def _fit(factory: Callable, config: dict[str,Any], rows: pd.DataFrame, x: np.ndarray, seed: int) -> Any:
+        noise = provisional_noise(config, rows)
+        # Factories without provisional rows keep their original four-argument call.
+        if noise is None:
+            return factory(config,x,rows[OBJECTIVES].to_numpy(),seed)
+        return factory(config,x,rows[OBJECTIVES].to_numpy(),seed,noise_sd=noise)
+
     def predict(self, x: np.ndarray) -> tuple[np.ndarray,np.ndarray]:
         mean,std = self.primary.predict(x)
         return mean,std*self.scale
@@ -155,7 +202,8 @@ class ConditionalSurrogate:
         data = {'slice_id':slice_id(self.config),'candidate_on_slice':True,
                 'inactive_distance_norm':float(slice_distance(self.config,x)[0]),
                 'surrogate_model':self.model_name,'history_train_count':self.history_count,
-                'slice_train_count':self.slice_count,'calibration_count':self.calibration_count,
+                'slice_train_count':self.slice_count,'provisional_train_count':self.provisional_count,
+                'calibration_count':self.calibration_count,
                 'challenger_status':self.challenger_message}
         for j,o in enumerate(OBJECTIVES):
             data[f'raw_std_{o}'] = float(raw[0,j])
@@ -206,7 +254,8 @@ def improvement_metrics(config: dict[str,Any], before: pd.DataFrame, result: dic
     clean,_=training_partition(config,before)
     y=clean[OBJECTIVES].to_numpy(float)
     previous=hypervolume_2d(y,ref)
-    success=result.get('status')=='success'
+    # A provisional label counts here exactly as it does in training.
+    success=result.get('status') in label_statuses(config)
     value=np.array([result.get(o,np.nan) for o in OBJECTIVES],dtype=float)
     success=success and np.isfinite(value).all()
     after=hypervolume_2d(np.vstack([y,value]),ref) if success else previous
@@ -332,7 +381,7 @@ def _write_boundary_plan(config: dict[str,Any], center_run_id: str, path: Path) 
     if len(controls)!=4 or len(set(controls))!=4 or any(n not in [names[i] for i in active] for n in controls):
         raise ValueError('Exactly four distinct active boundary variables are required.')
     frame=b.load_training(config)
-    _,local=training_partition(config,frame)
+    _,local=training_partition(config,frame,accepted_only=True)
     selected=local.loc[local.run_id.eq(center_run_id)]
     if len(selected)!=1:raise ValueError('Center must be a unique successful same-slice CFD row.')
     center=selected.iloc[0][names].to_numpy(float)

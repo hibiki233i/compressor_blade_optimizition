@@ -59,10 +59,22 @@ class ReviewDecisionTests(unittest.TestCase):
     def front(self):
         return set(b.write_pareto(self.c, b.load_training(self.c)).run_id)
 
-    def test_review_row_is_not_a_label_until_accepted(self):
+    def test_review_row_trains_provisionally_but_leads_no_front_until_accepted(self):
         self.assertNotIn('case_000004', self.front())
+        self.c['surrogate']['train_on_review'] = False
         clean, _ = r.training_partition(self.c, b.load_training(self.c))
         self.assertNotIn('case_000004', set(clean.run_id))
+        self.c['surrogate']['train_on_review'] = True
+        clean, _ = r.training_partition(self.c, b.load_training(self.c))
+        self.assertIn('case_000004', set(clean.run_id), 'a provisional label for the surrogate')
+        accepted, _ = r.training_partition(self.c, b.load_training(self.c), accepted_only=True)
+        self.assertNotIn('case_000004', set(accepted.run_id))
+        noise = r.provisional_noise(self.c, clean)
+        self.assertEqual(noise[list(clean.run_id).index('case_000004')].tolist(),
+                         [self.c['surrogate']['review_noise_tol'] * self.c['pareto']['tolerances'][o]
+                          for o in r.OBJECTIVES])
+        self.assertEqual(float(noise[list(clean.run_id).index('case_000000')].max()), 0.0)
+        self.assertNotIn('case_000004', self.front())
         listed = review.awaiting(self.c)
         self.assertEqual([item['run_id'] for item in listed], ['case_000004'])
         self.assertEqual(listed[0]['equations_above_target'], {'p-mass': 1.3e-5})
@@ -235,6 +247,36 @@ class ReviewInLoopsTests(unittest.TestCase):
         queue = json.loads((self.root / 'pending_evaluations.json').read_text())
         self.assertEqual([e['status'] for e in queue['entries']], ['review'])
         self.assertEqual(physical_signature(self.config), training.loc[training.status.eq('review')].iloc[0].physical_signature)
+
+    def test_a_result_auto_accepted_at_solve_time_is_a_success_row_that_says_so(self):
+        for i in range(4):
+            x = self.center.copy()
+            x[0] += .1 * i
+            self.save_row(i, x, Efficiency=.76 + .001 * i)
+        self.config['runtime'].update(initial_samples=0, nsga2_pop_size=6, nsga2_generations=1, candidate_pool_size=8)
+        config_path = self.root / 'config.json'
+        config_path.write_text(json.dumps(self.config))
+        args = b.build_parser().parse_args(['run', '--config', str(config_path), '--resume', '--iterations', '1',
+                                            '--batch-size', '1', '--max-new-cfd', '1'])
+
+        def run(working_dir, run_id, **_):
+            receipt(Path(working_dir))
+            return CfxResult(False, dict(METRICS), 'Accepted by residual policy', 'review', review=True,
+                             auto_accepted=True)
+        with patch.object(b, 'extract_baseline', return_value=self.baseline), \
+                patch.object(b, 'check_geometry_script'), \
+                patch.object(b, 'run_geometry', side_effect=fake_geometry), \
+                patch.object(b, 'run_cfx_pipeline', side_effect=run), \
+                redirect_stdout(StringIO()) as printed:
+            b.run_loop(args)
+        self.assertIn('Awaiting review: 0', printed.getvalue())
+        row = b.load_training(self.config).iloc[-1]
+        self.assertEqual((row.status, row.review_decision, row.review_reason),
+                         ('success', 'auto_accepted', 'cfx_review.auto_accept_rms'))
+        queue = json.loads((self.root / 'pending_evaluations.json').read_text())
+        self.assertEqual([e['status'] for e in queue['entries']], ['success'])
+        # METRICS dominate every earlier row, so the accepted result leads the front
+        self.assertEqual(set(pd.read_csv(self.root / 'pareto_front.csv').run_id), {row.run_id})
 
 
 if __name__ == '__main__':

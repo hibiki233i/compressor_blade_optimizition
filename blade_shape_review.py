@@ -1,8 +1,11 @@
 """Manual review of CFD results that missed the strict RMS target by a small margin.
 
-A training row with ``status=review`` carries real CFX-Post metrics but is not a
-label. A person accepts it (the row becomes ``success`` and enters training and
-the Pareto fronts) or rejects it (``failed``). Each decision is appended to
+A training row with ``status=review`` carries real CFX-Post metrics but is not an
+accepted result: at most a provisional, noisier training label when
+``surrogate.train_on_review`` is set. A person accepts it (the row becomes
+``success`` and enters the Pareto fronts) or rejects it (``failed``, out of
+training too). Results within ``cfx_review.auto_accept_rms`` were accepted by
+that policy when solved and never reach this module. Each decision is appended to
 ``review_decisions.json`` together with the evidence it was made on, and a
 decision is refused when that evidence (the .out/.res of the recorded solve)
 has changed since the solver wrote it.

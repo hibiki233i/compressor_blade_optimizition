@@ -180,7 +180,10 @@ class ReassessmentTests(unittest.TestCase):
 
     def test_plan_is_read_only_apply_extracts_review_metrics_and_is_idempotent(self):
         before=file_identity(self.case/'cfx_state.json')
+        # 3e-5 residuals would be auto-accepted at solve time; a reassessed failure still goes to a person
+        self.assertGreaterEqual(self.config['cfx_review']['auto_accept_rms'],3e-5)
         plan=recovery.make_plan(self.config,'case_000000')
+        self.assertFalse(plan['evidence']['review']['auto_accepted'])
         self.assertEqual(before,file_identity(self.case/'cfx_state.json'))
         with patch.object(cfx,'_run_logged',side_effect=self.post) as post:
             recovery.apply_plan(self.config,plan,'residual-limit policy')
@@ -200,7 +203,7 @@ class ReassessmentTests(unittest.TestCase):
         (self.case/'Impeller_002.res').write_text('changed')
         with self.assertRaisesRegex(ValueError,'evidence changed'):
             recovery.apply_plan(self.config,plan,'inspect')
-        self.config['cfx_review']['rms_limit']=5e-5
+        self.config['cfx_review'].update(rms_limit=5e-5,auto_accept_rms=0.0)
         with self.assertRaisesRegex(ValueError,'policy changed'):
             recovery.apply_plan(self.config,plan,'inspect')
         review_path=b.training_csv_path(self.config)
@@ -650,9 +653,10 @@ class ReviewModeTests(unittest.TestCase):
         report=convergence.assess_out(text,convergence.ConvergencePolicy(),history_window=2)
         self.assertEqual(report['history']['above_1e4_count'],1)
         self.assertEqual(report['normalised_imbalance_percent']['p-mass'],-.1731)
-        evidence=convergence.review_evidence(report,convergence.ConvergencePolicy(),
-                                             convergence.ReviewPolicy(mode='residual_limit'))
+        policy=convergence.ReviewPolicy(mode='residual_limit',rms_limit=1e-4,auto_accept_rms=1e-4)
+        evidence=convergence.review_evidence(report,convergence.ConvergencePolicy(),policy)
         self.assertTrue(any('history window' in warning for warning in evidence['warnings']))
+        self.assertFalse(evidence['auto_accepted'],'a spike past the review limit keeps it with a person')
         self.assertFalse(report['history']['performance_monitors_verified'])
 
     def test_tail_history_includes_non_required_equations(self):
@@ -665,7 +669,7 @@ class ReviewModeTests(unittest.TestCase):
         self.assertIn('turbfreq',report['history']['equations'])
         self.assertEqual(report['max_rms'],3e-5,'strict convergence still uses the required equations')
         evidence=convergence.review_evidence(report,convergence.ConvergencePolicy(),
-                                             convergence.ReviewPolicy(mode='residual_limit'))
+                                             convergence.ReviewPolicy(mode='residual_limit',rms_limit=1e-4))
         self.assertTrue(any('history window' in warning for warning in evidence['warnings']))
 
 

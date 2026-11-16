@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import html
 from dataclasses import dataclass
+from math import comb
 from typing import Any
 
 from .project import CODE_DIR  # noqa: F401 - puts the repository modules on sys.path
@@ -59,10 +60,19 @@ HELP: dict[str, Help] = {
     "cfx_review.rms_limit": Help(
         f"推荐 {REVIEW_RMS_MAX:g}；上限 {REVIEW_RMS_MAX:g}",
         "续算用完追加步数仍未达到 RMS 门槛时，如果最终残差表中超标的方程都不超过此值（legacy_count 模式还检查个数），"
-        "该点照常做 CFX-Post，记为 status=review（待审核），而不是直接丢弃。待审核的点不进训练集和 Pareto，"
-        "要在「运行控制 → 审核送审点」或命令行 review 中人工接受后才成为训练标签；否决则记为失败。\n"
-        f"代码只接受 (0, {REVIEW_RMS_MAX:g}]（blade_shape_convergence.REVIEW_RMS_MAX）：{REVIEW_RMS_MAX:g} 是常说的宽松收敛水平。\n"
+        "该点照常做 CFX-Post，记为 status=review（待审核），而不是直接丢弃；超过此值记为失败。"
+        "待审核的点不进 Pareto；开启“送审点参与训练”时先以较大噪声进入代理模型。"
+        "要在「运行控制 → 审核送审点」或命令行 review 中人工接受后才成为正式结果；否决则记为失败。\n"
+        f"代码只接受 (0, {REVIEW_RMS_MAX:g}]（blade_shape_convergence.REVIEW_RMS_MAX）。本叶轮停在 1e-4 量级的算例仍有可用的性能值，"
+        "所以交给人判断；更差的不再送审。\n"
         "不进入物理签名：它只决定结果是否交给人判断，不改变计算结果；修改后已有记录照常使用，已分类的点不会重新分类。"),
+    "cfx_review.auto_accept_rms": Help(
+        "推荐 1e-4；0 = 全部人工审核",
+        "送审的点如果残差表中所有方程（含湍流）都 ≤ 此值，并且末段历史窗口里残差没有冲过 rms_limit，"
+        "就按此规则直接记为 success（review_decision = auto_accepted），不再等人工；e-4 量级的点仍送审。\n"
+        "取值 [0, rms_limit]，0 关闭自动接受。只在求解时分类一次：修改后已分类的点不会重新分类；"
+        "reassess 重新评估的历史失败算例始终交给人。\n"
+        "不进入物理签名。自动接受仍不代替对守恒、网格和监测点的工程检查。"),
     "cfx_review.max_equations_above_target": Help(
         "legacy_count 推荐 3；0 关闭送审",
         "legacy_count 模式限制超标方程数；residual_limit 模式下正数不限制数量。"
@@ -71,7 +81,7 @@ HELP: dict[str, Help] = {
     "cfx_review.mode": Help(
         "新配置 residual_limit；旧配置 legacy_count",
         "residual_limit 按残差上限送审，不以超标方程数量拒绝。legacy_count 保留旧规则。"
-        "两种模式均需人工接受，方程数设为 0 均关闭送审；不改变求解停机目标。"),
+        "两种模式下，未达到“自动接受残差”的送审点都需人工接受；方程数设为 0 均关闭送审；不改变求解停机目标。"),
     "cfx_review.history_window": Help(
         "200 步", "用于审核证据的末段残差统计窗口：范围、中位数及超限次数。只作警示，不自动证明性能稳定。"),
     "cfx_convergence.flow_analysis": Help(
@@ -110,10 +120,25 @@ HELP: dict[str, Help] = {
         "具体是静压、平均静压还是其他形式，取决于模板出口边界如何引用该表达式。",
         (CFX, PHYSICAL)),
     "runtime.initial_samples": Help(
-        "推荐 ≈ 10 × 活动变量数",
-        "首次建模前的随机 DOE 点数：training_data.csv 的记录数（含失败）少于此值时，先补随机点，再开始主动学习。\n"
+        "推荐 ≈ 10 × 活动变量数，或分两段",
+        "首次建模前的 DOE 点数：training_data.csv 的记录数（含失败）少于此值时，先按「DOE」设置补点，再开始主动学习。\n"
         "推荐：GP 代理常用“10 × 维数”的经验规则，即约 10 × 活动变量数；预算紧张时不宜少于 5 × 维数。"
+        "也可分两段：先取约 2 × 维数，看过各变量的效应和失败位置后调整范围，再调高此值续跑补齐（已有点会被避开）。"
         "已有数据时只补足差额。"),
+    "doe.include_baseline": Help(
+        "推荐开启",
+        "DOE 的第一个点取基准几何（全部偏移为 0）。它给出所有偏移的参照值，也能尽早发现模板或网格本身的问题。"
+        "已有相同点（重复距离以内）时跳过。"),
+    "doe.lhs_designs": Help(
+        "推荐 50–200",
+        "生成多少组拉丁超立方，取其中最近两点距离最大的一组（含已有点）。每组按顺序取满足几何约束和下一项筛选的点。"
+        "1 即旧做法（只用一组）。组数越多点越分散，但耗时随之增加（100 组约数秒）。"
+        "逐点挑最远点的做法会把点挤到边界上，这里不用。"),
+    "doe.max_shroud_front_raise_deg": Help(
+        "推荐 2.5；留空不限",
+        "只在 DOE 阶段使用：shroud 叶片角曲线在前半弦（x ≤ 0.5）的平均抬高量超过此值（度）的点不进 DOE。\n"
+        "依据：已有 70 个算例中，前半弦平均抬高超过 1° 时 79% 停在 5e-4 到 8e-4 的残差，低于 1° 时只有 5%。"
+        "这是流动边界而不是几何限制，所以主动学习阶段不受此限制。2.5° 时约 1/5 的 DOE 点仍落在该区域，可以看清过渡带。"),
     "runtime.iterations": Help(
         "主动学习轮数",
         "主动学习的轮数。每轮重新训练代理模型并选出 batch_size 个点送去 CFD。"
@@ -153,6 +178,16 @@ HELP: dict[str, Help] = {
         "rbf_ridge_ensemble（默认）：沿用以往行为。none：不换模型，直接报错停止，适合要求全程同一代理模型的对比实验。"
         "选 gp 作为回退没有意义，gp 不可用时同样报错。\n"
         "诊断记录中的 surrogate_model 列记下实际使用的模型，预测校准只用同一模型的历史残差。"),
+    "surrogate.train_on_review": Help(
+        "推荐开启",
+        "开启时，待审核（status=review）的点先作为临时标签进入代理模型、EHVI 的已观测前沿和局部搜索；"
+        "两个 Pareto 前沿文件仍只取已接受（success）的点，送审点要经人工接受才进入。\n"
+        "否决后该点记为失败，下一轮建模时自动移出。边界实验的中心点只取已接受的点。"),
+    "surrogate.review_noise_tol": Help(
+        "推荐 2（个容差）",
+        "临时标签的额外噪声标准差，以 Pareto 容差为单位：效率为 此值 × 效率容差，流量同理。"
+        "GP 把它加在该行的对角噪声上，所以模型可以偏离这些点约这么多，已接受的点仍主导拟合。\n"
+        "rbf_ridge_ensemble 回退模型不区分噪声，临时标签与已接受的点同等对待。"),
     "surrogate.ehvi_y_samples": Help(
         "推荐 256",
         "EHVI（期望超体积改进）用蒙特卡洛估计：对每个候选，从预测分布抽取若干目标值样本，求平均超体积增量。"
@@ -181,15 +216,19 @@ HELP: dict[str, Help] = {
         "如何确定：同上，取收敛水平或网格变化引起的 MassFlow 差值；也可参考进出口质量流量的不平衡量。"),
     # ------------------------------------------------------------ constraints
     "constraints.max_beta_offset_deg": Help(
-        "β 相对基准的包络",
-        "hub、shroud 各 5 个 β 控制点相对基准的最大绝对偏移（度）。与各变量自身的上下限同时生效：变量边界都在此值以内时，这条约束不起作用。"),
+        "β 曲线相对基准的包络",
+        "CFturbo 用 hub、shroud 各 5 个 β 控制点画一条 Bezier 曲线 β(x)；此值限制这条曲线在任一位置相对基准曲线的最大改变量（度）。\n"
+        "首尾控制点的偏移 1:1 传到曲线上，中间三点只传 0.42、0.375、0.42 倍，所以中间点的变量范围可以比端点宽 2.4 倍左右。"
+        "多个控制点同向偏移时改变量会叠加，此值就是用来限制这种叠加的。\n"
+        "推荐约 1.5 × 单个变量能造成的曲线改变量。旁边的提示给出当前变量范围下曲线最多能变多少度。"),
     "constraints.max_theta_offset_deg": Help(
         "θ 相对基准的包络",
         "hub、shroud θ 偏移的最大绝对值（度）。与变量自身上下限同时生效：变量边界都在此值以内时，这条约束不起作用。"),
     "constraints.max_generated_beta_step_deg": Help(
         "叶片角光顺度",
-        "把 hub、shroud 的 β 分布线性插值到子午归一化位置 0–1 上 31 个等距点（间距 1/30），要求相邻两点的 |Δβ| 不超过："
-        "max(此值, 基准自身的最大相邻步长 + 基准步长余量)。用来限制叶片角突变（局部曲率过大）。\n"
+        "在 hub、shroud 的 Bezier β(x) 曲线上取子午归一化位置 0–1 的 31 个等距点（间距 1/30），要求相邻两点的 |Δβ| 不超过："
+        "max(此值, 基准曲线自身的最大相邻步长 + 基准步长余量)。用来限制叶片角突变（局部曲率过大）。"
+        "按曲线而不是控制点折线计算：折线在陡峭的端段会高估步长，在 2026-11-16 放宽后的范围内会误拒约 1/3 的候选。\n"
         "如何确定：先看基准的最大相邻步长，再按允许叶型比基准“更陡”多少来设定。设得过小，几乎所有偏离基准的候选都会被拒绝。"),
     "constraints.baseline_step_margin_deg": Help(
         "推荐 0.5",
@@ -323,6 +362,36 @@ def _max_abs_bound(config: dict[str, Any], names: tuple[str, ...]) -> float | No
     return max(values) if values else None
 
 
+def beta_curve_reach(config: dict[str, Any]) -> float | None:
+    """Largest change of a Bezier beta(x) curve the variable bounds allow, in degrees.
+
+    The curve moves by sum_i B_i(t) * offset_i with Bernstein weights B_i >= 0,
+    so the extreme sits at all-upper or all-lower offsets on one side. A fixed
+    variable contributes its fixed value.
+    """
+    search = config.get("search") if isinstance(config.get("search"), dict) else {}
+    frozen = search.get("fixed_variables") if isinstance(search.get("fixed_variables"), dict) else {}
+    reach = None
+    for side in ("hub", "shroud"):
+        lows, highs = [], []
+        for i in range(5):
+            name = f"{side}_beta_{i}_deg_offset"
+            item = next((v for v in _variables(config) if v.get("name") == name), None)
+            try:
+                low, high = ((float(frozen[name]),) * 2 if name in frozen
+                             else (float(item["lower"]), float(item["upper"])))
+            except (KeyError, TypeError, ValueError):
+                return None
+            lows.append(low)
+            highs.append(high)
+        for step in range(201):
+            t = step / 200
+            weights = [comb(4, i) * t**i * (1 - t)**(4 - i) for i in range(5)]
+            side_reach = max(sum(w * h for w, h in zip(weights, highs)), -sum(w * lo for w, lo in zip(weights, lows)))
+            reach = side_reach if reach is None else max(reach, side_reach)
+    return reach
+
+
 def live_hint(key: str, config: dict[str, Any], value: Any) -> str:
     """A hint computed from the current form (degrees, counts), or ``""``."""
     try:
@@ -357,8 +426,12 @@ def live_hint(key: str, config: dict[str, Any], value: Any) -> str:
         roles = (config.get("refinement") or {}).get("candidate_roles") if isinstance(config.get("refinement"), dict) else None
         count = len(roles) if isinstance(roles, list) and roles else 3
         return f"角色数 {count}" + ("，已整除" if number % count == 0 else "，未整除")
-    if number is not None and key in ("constraints.max_beta_offset_deg", "constraints.max_theta_offset_deg"):
-        bound = _max_abs_bound(config, ("beta",) if "beta" in key else ("theta",))
+    if number is not None and key == "constraints.max_beta_offset_deg":
+        reach = beta_curve_reach(config)
+        if reach is not None:
+            return f"边界内曲线最多变 {reach:.3g}°：" + ("不起作用" if number >= reach else "比边界更严")
+    if number is not None and key == "constraints.max_theta_offset_deg":
+        bound = _max_abs_bound(config, ("theta",))
         if bound is not None:
             return f"边界最大 {bound:g}°：" + ("不起作用" if number >= bound else "比边界更严")
     return ""

@@ -9,22 +9,22 @@
 ## 工作原理
 
 ```text
-从基准叶型出发，生成 12 个角度偏移量（当前只搜索其中 7 个）
+从基准叶型出发，搜索 11 个角度偏移量（shroud θ 固定为 0）
         ↓
 检查几何约束、排除重复设计
         ↓
 CFturbo 改叶型 → TurboGrid 生成网格 → CFX 求解并后处理
         ↓
-结果写入 training_data.csv（成功和失败都记录）
+结果写入 training_data.csv（成功、送审和失败都记录）
         ↓
-用成功样本训练代理模型 → 挑下一批候选 → 循环
+用成功样本和送审样本（加大噪声）训练代理模型 → 挑下一批候选 → 循环
         ↓
-从全部成功样本中导出 Pareto 前沿
+从全部成功样本中导出 Pareto 前沿（送审样本须人工接受）
 ```
 
-设计变量是相对基准模板的偏移量：hub 和 shroud 平均线各 5 个 beta 角、各 1 个 theta 堆叠角，共 12 个。当前只搜索其中 7 个，其余 5 个固定。`PressureRatio`、`totalpressureratio` 和 `Power` 会记录下来供人工查看，但不参与优化。当前模板没有分流叶片，所以也没有分流叶片变量。
+设计变量是相对基准模板的偏移量：hub 和 shroud 平均线各 5 个 beta 角、各 1 个 theta 堆叠角，共 12 个。当前搜索其中 11 个：模板没有分流叶片，两个 θ 同时偏移只是整片叶片刚性旋转，所以 shroud θ 固定为 0，由 hub θ 控制尾缘倾斜。`PressureRatio`、`totalpressureratio` 和 `Power` 会记录下来供人工查看，但不参与优化。当前模板没有分流叶片，所以也没有分流叶片变量。
 
-为什么是双目标、为什么只搜 7 个变量，见 [优化流程 · 关键设计决策](docs/optimization.md#9-关键设计决策)。
+为什么是双目标、此前为什么冻结变量及当前恢复全部变量，见 [优化流程 · 关键设计决策](docs/optimization.md#9-关键设计决策)。
 
 ## 准备环境
 
@@ -95,7 +95,7 @@ python benchmarks/run_offline_baseline.py
 
 ## 输出文件
 
-明确由 GUI「停止」或 Ctrl+C 中断的未完成点，下次 `run --resume` 会在预算内按原设计点重算，旧产物保留在 `attempts/`。旧版本的停止记录用 `retry-interrupted` 显式登记；按旧收敛政策失败的完整结果用 `reassess` 计划/应用入口补提数据并转人工审核。操作、兼容限制及示例见 [恢复与审核](docs/optimization.md#5-运行续跑与中断处理)。待审核点会提取性能数值，但人工接受前不进入训练或 Pareto。
+明确由 GUI「停止」或 Ctrl+C 中断的未完成点，下次 `run --resume` 会在预算内按原设计点重算，旧产物保留在 `attempts/`。旧版本的停止记录用 `retry-interrupted` 显式登记；按旧收敛政策失败的完整结果用 `reassess` 计划/应用入口补提数据并转人工审核。操作、兼容限制及示例见 [恢复与审核](docs/optimization.md#5-运行续跑与中断处理)。残差在 e-5 量级的结果按规则自动接受；e-4 量级的结果送人工审核，会提取性能数值并先以较大噪声进入训练，人工接受前不进入 Pareto。见 [人工审核](docs/optimization.md#人工审核)。
 
 输出目录由配置中的 `paths.output_dir` 决定，通常写在 `blade_shape_local.ini` 里。
 

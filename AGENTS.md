@@ -7,7 +7,7 @@
 
 ## 项目与代码入口
 
-本项目以真实 CFD 反馈优化离心叶轮**主叶片平均线**。12 个设计变量是 hub/shroud 各 5 个 beta 偏移及各 1 个 theta 偏移；当前配置的 `search` 搜索其中 7 个，其余固定。目标是同时最大化 `Efficiency` 和 `MassFlow`；`PressureRatio`、`totalpressureratio`、`Power` 用于审查。
+本项目以真实 CFD 反馈优化离心叶轮**主叶片平均线**。12 个设计变量是 hub/shroud 各 5 个 beta 偏移及各 1 个 theta 偏移；当前配置的 `search` 搜索其中 11 个，`shroud_theta_deg_offset` 固定为 0（无分流叶片时两个 θ 同移只是刚性旋转）；β 范围和约束按 Bezier 曲线改变量设定（见 `docs/doe-bounds-2026-11-16.md`）。目标是同时最大化 `Efficiency` 和 `MassFlow`；`PressureRatio`、`totalpressureratio`、`Power` 用于审查。
 
 - 保持当前主叶片变量和双目标范围；当前映射没有 splitter blade 变量，清理代码时不要增加分流叶片变量或改变优化目标。
   原因：`geometry_indices()` 只接受现有 12 个名称，采集函数按两个目标计算改进，扩大范围会改变研究问题和计算链。
@@ -40,8 +40,8 @@
 
 ## 必须维持的行为
 
-- 最终 Pareto 只取 `training_data.csv` 中 `status=success`、目标值有效且物理签名与当前输入兼容的真实 CFD 记录。预测值、dry-run、失败记录和待审核记录（`status=review`）不得充当真实标签；送审结果只能经用户用 `review --accept` 写明原因后变为 `success`，不要自动接受，GUI 也不要记住审核理由。工程容差前沿写入 `pareto_front.csv`，严格前沿写入 `pareto_front_strict.csv`。
-  原因：代理预测和未通过接受判定的产物不能成为性能证据，送审结果需要独立的人工判断，两种前沿分别服务工程比较与严格数学对照。
+- 最终 Pareto 只取 `training_data.csv` 中 `status=success`、目标值有效且物理签名与当前输入兼容的真实 CFD 记录。预测值、dry-run 和失败记录不得充当标签。待审核记录（`status=review`）只在 `surrogate.train_on_review` 开启时作为带额外噪声的临时训练标签，不进 Pareto 和边界实验中心；它只能经用户用 `review --accept` 写明原因后变为 `success`，GUI 不要记住审核理由。唯一的自动接受是求解时按 `cfx_review.auto_accept_rms` 分类并记入凭据的结果（`review_decision=auto_accepted`）；不要新增其他自动接受途径，`reassess` 的历史失败始终交给人。工程容差前沿写入 `pareto_front.csv`，严格前沿写入 `pareto_front_strict.csv`。
+  原因：代理预测和未通过接受判定的产物不能成为性能证据。用户决定 e-5 量级残差按规则放行、e-4 量级先参与建模再由人决定最终结果；两种前沿分别服务工程比较与严格数学对照。
 - `variables` 必须包含现有 12 个名称且各出现一次；几何和约束通过 `geometry_indices()` 按名称查找，向量按配置列表顺序编码，CSV 按列名读取。改名称或顺序时同步检查向量转换、几何映射、活动/固定变量、约束、签名和测试。
   原因：重排后的变量可以正确映射到几何，但顺序仍属于签名，已有队列和边界方案里的向量需要保持可解释。
 - 普通边界或运行预算调整优先改配置，避免把数值硬编码到算法或脚本。

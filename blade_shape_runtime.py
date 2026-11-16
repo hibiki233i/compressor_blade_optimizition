@@ -21,6 +21,7 @@ _local = threading.local()
 #: this is kept for reproducibility of existing runs.
 SEED_STREAMS: dict[str, tuple[int, int]] = {
     'doe_fallback': (1000, 0),      # random fill when LHS yields too few feasible DOE points
+    'doe_lhs': (5000, 7919),        # extra Latin hypercubes (index 1, 2, ...) when doe.lhs_designs > 1
     'surrogate': (0, 1),            # surrogate fit (GP restarts, RBF ensemble resampling)
     'nsga2': (0, 17),               # NSGA-II population and variation
     'candidate_pool': (0, 31),      # local candidate pool; pool_global derives from this seed

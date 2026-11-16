@@ -55,8 +55,9 @@ class VariableMappingTests(unittest.TestCase):
         rng = np.random.default_rng(7)
         lb, ub = b.lower_bounds(self.config), b.upper_bounds(self.config)
         self.samples = [r.enforce_fixed(self.config, lb + rng.random(12) * (ub - lb)) for _ in range(50)]
-        self.samples.append(np.full(12, 1.6))  # violates the theta limit
-        self.samples.append(np.full(12, 5.9))  # violates several rules
+        self.theta_over = self.config['constraints']['max_theta_offset_deg'] + .1
+        self.samples.append(np.full(12, self.theta_over))  # violates the theta limit
+        self.samples.append(np.full(12, 15.9))  # violates several rules
 
     def test_current_order_is_bit_identical_to_positional_mapping(self):
         self.assertEqual(b.variable_names(self.config), list(b.GEOMETRY_VARIABLES))
@@ -76,7 +77,7 @@ class VariableMappingTests(unittest.TestCase):
             self.assertEqual(b.constraint_violations(reordered, self.baseline, y),
                              b.constraint_violations(self.config, self.baseline, x))
         theta = np.zeros(12)
-        theta[b.variable_names(reordered).index('shroud_theta_deg_offset')] = 1.6
+        theta[b.variable_names(reordered).index('hub_theta_deg_offset')] = self.theta_over
         self.assertIn('theta_offset', b.constraint_violations(reordered, self.baseline, theta))
 
     def test_missing_or_unmapped_names_are_rejected(self):

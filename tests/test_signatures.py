@@ -196,7 +196,8 @@ class SignatureTests(unittest.TestCase):
         plan_path = self.out / 'plan.json'
         baseline = b.BaselineShape(np.ones(5), np.ones(5), np.linspace(0, 1, 5), np.linspace(0, 1, 5), 0., 0.)
         self.c['refinement'].update(boundary_variables=[b.variable_names(self.c)[i] for i in [4, 5, 0, 10]],
-                                    extension={'variable': b.variable_names(self.c)[4], 'value': 5.0})
+                                    extension={'variable': b.variable_names(self.c)[4],
+                                               'value': self.c['variables'][4]['upper'] + .5})
         with patch.object(b, 'extract_baseline', return_value=baseline):
             plan = r.write_boundary_plan(self.c, 'case_000000', plan_path)
             changed = copy.deepcopy(self.c)
@@ -506,7 +507,7 @@ class SignatureTests(unittest.TestCase):
         baseline = b.BaselineShape(np.ones(5), np.ones(5), np.linspace(0, 1, 5), np.linspace(0, 1, 5), 0., 0.)
         names = b.variable_names(self.c)
         self.c['refinement'].update(boundary_variables=[names[i] for i in [4, 5, 0, 10]],
-                                    extension={'variable': names[4], 'value': 5.0})
+                                    extension={'variable': names[4], 'value': self.c['variables'][4]['upper'] + .5})
         with patch.object(b, 'extract_baseline', return_value=baseline):
             r.write_boundary_plan(self.c, 'case_000000', plan_path)
             for change in (lambda c: c['variables'][4].update(upper=c['variables'][4]['upper'] + .5),

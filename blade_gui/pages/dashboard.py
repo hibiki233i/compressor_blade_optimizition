@@ -210,9 +210,12 @@ class DashboardPage(Page):
                 "请在装有工程模板和 CFX 的机器上确认。",
             )
         elif summary is not None and summary.reviews:
+            surrogate = project.config.get("surrogate") if isinstance(project.config, dict) else None
+            provisional = isinstance(surrogate, dict) and surrogate.get("train_on_review") is True
+            use = "已作为临时标签参与训练，审核通过前不进 Pareto" if provisional else "审核通过前不进训练集和 Pareto"
             self.message.set_level(
                 "warn",
-                f"{summary.reviews} 个结果略未达到 RMS 门槛，正等待人工审核；审核通过前不进训练集和 Pareto。"
+                f"{summary.reviews} 个结果略未达到 RMS 门槛，正等待人工审核；{use}。"
                 "在「算例浏览」筛选「待审核」查看，或到「运行控制 → 审核送审点」处理。",
             )
         elif warnings:

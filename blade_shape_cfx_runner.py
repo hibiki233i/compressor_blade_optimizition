@@ -56,6 +56,9 @@ class CfxResult:
     failure_stage: str = ""
     #: Post ran and ``metrics`` are real, but the residuals need a person's decision.
     review: bool = False
+    #: A review result whose recorded evidence met ``cfx_review.auto_accept_rms``;
+    #: the caller decides whether that policy applies (reassessment ignores it).
+    auto_accepted: bool = False
 
 
 def _cfx_path(path: str | Path) -> str:
@@ -155,13 +158,18 @@ def run_cfx_pipeline(
 def _review_message(solve: dict) -> str:
     review = solve['review']
     above = ', '.join(f'{name} {value:.2g}' for name, value in sorted(review['equations_above_target'].items()))
+    if review.get('auto_accepted'):
+        return (f"Accepted by residual policy: RMS above {review['rms_target']:g} on {above}, every equation "
+                f"within auto_accept_rms {review['auto_accept_rms']:g}")
     return (f"Awaiting manual review: RMS above {review['rms_target']:g} on {above} "
-            f"(each within {review['rms_limit']:g}); not a training label until accepted")
+            f"(each within {review['rms_limit']:g}); not in the Pareto front until accepted")
 
 
 def _outcome(solve: dict, metrics: dict[str, float], message: str) -> CfxResult:
     if solve.get('status') == 'review':
-        return CfxResult(False, metrics, _review_message(solve), 'review', review=True)
+        # The classification recorded at solve time stands, auto-acceptance included.
+        return CfxResult(False, metrics, _review_message(solve), 'review', review=True,
+                         auto_accepted=bool(solve['review'].get('auto_accepted')))
     return CfxResult(True, metrics, message)
 
 
