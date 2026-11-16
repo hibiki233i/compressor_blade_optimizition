@@ -93,14 +93,30 @@ class ReviewClassificationTests(unittest.TestCase):
             'U - Mom': '2E-5', 'P - Mass': '9E-5', 'TurbFreq': '3E-5'})))
         self.assertIsNone(self.evidence(output('2.0E-06', 2000, True, {
             'U - Mom': '2E-5', 'V - Mom': '2E-5', 'P - Mass': '9E-5', 'TurbFreq': '3E-5'})), 'four above target')
-        self.assertIsNone(self.evidence(p_mass_output('1.1E-04')), 'above the review limit')
+        self.assertIsNone(self.evidence(p_mass_output('1.1E-03')), 'above the review limit')
+        self.assertIsNone(self.evidence(p_mass_output('1.1E-04'), ReviewPolicy(rms_limit=1e-4)), 'above a tighter limit')
         self.assertIsNone(self.evidence(output()), 'converged results need no review')
         self.assertIsNone(self.evidence(p_mass_output(), ReviewPolicy(max_equations_above_target=0)), 'disabled')
         self.assertIsNone(self.evidence(p_mass_output('5E-5'), ReviewPolicy(rms_limit=4e-5)))
 
+    def test_auto_acceptance_needs_every_equation_within_its_limit(self):
+        policy = ReviewPolicy(mode='residual_limit', auto_accept_rms=1e-4)
+        self.assertFalse(self.evidence(p_mass_output('5E-5'))['auto_accepted'], 'off by default')
+        self.assertTrue(self.evidence(p_mass_output('5E-5'), policy)['auto_accepted'])
+        # five equations in the 1e-5 decade: no count limit in residual_limit mode
+        many = self.evidence(output('2.0E-06', 2000, True, {
+            'U - Mom': '2E-5', 'V - Mom': '2E-5', 'W - Mom': '2E-5', 'P - Mass': '9E-5', 'TurbFreq': '3E-5'}), policy)
+        self.assertTrue(many['auto_accepted'])
+        decade = self.evidence(p_mass_output('2.0E-04'), policy)
+        self.assertFalse(decade['auto_accepted'], 'the 1e-4 decade stays with a person')
+        self.assertEqual(decade['equations_above_target'], {'p-mass': 2e-4})
+        with self.assertRaises(ValueError):
+            ReviewPolicy(rms_limit=1e-4, auto_accept_rms=2e-4)
+
     def test_review_policy_may_only_tighten(self):
-        for bad in [dict(rms_limit=2e-4), dict(rms_limit=0), dict(max_equations_above_target=-1),
-                    dict(max_equations_above_target=1.5)]:
+        for bad in [dict(rms_limit=2e-3), dict(rms_limit=0), dict(max_equations_above_target=-1),
+                    dict(max_equations_above_target=1.5), dict(auto_accept_rms=-1e-5),
+                    dict(auto_accept_rms=True)]:
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 ReviewPolicy(**bad)
         self.assertEqual(ReviewPolicy.from_config({}), ReviewPolicy())

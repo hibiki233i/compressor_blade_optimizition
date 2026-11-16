@@ -108,7 +108,7 @@ def validate_config(config: dict[str, Any]) -> list[Issue]:
     issues: list[Issue] = []
     # A hand-edited file can hold the wrong JSON type anywhere; report it instead
     # of raising, because the GUI must still open to let the user repair it.
-    for section in ("paths", "runtime", "constraints", "search", "cfx_convergence", "cfx_review"):
+    for section in ("paths", "runtime", "constraints", "search", "cfx_convergence", "cfx_review", "doe", "surrogate"):
         if section in config and not isinstance(config[section], dict):
             issues.append(Issue("error", f"{section} 必须是 JSON 对象。"))
     if any(issue.level == "error" for issue in issues):
@@ -129,8 +129,13 @@ def validate_config(config: dict[str, Any]) -> list[Issue]:
 
     try:
         cli_module().surrogate_choice(config)
+        refinement_module().review_training(config)
     except (ValueError, TypeError, AttributeError) as exc:
         issues.append(Issue("error", f"代理模型设置无效：{exc}"))
+    try:
+        cli_module().doe_settings(config)
+    except (ValueError, TypeError, AttributeError) as exc:
+        issues.append(Issue("error", f"DOE 设置无效：{exc}"))
     try:
         refinement_module().diagnostic_min_coverage(config)
     except (ValueError, TypeError, AttributeError) as exc:

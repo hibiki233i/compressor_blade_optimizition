@@ -61,7 +61,7 @@ class ResumeStateMachineTests(unittest.TestCase):
                 attempt = 1 + len(list(case.glob('Impeller_*.res')))
                 (case / f'Impeller_{attempt:03d}.res').write_text(f'synthetic result {attempt}')
                 if status == 'review':
-                    text = output('2E-6', 2000, True, {'W - Mom': '3E-5'})
+                    text = output('2E-6', 2000, True, {'W - Mom': '3E-4'})  # 1e-4 decade: a person decides
                     if attempt == 2:
                         text = text.replace('OUTER LOOP ITERATION = 2000',
                                             'OUTER LOOP ITERATION = 4000 (2000)')

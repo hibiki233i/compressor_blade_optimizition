@@ -95,6 +95,8 @@ class Field:
     step: float = 0.1
     choices: tuple[str, ...] = ()
     mode: str = "file"  # for kind=path: file | dir | save
+    #: kind=float only: shown at the minimum and saved as null ("no limit")
+    none_text: str = ""
 
 
 @dataclass
@@ -131,6 +133,8 @@ RUNTIME_FIELDS = [
     Field("cfx_review.mode", "送审模式", "choice", choices=("legacy_count", "residual_limit")),
     Field("cfx_review.history_window", "末段残差统计步数", "int", minimum=2, maximum=10000),
     Field("cfx_review.max_equations_above_target", "送审允许超标方程数", "int", minimum=0, maximum=20),
+    Field("cfx_review.auto_accept_rms", "自动接受残差", "float", minimum=0.0, maximum=REVIEW_RMS_MAX,
+          decimals=12, step=0.00001),
     Field("runtime.n_blades", "叶片数", "int", minimum=1, maximum=200),
     Field("runtime.rpm", "声明转速 (rpm)", "float", decimals=2, step=100.0),
     Field("runtime.mass_flow", "声明质量流量", "float", decimals=6, step=0.0001),
@@ -146,11 +150,21 @@ RUNTIME_FIELDS = [
     Field("runtime.seed", "随机种子", "int", minimum=0, maximum=2**31 - 1),
 ]
 
+DOE_FIELDS = [
+    Field("doe.include_baseline", "首点取基准几何", "bool"),
+    Field("doe.lhs_designs", "拉丁超立方组数", "int", minimum=1, maximum=1000),
+    Field("doe.max_shroud_front_raise_deg", "shroud 前半弦抬高上限 (deg)", "float", minimum=-1.0, maximum=90.0,
+          decimals=3, step=0.5, none_text="不限"),
+]
+
 SURROGATE_FIELDS = [
     Field("surrogate.model", "代理模型", "choice", choices=("gp", "rbf_ridge_ensemble")),
     Field("surrogate.fallback_model", "回退模型", "choice", choices=("rbf_ridge_ensemble", "gp", "none")),
     Field("surrogate.ehvi_y_samples", "EHVI 采样数", "int", minimum=8, maximum=100000),
     Field("surrogate.ehvi_validation_samples", "EHVI 校验采样数", "int", minimum=8, maximum=1000000),
+    Field("surrogate.train_on_review", "送审点参与训练", "bool", "Pareto 仍只取已接受的点"),
+    Field("surrogate.review_noise_tol", "送审点噪声 (容差倍数)", "float", minimum=0.0, maximum=100.0,
+          decimals=2, step=0.5),
 ]
 
 PARETO_FIELDS = [
@@ -160,9 +174,9 @@ PARETO_FIELDS = [
 ]
 
 CONSTRAINT_FIELDS = [
-    Field("constraints.max_beta_offset_deg", "最大 beta 偏移 (deg)", "float", decimals=3, step=0.5),
+    Field("constraints.max_beta_offset_deg", "beta 曲线最大改变量 (deg)", "float", decimals=3, step=0.5),
     Field("constraints.max_theta_offset_deg", "最大 theta 偏移 (deg)", "float", decimals=3, step=0.1),
-    Field("constraints.max_generated_beta_step_deg", "插值后最大相邻 beta 步长 (deg)", "float", decimals=3, step=0.5),
+    Field("constraints.max_generated_beta_step_deg", "beta 曲线最大相邻步长 (deg)", "float", decimals=3, step=0.5),
     Field("constraints.baseline_step_margin_deg", "基准步长余量 (deg)", "float", decimals=3, step=0.1),
     Field("constraints.duplicate_distance_norm", "重复距离阈值 (归一化)", "float", decimals=4, step=0.01),
 ]
@@ -195,6 +209,7 @@ SECTIONS: list[Section] = [
     Section("路径配置", "本机路径：JSON 中留空的项读写配置旁的 blade_shape_local.ini（不入库）；"
             "在本机不存在时仅告警，不阻止保存。", PATH_FIELDS),
     Section("运行参数", "CFD 工况与运行预算。实际边界条件来自 CFX 模板；转速、流量、进气角只是声明值。", RUNTIME_FIELDS),
+    Section("DOE", "初始样本的生成方式；样本数在「运行参数」中设置。", DOE_FIELDS),
     Section("代理模型", "筛选候选的代理模型与 EHVI 采样设置。", SURROGATE_FIELDS),
     Section("Pareto 容差", "工程容差只影响 pareto_front.csv，严格前沿始终另存。", PARETO_FIELDS),
     Section("几何约束", "候选几何的硬约束；修改后需重新生成方案。", CONSTRAINT_FIELDS),
@@ -487,6 +502,8 @@ class ConfigPage(Page):
             widget.setRange(float(spec.minimum), float(spec.maximum))
             widget.setSingleStep(float(spec.step))
             widget.setButtonSymbols(QDoubleSpinBox.UpDownArrows)
+            if spec.none_text:
+                widget.setSpecialValueText(spec.none_text)
         elif spec.kind == "choice":
             widget = QComboBox()
             widget.addItems(list(spec.choices))
@@ -529,7 +546,10 @@ class ConfigPage(Page):
         config = copy.deepcopy(self.ctx.project.config)
         from blade_shape_convergence import ConvergencePolicy, ReviewPolicy
         for section, defaults in (("cfx_convergence", ConvergencePolicy().to_dict()),
-                                  ("cfx_review", ReviewPolicy().to_dict())):
+                                  ("cfx_review", ReviewPolicy().to_dict()),
+                                  ("surrogate", {"train_on_review": False, "review_noise_tol": 2.0}),
+                                  ("doe", {"include_baseline": False, "lhs_designs": 1,
+                                           "max_shroud_front_raise_deg": None})):
             if isinstance(config.get(section, {}), dict):
                 config[section] = {**defaults, **config.get(section, {})}
         from blade_shape_refinement import DEFAULT_MIN_COVERAGE_2SIGMA
@@ -542,6 +562,9 @@ class ConfigPage(Page):
         self._shown = {}
         for key, (spec, widget) in self._bindings.items():
             value = get_path(config, key)
+            if value is None and spec.none_text:
+                widget.setValue(widget.minimum())
+                continue
             if value is None:
                 continue
             if spec.kind == "bool":
@@ -595,7 +618,10 @@ class ConfigPage(Page):
                         and isinstance(original, (int, float)) and not isinstance(original, bool)
                         and math.isfinite(original)):
                     continue
-                set_path(config, key, (int if spec.kind == "int" else float)(widget.value()))
+                if spec.kind == "float" and spec.none_text and widget.value() == widget.minimum():
+                    set_path(config, key, None)
+                else:
+                    set_path(config, key, (int if spec.kind == "int" else float)(widget.value()))
             elif spec.kind == "choice":
                 set_path(config, key, widget.currentText())
             elif spec.kind == "path":

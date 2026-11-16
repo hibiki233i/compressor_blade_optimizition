@@ -20,6 +20,8 @@ class RefinementTests(unittest.TestCase):
         self.config = json.loads(Path('blade_shape_config.json').read_text())
         self.config['paths']['output_dir'] = str(self.root)
         self.config['surrogate']['model'] = 'rbf'
+        # The boundary fixtures below were written for this hub_beta_4 box.
+        self.config['variables'][4].update(lower=-2.5, upper=4.5)
         names = b.variable_names(self.config)
         fixed_names = [names[i] for i in [1,2,6,9,11]]
         self.config['search'] = {'active_variables':[n for n in names if n not in fixed_names],

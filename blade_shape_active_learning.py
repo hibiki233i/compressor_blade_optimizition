@@ -9,7 +9,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 import xml.etree.ElementTree as ET
 
 import numpy as np
@@ -104,8 +104,10 @@ def load_config(path: str | Path) -> dict[str, Any]:
         print(f"Warning: empty paths {', '.join(empty)}; set them in {where}", file=sys.stderr)
     ConvergencePolicy.from_config(payload)
     ReviewPolicy.from_config(payload)
+    doe_settings(payload)
     geometry_indices(payload)
     surrogate_choice(payload)
+    refinement.review_training(payload)
     refinement.active_indices(payload)
     refinement.diagnostic_min_coverage(payload)
     return payload
@@ -232,19 +234,46 @@ def candidate_geometry(config: dict[str, Any], baseline: BaselineShape, x: np.nd
     }
 
 
-def _interp_beta(xs: np.ndarray, ys: np.ndarray) -> np.ndarray:
-    grid = np.linspace(0.0, 1.0, 31)
-    return np.interp(grid, xs, ys)
+#: Grid of the generated beta(x) curve used by the geometry rules.
+CURVE_GRID = np.linspace(0.0, 1.0, 31)
+_BEZIER_T = np.linspace(0.0, 1.0, 2001)
+
+
+def beta_curve(xs: np.ndarray, ys: np.ndarray) -> np.ndarray:
+    """The meanline beta(x) that CFturbo draws through these control points.
+
+    The five (x, beta) points are the control polygon of a Bezier curve, so the
+    curve passes through the end points only: an inner offset moves it by at
+    most 0.42 (points 1 and 3) or 0.375 (point 2) of the offset. Evaluated
+    parametrically and resampled on ``CURVE_GRID`` (x(t) is monotone).
+    """
+    xs, ys = np.asarray(xs, dtype=float), np.asarray(ys, dtype=float)
+    n = len(xs) - 1
+    basis = np.array([math.comb(n, i) * _BEZIER_T**i * (1 - _BEZIER_T)**(n - i) for i in range(n + 1)])
+    return np.interp(CURVE_GRID, basis.T @ xs, basis.T @ ys)
+
+
+def beta_curve_change_deg(baseline: BaselineShape, geom: dict[str, Any], side: str) -> np.ndarray:
+    """Change of the generated beta(x) curve from the baseline curve, in degrees."""
+    xs = getattr(baseline, f'{side}_x')
+    return np.rad2deg(beta_curve(xs, np.array(geom[f'{side}_beta_rad'], dtype=float))
+                      - beta_curve(xs, getattr(baseline, f'{side}_beta_rad')))
 
 
 def constraint_violations(config: dict[str, Any], baseline: BaselineShape, x: np.ndarray) -> list[str]:
+    """Geometry rules on the generated curve, not on the control-point offsets.
+
+    ``max_beta_offset_deg`` caps how far the Bezier beta(x) curve moves from
+    the baseline curve (never more than the largest control offset, so the
+    same number is looser than a cap on the offsets), and the step rule
+    compares the curve's largest step on ``CURVE_GRID`` with the baseline
+    curve's. The control polygon overstated both near steep end segments.
+    """
     x = np.asarray(x, dtype=float)
     if x.shape != (len(config['variables']),) or not np.isfinite(x).all():
         return ['invalid_vector']
     constraints = config["constraints"]
     geom = candidate_geometry(config, baseline, x)
-    hub = np.array(geom["hub_beta_rad"], dtype=float)
-    shroud = np.array(geom["shroud_beta_rad"], dtype=float)
     max_beta_offset = float(constraints["max_beta_offset_deg"])
     max_theta_offset = float(constraints["max_theta_offset_deg"])
     violations: list[str] = []
@@ -252,27 +281,22 @@ def constraint_violations(config: dict[str, Any], baseline: BaselineShape, x: np
         violations.append('variable_bounds')
     if not refinement.same_slice_mask(config,x)[0]:
         violations.append('fixed_variables')
-    if np.max(np.abs(np.rad2deg(hub - baseline.hub_beta_rad))) > max_beta_offset + 1e-9:
-        violations.append("hub_beta_offset")
-    if np.max(np.abs(np.rad2deg(shroud - baseline.shroud_beta_rad))) > max_beta_offset + 1e-9:
-        violations.append("shroud_beta_offset")
+    for side in ('hub', 'shroud'):
+        if np.max(np.abs(beta_curve_change_deg(baseline, geom, side))) > max_beta_offset + 1e-9:
+            violations.append(f"{side}_beta_offset")
     index = geometry_indices(config)
     if (abs(float(x[index["hub_theta"]])) > max_theta_offset + 1e-9
             or abs(float(x[index["shroud_theta"]])) > max_theta_offset + 1e-9):
         violations.append("theta_offset")
 
-    hub_base_step = np.max(np.abs(np.diff(np.rad2deg(_interp_beta(baseline.hub_x, baseline.hub_beta_rad)))))
-    shr_base_step = np.max(np.abs(np.diff(np.rad2deg(_interp_beta(baseline.shroud_x, baseline.shroud_beta_rad)))))
     requested = float(constraints["max_generated_beta_step_deg"])
     margin = float(constraints.get("baseline_step_margin_deg", 0.5))
-    hub_limit = max(requested, hub_base_step + margin)
-    shr_limit = max(requested, shr_base_step + margin)
-    hub_step = np.max(np.abs(np.diff(np.rad2deg(_interp_beta(baseline.hub_x, hub)))))
-    shr_step = np.max(np.abs(np.diff(np.rad2deg(_interp_beta(baseline.shroud_x, shroud)))))
-    if hub_step > hub_limit + 1e-9:
-        violations.append("hub_beta_step")
-    if shr_step > shr_limit + 1e-9:
-        violations.append("shroud_beta_step")
+    for side in ('hub', 'shroud'):
+        xs = getattr(baseline, f'{side}_x')
+        base_step = np.max(np.abs(np.diff(np.rad2deg(beta_curve(xs, getattr(baseline, f'{side}_beta_rad'))))))
+        step = np.max(np.abs(np.diff(np.rad2deg(beta_curve(xs, np.array(geom[f'{side}_beta_rad'], dtype=float))))))
+        if step > max(requested, base_step + margin) + 1e-9:
+            violations.append(f"{side}_beta_step")
     return violations
 
 
@@ -508,6 +532,82 @@ def lhs_samples(config: dict[str, Any], count: int, seed: int) -> np.ndarray:
     return refinement.enforce_fixed(config, lb + unit * (ub - lb))
 
 
+def doe_settings(config: dict[str, Any]) -> dict[str, Any]:
+    """The optional ``doe`` section, checked. Without it the DOE is the earlier
+    one: no baseline point, one Latin hypercube, no shroud rise cap."""
+    raw = config.get('doe', {})
+    unknown = set(raw) - {'include_baseline', 'lhs_designs', 'max_shroud_front_raise_deg'}
+    if unknown:
+        raise ValueError(f"Unknown doe settings: {sorted(unknown)}")
+    settings = {'include_baseline': raw.get('include_baseline', False),
+                'lhs_designs': raw.get('lhs_designs', 1),
+                'max_shroud_front_raise_deg': raw.get('max_shroud_front_raise_deg')}
+    if not isinstance(settings['include_baseline'], bool):
+        raise ValueError('doe.include_baseline must be true or false')
+    if type(settings['lhs_designs']) is not int or not 1 <= settings['lhs_designs'] <= 1000:
+        raise ValueError('doe.lhs_designs must be an integer in [1, 1000]')
+    cap = settings['max_shroud_front_raise_deg']
+    if cap is not None and (isinstance(cap, bool) or not isinstance(cap, (int, float)) or not math.isfinite(cap)):
+        raise ValueError('doe.max_shroud_front_raise_deg must be a number or null')
+    return settings
+
+
+def shroud_front_raise_deg(config: dict[str, Any], baseline: BaselineShape, x: np.ndarray) -> float:
+    """Mean rise of the shroud beta(x) curve over the front half chord (x <= 0.5)."""
+    change = beta_curve_change_deg(baseline, candidate_geometry(config, baseline, x), 'shroud')
+    return float(change[CURVE_GRID <= 0.5].mean())
+
+
+def doe_samples(config: dict[str, Any], baseline: BaselineShape, count: int, seed: int,
+                existing: np.ndarray) -> list[np.ndarray]:
+    """Initial design: the baseline first (optional), then a filtered Latin hypercube.
+
+    Each design takes, in order, the points of a Latin hypercube four times the
+    request that satisfy the geometry rules, the optional DOE-only shroud
+    front-half rise cap and the duplicate distance. Past about 1 deg of rise
+    most runs on this impeller stalled with residuals in the high 1e-4 decade,
+    so the cap spends fewer initial runs there without forbidding the region
+    later. With ``lhs_designs`` > 1 the design whose closest pair (existing
+    designs included, active coordinates normalized) is farthest apart wins:
+    a maximin choice that keeps the near-uniform one-variable spread of a
+    Latin hypercube, unlike point-by-point maximin, which crowds the bounds.
+    """
+    settings = doe_settings(config)
+    out: list[np.ndarray] = []
+    anchors = existing.copy() if existing.size else np.empty((0, len(config['variables'])))
+    if count <= 0:
+        return out
+    if settings['include_baseline']:
+        zero = refinement.enforce_fixed(config, np.zeros(len(config['variables'])))
+        if not constraint_violations(config, baseline, zero) and is_far_enough(config, zero, anchors):
+            out.append(zero)
+            anchors = np.vstack([anchors, zero[None, :]])
+    need, cap = count - len(out), settings['max_shroud_front_raise_deg']
+    best: list[np.ndarray] = []
+    best_score = -np.inf
+    for design in range(settings['lhs_designs']):
+        # Design 0 is the Latin hypercube the earlier DOE drew from this seed.
+        chosen: list[np.ndarray] = []
+        nearby = anchors
+        for x in lhs_samples(config, need * 4, seed if design == 0 else stream_seed(seed, 'doe_lhs', design)):
+            if len(chosen) >= need:
+                break
+            if (constraint_violations(config, baseline, x) or not is_far_enough(config, x, nearby)
+                    or (cap is not None and shroud_front_raise_deg(config, baseline, x) > cap + 1e-9)):
+                continue
+            chosen.append(x)
+            nearby = np.vstack([nearby, x[None, :]]) if nearby.size else x[None, :]
+        if not chosen:
+            continue
+        points = np.array(chosen)
+        score = min([refinement.active_distances(config, points[i:i + 1], np.delete(nearby, len(anchors) + i, 0))[0]
+                     for i in range(len(points))]) if len(nearby) > 1 else np.inf
+        # More points always beat a wider spread of fewer points.
+        if (len(chosen), score) > (len(best), best_score):
+            best, best_score = chosen, score
+    return out + best
+
+
 def normalize_x(config: dict[str, Any], x: np.ndarray) -> np.ndarray:
     lb = lower_bounds(config)
     ub = upper_bounds(config)
@@ -537,6 +637,8 @@ def valid_random_samples(
     count: int,
     seed: int,
     existing: np.ndarray,
+    *,
+    predicate: Callable[[np.ndarray], bool] | None = None,
 ) -> list[np.ndarray]:
     rng = np.random.default_rng(seed)
     lb = lower_bounds(config)
@@ -547,6 +649,8 @@ def valid_random_samples(
         attempts += 1
         x = refinement.enforce_fixed(config, lb + rng.random(len(lb)) * (ub - lb))
         if constraint_violations(config, baseline, x):
+            continue
+        if predicate is not None and not predicate(x):
             continue
         if not is_far_enough(config, x, existing):
             continue
@@ -566,7 +670,9 @@ class RbfRidgeEnsemble:
         self.y_mean: np.ndarray | None = None
         self.y_std: np.ndarray | None = None
 
-    def fit(self, x_raw: np.ndarray, y_raw: np.ndarray) -> "RbfRidgeEnsemble":
+    def fit(self, x_raw: np.ndarray, y_raw: np.ndarray, noise_sd: np.ndarray | None = None) -> "RbfRidgeEnsemble":
+        # The bootstrap fallback has no per-row noise term: provisional labels
+        # (noise_sd > 0) are fitted like accepted ones.
         rng = np.random.default_rng(self.seed)
         x = normalize_x(self.config, x_raw)
         self.y_mean = y_raw.mean(axis=0)
@@ -615,14 +721,21 @@ class GpKrigingSurrogate:
         self.y_mean: np.ndarray | None = None
         self.y_std: np.ndarray | None = None
 
-    def fit(self, x_raw: np.ndarray, y_raw: np.ndarray) -> "GpKrigingSurrogate":
+    def fit(self, x_raw: np.ndarray, y_raw: np.ndarray, noise_sd: np.ndarray | None = None) -> "GpKrigingSurrogate":
+        """``noise_sd`` (rows x objectives, objective units) adds known per-row
+        noise on top of the fitted white noise, e.g. for provisional labels."""
         x = normalize_x(self.config, x_raw)
         self.y_mean = y_raw.mean(axis=0)
         self.y_std = y_raw.std(axis=0)
         self.y_std[self.y_std < 1e-9] = 1.0
         y = (y_raw - self.y_mean) / self.y_std
+        if noise_sd is not None and np.shape(noise_sd) != y.shape:
+            raise ValueError(f'noise_sd must have shape {y.shape}, got {np.shape(noise_sd)}')
         self.models.clear()
         for target_idx in range(y.shape[1]):
+            # sklearn's default jitter, plus each row's known variance in standardized units.
+            alpha = 1e-10 if noise_sd is None else 1e-10 + (np.asarray(noise_sd, float)[:, target_idx]
+                                                           / self.y_std[target_idx]) ** 2
             kernel = (
                 ConstantKernel(1.0, (1e-3, 1e3))
                 * Matern(length_scale=np.ones(x.shape[1]), length_scale_bounds=(1e-2, 1e2), nu=2.5)
@@ -630,6 +743,7 @@ class GpKrigingSurrogate:
             )
             model = GaussianProcessRegressor(
                 kernel=kernel,
+                alpha=alpha,
                 normalize_y=False,
                 n_restarts_optimizer=3,
                 random_state=self.seed + target_idx,
@@ -679,17 +793,18 @@ def _gp_unavailable(x_train: np.ndarray) -> str:
     return ""
 
 
-def fit_surrogate(config: dict[str, Any], x_train: np.ndarray, y_train: np.ndarray, seed: int) -> Any:
+def fit_surrogate(config: dict[str, Any], x_train: np.ndarray, y_train: np.ndarray, seed: int,
+                  noise_sd: np.ndarray | None = None) -> Any:
     model, fallback = surrogate_choice(config)
     reason = _gp_unavailable(x_train) if model == "gp" else ""
     if not reason:
         return (GpKrigingSurrogate(config, seed=seed) if model == "gp"
-                else RbfRidgeEnsemble(config, seed=seed)).fit(x_train, y_train)
+                else RbfRidgeEnsemble(config, seed=seed)).fit(x_train, y_train, noise_sd)
     if fallback == NO_FALLBACK or (fallback == "gp" and _gp_unavailable(x_train)):
         raise RuntimeError(f"Surrogate {model} unavailable ({reason}) and fallback_model={fallback!r} cannot replace it.")
     print(f"[surrogate] {reason}; using fallback_model {fallback}.")
     return (GpKrigingSurrogate(config, seed=seed) if fallback == "gp"
-            else RbfRidgeEnsemble(config, seed=seed)).fit(x_train, y_train)
+            else RbfRidgeEnsemble(config, seed=seed)).fit(x_train, y_train, noise_sd)
 
 
 def pairwise_distances(a: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -1329,12 +1444,17 @@ def _evaluate_true_cfd(
                           'CFX installation); the result is not recorded as a label. Inspect this case.')
         append_row(config, row)
         return CaseResult(row, False)
-    # A review row carries real metrics but is not a label until a person accepts it.
-    row["status"] = "review" if review else "success"
+    # A review row carries real metrics; it reaches the Pareto fronts only after a
+    # person accepts it. Evidence within cfx_review.auto_accept_rms was accepted
+    # by that policy when the solve was classified, and the row says so.
+    auto = bool(review and getattr(cfx, 'auto_accepted', False))
+    row["status"] = "review" if review and not auto else "success"
     row["failure_stage"] = ""
     row["message"] = cfx.message
+    if auto:
+        row.update(review_decision='auto_accepted', review_reason='cfx_review.auto_accept_rms')
     append_row(config, row)
-    return CaseResult(row, not review)
+    return CaseResult(row, not review or auto)
 
 
 def run_loop(args: argparse.Namespace) -> None:
@@ -1374,14 +1494,17 @@ def _run_loop(args: argparse.Namespace, config: dict[str, Any]) -> None:
     if len(df) < runtime['initial_samples'] and used_new < max_new:
         needed = min(runtime['initial_samples']-len(df), max_new-used_new)
         existing = existing_vectors(config, df)
-        initial = []
-        for x in lhs_samples(config, needed*4, seed):
-            if len(initial) >= needed:break
-            if not constraint_violations(config, baseline, x) and is_far_enough(config,x,existing):
-                initial.append(x)
-                existing = np.vstack([existing,x[None,:]]) if existing.size else x[None,:]
+        initial = doe_samples(config, baseline, needed, seed, existing)
+        if initial:
+            existing = np.vstack([existing, np.array(initial)]) if existing.size else np.array(initial)
         if len(initial) < needed:
-            initial.extend(valid_random_samples(config,baseline,needed-len(initial),stream_seed(seed,'doe_fallback'),existing))
+            cap = doe_settings(config)['max_shroud_front_raise_deg']
+            predicate = None if cap is None else lambda x: shroud_front_raise_deg(config, baseline, x) <= cap + 1e-9
+            initial.extend(valid_random_samples(config, baseline, needed-len(initial),
+                                                stream_seed(seed, 'doe_fallback'), existing, predicate=predicate))
+            if cap is not None and len(initial) < needed:
+                raise RuntimeError(f'Only {len(initial)} of {needed} DOE points satisfy the configured constraints '
+                                   f'and max_shroud_front_raise_deg={cap}; no new DOE points were queued.')
         candidates = fallback_selections(initial, 'doe')
         index = next_case_index(config,df)
         pending.enqueue(config,candidates,[{'sample_phase':'doe','doe_index':index+i} for i in range(len(candidates))])
@@ -1429,7 +1552,9 @@ def _run_loop(args: argparse.Namespace, config: dict[str, Any]) -> None:
     print(f'Done. New CFD attempts: {used_new}. Failed outcomes: {failures}. Awaiting review: {len(reviews)}. '
           f'Pareto rows: {len(front)}. Output: {out}')
     if reviews:
-        print(f"Awaiting manual review (not training labels yet): {', '.join(reviews)}. "
+        use = ('provisional training labels' if 'review' in refinement.label_statuses(config)
+               else 'not training labels yet')
+        print(f"Awaiting manual review ({use}; never in the Pareto fronts until accepted): {', '.join(reviews)}. "
               "Inspect each case, then run: review --run-id <case> --accept \"reason\" | --reject \"reason\"")
     if failures:
         raise SystemExit(1)
@@ -1471,6 +1596,7 @@ def refinement_command(args: argparse.Namespace) -> None:
         output_dir(config).mkdir(parents=True, exist_ok=True)
         report.to_csv(output_dir(config) / 'training_slice_audit.csv', index=False)
         print(json.dumps({'history_successes':len(history), 'same_slice_successes':len(local),
+                          'provisional_review_labels':int(history.status.ne('success').sum()),
                           'rows_from_other_inputs':other_inputs,
                           'gate':refinement.write_diagnostics(config)}, indent=2))
     elif args.command == 'write-boundary-plan':
@@ -1583,7 +1709,8 @@ def build_parser() -> argparse.ArgumentParser:
     review.add_argument("--run-id", help="The result to decide on; omit to list results awaiting review.")
     decision = review.add_mutually_exclusive_group()
     decision.add_argument("--accept", type=_reason, metavar="REASON",
-                          help="Accept it as a training label; the reason is recorded in review_decisions.json.")
+                          help="Accept it as a result (Pareto fronts and accepted training); the reason is "
+                               "recorded in review_decisions.json.")
     decision.add_argument("--reject", type=_reason, metavar="REASON", help="Reject it; it is recorded as failed.")
     review.set_defaults(func=review_command)
     retry = sub.add_parser('retry-interrupted', help='Confirm an old stopped case for recomputation on --resume.')

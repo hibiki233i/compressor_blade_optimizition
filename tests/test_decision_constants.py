@@ -17,6 +17,7 @@ import blade_shape_convergence as convergence
 import blade_shape_refinement as refinement
 from blade_shape_signature import physical_signature
 from blade_shape_runtime import SEED_STREAMS, stream_seed
+from tests import legacy_box
 from tests.test_gui import PYSIDE_AVAILABLE, ProjectFixture
 
 HAS_SCIPY = importlib.util.find_spec('scipy') is not None
@@ -35,7 +36,7 @@ class Outcome:
 
 
 def synthetic_config(root: Path) -> dict:
-    config = json.loads(Path('blade_shape_config.json').read_text())
+    config = legacy_box.pin(json.loads(Path('blade_shape_config.json').read_text()))
     config['paths']['output_dir'] = str(root)
     config['surrogate']['model'] = 'rbf'
     names = b.variable_names(config)
@@ -90,7 +91,7 @@ class SeedStreamTests(unittest.TestCase):
         seed, it = 42, 5
         expected = {'doe_fallback': seed+1000, 'surrogate': seed+it, 'nsga2': seed+it*17,
                     'candidate_pool': seed+it*31, 'pool_global': seed+1, 'fallback_random': seed+it*97,
-                    'ehvi_normals': seed+707, 'write_candidate': seed+it+100}
+                    'ehvi_normals': seed+707, 'write_candidate': seed+it+100, 'doe_lhs': seed+5000+it*7919}
         self.assertEqual(set(SEED_STREAMS), set(expected))
         index = {'doe_fallback': 0, 'pool_global': 0, 'ehvi_normals': 0}
         for name, value in expected.items():

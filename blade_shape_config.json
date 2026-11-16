@@ -21,8 +21,9 @@
   "cfx_review": {
     "mode": "residual_limit",
     "history_window": 200,
-    "rms_limit": 0.0001,
-    "max_equations_above_target": 3
+    "rms_limit": 0.001,
+    "max_equations_above_target": 3,
+    "auto_accept_rms": 0.0001
   },
   "runtime": {
     "cfx_cores": 8,
@@ -31,7 +32,7 @@
     "rpm": 10000.0,
     "mass_flow": 0.0036,
     "alpha0": 21.8,
-    "initial_samples": 40,
+    "initial_samples": 24,
     "iterations": 10,
     "batch_size": 3,
     "candidate_pool_size": 600,
@@ -40,11 +41,18 @@
     "seed": 42,
     "max_new_cfd": 10
   },
+  "doe": {
+    "include_baseline": true,
+    "lhs_designs": 100,
+    "max_shroud_front_raise_deg": 2.5
+  },
   "surrogate": {
     "model": "gp",
     "fallback_model": "rbf_ridge_ensemble",
     "ehvi_y_samples": 256,
-    "ehvi_validation_samples": 1024
+    "ehvi_validation_samples": 1024,
+    "train_on_review": true,
+    "review_noise_tol": 2.0
   },
   "pareto": {
     "use_engineering_tolerance": true,
@@ -54,8 +62,8 @@
     }
   },
   "constraints": {
-    "max_beta_offset_deg": 6.0,
-    "max_theta_offset_deg": 1.5,
+    "max_beta_offset_deg": 9.0,
+    "max_theta_offset_deg": 3.0,
     "max_generated_beta_step_deg": 6.0,
     "baseline_step_margin_deg": 0.5,
     "duplicate_distance_norm": 0.02
@@ -63,58 +71,58 @@
   "variables": [
     {
       "name": "hub_beta_0_deg_offset",
-      "lower": -3.0,
-      "upper": 4.0
+      "lower": -6.0,
+      "upper": 6.0
     },
     {
       "name": "hub_beta_1_deg_offset",
-      "lower": -3.5,
-      "upper": 2.0
+      "lower": -14.0,
+      "upper": 14.0
     },
     {
       "name": "hub_beta_2_deg_offset",
-      "lower": -3.5,
-      "upper": 3.0
+      "lower": -16.0,
+      "upper": 16.0
     },
     {
       "name": "hub_beta_3_deg_offset",
-      "lower": -4.0,
-      "upper": 2.5
+      "lower": -14.0,
+      "upper": 3.7
     },
     {
       "name": "hub_beta_4_deg_offset",
-      "lower": -2.5,
-      "upper": 4.5
+      "lower": -3.5,
+      "upper": 6.0
     },
     {
       "name": "shroud_beta_0_deg_offset",
-      "lower": -4.0,
-      "upper": 3.0
+      "lower": -6.0,
+      "upper": 6.0
     },
     {
       "name": "shroud_beta_1_deg_offset",
-      "lower": -3.0,
-      "upper": 3.0
+      "lower": -14.0,
+      "upper": 14.0
     },
     {
       "name": "shroud_beta_2_deg_offset",
-      "lower": -3.0,
-      "upper": 3.0
+      "lower": -16.0,
+      "upper": 16.0
     },
     {
       "name": "shroud_beta_3_deg_offset",
-      "lower": -3.0,
-      "upper": 3.5
+      "lower": -14.0,
+      "upper": 14.0
     },
     {
       "name": "shroud_beta_4_deg_offset",
-      "lower": -4.5,
-      "upper": 2.0
+      "lower": -6.0,
+      "upper": 6.0
     },
     {
       "name": "hub_theta_deg_offset",
-      "lower": -1.5,
-      "upper": 1.5
+      "lower": -3.0,
+      "upper": 3.0
     },
     {
       "name": "shroud_theta_deg_offset",
@@ -125,18 +133,18 @@
   "search": {
     "active_variables": [
       "hub_beta_0_deg_offset",
+      "hub_beta_1_deg_offset",
+      "hub_beta_2_deg_offset",
       "hub_beta_3_deg_offset",
       "hub_beta_4_deg_offset",
       "shroud_beta_0_deg_offset",
+      "shroud_beta_1_deg_offset",
       "shroud_beta_2_deg_offset",
       "shroud_beta_3_deg_offset",
+      "shroud_beta_4_deg_offset",
       "hub_theta_deg_offset"
     ],
     "fixed_variables": {
-      "hub_beta_1_deg_offset": 0.0,
-      "hub_beta_2_deg_offset": 0.0,
-      "shroud_beta_1_deg_offset": 0.0,
-      "shroud_beta_4_deg_offset": 0.0,
       "shroud_theta_deg_offset": 0.0
     },
     "slice_tolerance_norm": 1e-08
@@ -161,7 +169,7 @@
     ],
     "extension": {
       "variable": "hub_beta_4_deg_offset",
-      "value": 5.0
+      "value": 7.0
     },
     "boundary_levels": {
       "hub_beta_4_deg_offset": {

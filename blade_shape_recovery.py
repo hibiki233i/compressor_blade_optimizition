@@ -208,6 +208,9 @@ def validate_completed(config: dict, run_id: str) -> tuple[Path, dict, dict]:
     evidence = review_evidence(report, cp, rp)
     if not report['iteration_limit_reached'] or evidence is None:
         raise ValueError('The final solve does not qualify for review under this policy.')
+    # A recorded failure that is reassessed always goes to a person, even when its
+    # residuals would now be auto-accepted: the policy applies when a run is solved.
+    evidence['auto_accepted'] = False
     return case, state, {'convergence': report, 'review': evidence}
 
 

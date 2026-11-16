@@ -8,11 +8,12 @@ import blade_shape_active_learning as b
 import blade_shape_refinement as r
 import blade_shape_cfx_runner as cfx
 from tests.cfx_output_samples import output as cfx_output
+from tests import legacy_box
 
 class ReliabilityTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup);self.out=Path(self.tmp.name)
-        self.c=json.loads(Path('blade_shape_config.json').read_text())
+        self.c=legacy_box.pin(json.loads(Path('blade_shape_config.json').read_text()),frozen=True)
         self.c['paths']['output_dir']=str(self.out)
         self.c['paths']['cft_batch_template']=str(Path('tests/fixtures/synthetic_meanline.cft-batch').resolve())
         self.c['paths']['powershell_exe']=str(self.out/'missing_powershell')
